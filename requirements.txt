@@ -1,0 +1,27 @@
+# 浏览器自动化 (CDP 接管, 不用 launch())
+playwright
+# Web UI
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+websockets
+# 数据层
+sqlalchemy>=2
+pydantic>=2
+# 日志 + 重试
+loguru
+tenacity
+# 验证码
+ddddocr
+opencv-python-headless
+numpy
+# 工具
+httpx
+python-dotenv
+# 多平台录制 (platform.yaml)
+pyyaml
+jsonpath-ng
+selectolax
+# LLM 字段映射 (录制时 + 失败兜底)
+anthropic

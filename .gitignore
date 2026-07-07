@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+.env
+
+# 运行时数据 (目录结构保留, 内容忽略)
+data/*
+!data/.gitkeep
+
+# 规则暂存目录 (已按需拆分到对应位置)
+claude-rules/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp

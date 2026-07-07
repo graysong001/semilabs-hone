@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semilabs-hone"
+version = "0.1.0"
+description = "内容工厂 — 多平台内容素材采集与分析系统"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "playwright",
+    "fastapi",
+    "uvicorn[standard]",
+    "jinja2",
+    "python-multipart",
+    "websockets",
+    "sqlalchemy>=2",
+    "pydantic>=2",
+    "loguru",
+    "tenacity",
+    "ddddocr",
+    "opencv-python-headless",
+    "numpy",
+    "httpx",
+    "python-dotenv",
+    "pyyaml",
+    "jsonpath-ng",
+    "selectolax",
+    "anthropic",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[project.scripts]
+semilabs = "semilabs_hone.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["semilabs_hone*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
