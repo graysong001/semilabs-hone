@@ -7,6 +7,12 @@
 
 完整设计见 [docs/skim_design.md](docs/skim_design.md)。
 
+## 研发进展（跨会话必读）
+
+- [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) — 项目宪法：身份/硬约束/裁决/import 约定/会话启动协议。**每次开新会话先读此文件**。
+- [docs/DEV_PLAN.md](docs/DEV_PLAN.md) — 12 个开发模块的进度表 + 依赖 DAG + 续接协议。选模块、查状态在此。
+- [docs/modules/](docs/modules/) — 每模块独立 spec（范围/接口契约/任务清单/验收），单会话加载开发。
+
 ## 快速开始
 
 ```bash

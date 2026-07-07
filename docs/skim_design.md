@@ -2,6 +2,8 @@
 
 > 项目名 **semilabs-hone**（内容工厂）。本文档对 `skim.spec` 做架构级 review，并把整套设计定位为**多平台可扩展的内容工厂单体仓库**：信息采集（`modules/collection/`，UI 展示名 "Skim"）是第一个模块，后续扩展 `modules/analysis/`（AI 分析）、`modules/production/`（制作）、`modules/operations/`（运营）。本文档只到设计，不含实现代码。
 
+> **实施已切分为 12 个独立开发模块**，便于单会话按模块细化开发、控制上下文。跨会话先读 [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)，查 [DEV_PLAN.md](DEV_PLAN.md) 选模块，读 `modules/NN-*.md` 看 spec。
+
 ---
 
 ## Context（背景与动机）
