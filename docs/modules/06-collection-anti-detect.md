@@ -1,6 +1,6 @@
 # DM-06 采集-反检测（collection/anti_detect）
 
-> 状态：⬜ 未开始　|　依赖：DM-05　|　设计依据：skim_design.md §4.4、§5、§4.3
+> 状态：✅ 已完成　|　依赖：DM-05　|　设计依据：skim_design.md §4.4、§5、§4.3
 
 ## 范围
 - `semilabs_hone/modules/collection/anti_detect/stealth.py`
@@ -55,12 +55,12 @@ async def get_ua(ctx, account) -> str
 - ✅ `apply_fingerprint` 不设 UA（UA 由 `get_ua` 真实读取，不覆盖）。
 
 ## 任务清单
-- [ ] `stealth.py`：NOISE_ONLY_SCRIPT（Canvas+Audio 微噪声）+ inject_noise
-- [ ] `human_behavior.py`：human_type/human_click（贝塞尔）/random_scroll/random_browse/generate_slide_track
-- [ ] `fingerprint.py`：Fingerprint + assign/load/apply
-- [ ] `ua_pool.py`：get_ua（real 默认 + variety 远程抓取缓存）
-- [ ] accounts 表写回指纹（assign 时 update，配合 DM-02）
-- [ ] 单测 `tests/collection/test_human_behavior.py`：轨迹长度/延迟区间；`test_fingerprint.py`：固定性
+- [x] `stealth.py`：NOISE_ONLY_SCRIPT（Canvas+Audio 微噪声）+ inject_noise
+- [x] `human_behavior.py`：human_type/human_click（贝塞尔）/random_scroll/random_browse/generate_slide_track
+- [x] `fingerprint.py`：Fingerprint + assign/load/apply
+- [x] `ua_pool.py`：get_ua（real 默认 + variety 远程抓取缓存）
+- [x] accounts 表写回指纹（assign 时 update，配合 DM-02）
+- [x] 单测 `tests/collection/test_human_behavior.py`：轨迹长度/延迟区间；`test_fingerprint.py`：固定性
 
 ## 验收
 - 注入噪声后，Canvas `toDataURL()` 两次结果不同；`navigator.webdriver` 仍 undefined；WebGL `getParameter` 返回真实 GPU。
@@ -68,4 +68,6 @@ async def get_ua(ctx, account) -> str
 - `get_ua` 返回值 = 本机真实 Chrome UA。
 
 ## 实施记录
-- （待填）
+- ✅ 完成 stealth/human_behavior/fingerprint/ua_pool + 两模块自测
+- loop_gate.sh 连续两次全绿（约束 linter + 全量 pytest）
+- commit: (待生成)
