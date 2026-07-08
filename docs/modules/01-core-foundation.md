@@ -1,6 +1,6 @@
 # DM-01 core 基座（config / utils / 异常层级）
 
-> 状态：⬜ 未开始　|　依赖：—　|　设计依据：skim_design.md §2、§11、§13.3、config.py
+> 状态：✅ 完成　|　依赖：—　|　设计依据：skim_design.md §2、§11、§13.3、config.py
 
 ## 范围
 - `config.py`（已存在 stub，本模块补全/校准）
@@ -55,4 +55,4 @@ def get_logger(name: str) -> Logger  # 模块取 logger
 - `pytest tests/core/test_retry.py` 绿。
 
 ## 实施记录
-- （待填）
+- DM-01 实现完成: `retry.py`（SkimError 基类+13子类+category/fix_hint，scraper_retry/rate_limit_retry 装饰器），`logger.py`（loguru 控制台+data/logs 轮转），`config.py` 已校准无需改动，`tests/core/test_retry.py` 45 测例全绿。`loop_gate.sh` 退出 0。
