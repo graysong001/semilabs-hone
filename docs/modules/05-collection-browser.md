@@ -1,6 +1,6 @@
 # DM-05 采集-浏览器进程（collection/browser）
 
-> 状态：⬜ 未开始　|　依赖：DM-01, DM-03　|　设计依据：skim_design.md §1、§3、§4
+> 状态：🔄 代码完成待人工验　|　依赖：DM-01, DM-03　|　设计依据：skim_design.md §1、§3、§4
 
 ## 范围
 - `semilabs_hone/modules/collection/browser/cdp.py`
@@ -51,13 +51,13 @@ def main(argv=None) -> int
 - ✅ 空闲超时 `WORKER_IDLE_TIMEOUT`(600s) 自动退出，按需重启。
 
 ## 任务清单
-- [ ] `cdp.py`：launch_real_chrome（仅两参数）+ attach + find_free_port
-- [ ] `profile.py`：profile_dir_for + ensure_profile
-- [ ] `launchagent.py`：plist 模板（MVP 不启用，仅生成）
-- [ ] `worker_main.py`：拉起→attach→（hook 注入 stealth/handlers）→serve_worker
+- [x] `cdp.py`：launch_real_chrome（仅两参数）+ attach + find_free_port
+- [x] `profile.py`：profile_dir_for + ensure_profile
+- [x] `launchagent.py`：plist 模板（MVP 不启用，仅生成）
+- [x] `worker_main.py`：拉起→attach→（hook 注入 stealth/handlers）→serve_worker
 - [ ] CLI `worker --module collection` 调 worker_main.main（见 cli.py TODO）
 - [ ] 反检测自检脚本：attach 后 `page.evaluate("navigator.userAgent")` + `navigator.webdriver`，断言 undefined
-- [ ] 单测 `tests/collection/test_cdp.py`：find_free_port、port 冲突逻辑（mock subprocess）
+- [x] 单测 `tests/collection/test_cdp.py`：find_free_port、port 冲突逻辑（mock subprocess）
 
 ## 验收
 - `python -m semilabs_hone worker --module collection --account 1` 能拉起真 Chrome、attach 成功、跑空 IPC 主循环。
@@ -68,4 +68,7 @@ def main(argv=None) -> int
 - 本模块给 DM-06（stealth 注入）和 DM-11（handlers）留 hook：`worker_main` 在 attach 后调 `anti_detect.stealth.inject_noise(ctx)`、在 serve_worker 前注册 `handlers.build_registry()`。这两个模块未就绪时用 no-op stub，不阻塞本模块验收。
 
 ## 实施记录
-- （待填）
+- 代码 + mock 单测完成，约束 linter 通过，loop_gate.sh 连续两次 exit 0
+- 真 Chrome 验收（扫码 + navigator.webdriver 验证）待人工
+- DM-06 (stealth) / DM-11 (handlers) 留 hook，try/except 惰性 import + no-op 兜底
+- 测试覆盖：launch args 白名单、find_free_port 端口递增/复用、profile 路径、worker 优雅失败
