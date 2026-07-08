@@ -14,6 +14,6 @@ echo "=== 1/2 约束 linter (check_constraints.py) ==="
 python3 scripts/check_constraints.py
 
 echo "=== 2/2 全量回归 pytest ==="
-pytest -q
+python3 -m pytest -q
 
 echo "✅ loop_gate 全过: 约束 + 全量测试均绿"

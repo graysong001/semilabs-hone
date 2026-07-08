@@ -1,0 +1,29 @@
+{
+  "data": {
+    "items": [
+      {
+        "note": {
+          "note_id": "64abc123def456",
+          "title": "手冲咖啡入门指南",
+          "desc": "详解手冲咖啡的水温、研磨度与注水手法，新手友好。",
+          "type": "normal",
+          "user": {"nickname": "咖啡爱好者", "user_id": "u_001"},
+          "interact_info": {
+            "liked_count": "1234",
+            "collected_count": "567",
+            "comment_count": "89",
+            "share_count": "12"
+          },
+          "image_list": [
+            {"url": "https://sns-img.example.com/img1.jpg"},
+            {"url": "https://sns-img.example.com/img2.jpg"}
+          ],
+          "tag_list": [{"name": "咖啡"}, {"name": "手冲"}],
+          "time": 1700000000000,
+          "last_update_time": 1700000000000
+        }
+      }
+    ]
+  },
+  "success": true
+}

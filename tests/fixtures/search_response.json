@@ -1,0 +1,26 @@
+{
+  "data": {
+    "items": [
+      {
+        "note_id": "64abc123def456",
+        "display_title": "手冲咖啡入门指南",
+        "type": "normal",
+        "user": {"nickname": "咖啡爱好者", "user_id": "u_001"},
+        "interact_info": {"liked_count": "1234", "collected_count": "567", "comment_count": "89"},
+        "cover": {"url": "https://sns-img.example.com/cover1.jpg"},
+        "image_list": [{"url": "https://sns-img.example.com/img1.jpg"}]
+      },
+      {
+        "note_id": "64def789abc012",
+        "display_title": "拉花技巧分享",
+        "type": "video",
+        "user": {"nickname": "咖啡师小王", "user_id": "u_002"},
+        "interact_info": {"liked_count": "5678", "collected_count": "890", "comment_count": "120"},
+        "cover": {"url": "https://sns-img.example.com/cover2.jpg"},
+        "image_list": []
+      }
+    ],
+    "has_more": true
+  },
+  "success": true
+}

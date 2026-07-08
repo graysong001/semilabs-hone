@@ -44,3 +44,12 @@ include = ["semilabs_hone*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["semilabs_hone"]
+omit = ["*/tests/*"]

@@ -37,8 +37,11 @@
 - 用于 test_field_extract / test_api_parser / test_llm_mapper。
 
 ## 任务清单
-- [ ] tests/conftest.py：公共 fixture（tmp data dir、in-memory db、mock anthropic）
-- [ ] 三份 fixtures JSON（从真 XHS 响应脱敏）
+- [x] tests/conftest.py：公共 fixture（tmp_data_dir / db_session(importorskip) / load_fixture / fixtures_dir）
+- [x] 三份 fixtures JSON（XHS 搜索/feed/评论样本，脱敏）
+- [x] 契约测试骨架：tests/core/test_contract_core.py（DM-01..04）+ tests/collection/test_contract_collection.py（DM-05..11），importorskip 未建则 skip
+- [x] pyproject [tool.pytest.ini_options] + [tool.coverage]
+- [x] tests/README.md
 - [ ] 随各 DM 落地补对应 test_*.py（见上表）
 - [ ] CI 本地命令：`pytest -q`（覆盖率 `pytest --cov=semilabs_hone --cov-fail-under=85`，核心模块）
 

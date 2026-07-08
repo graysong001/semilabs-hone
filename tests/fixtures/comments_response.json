@@ -1,0 +1,25 @@
+{
+  "data": {
+    "comments": [
+      {
+        "id": "cmt_001",
+        "user": {"nickname": "路人甲", "user_id": "u_002"},
+        "content": "学到了，谢谢分享！",
+        "like_count": "23",
+        "sub_comment_count": "2",
+        "create_time": 1700001000000
+      },
+      {
+        "id": "cmt_002",
+        "user": {"nickname": "路人乙", "user_id": "u_003"},
+        "content": "水温多少合适？",
+        "like_count": "5",
+        "sub_comment_count": "0",
+        "create_time": 1700001100000
+      }
+    ],
+    "has_more": false,
+    "cursor": ""
+  },
+  "success": true
+}
