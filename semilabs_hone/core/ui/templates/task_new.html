@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Skim - 新建任务{% endblock %}
+
+{% block content %}
+<h2>新建采集任务</h2>
+
+<form hx-post="/api/tasks" hx-target="#task-result" hx-swap="innerHTML">
+  <div class="grid">
+    <label>
+      平台
+      <select name="platform" id="platform-select">
+        {% for p in platforms %}
+        <option value="{{ p }}">{{ p }}</option>
+        {% endfor %}
+        {% if not platforms %}
+        <option value="xiaohongshu">xiaohongshu</option>
+        {% endif %}
+      </select>
+    </label>
+
+    <label>
+      账号
+      <select name="account_id">
+        {% for acct in accounts %}
+        <option value="{{ acct.id }}">{{ acct.nickname or "账号#" ~ acct.id }} ({{ acct.platform }}, {{ acct.status }})</option>
+        {% endfor %}
+        {% if not accounts %}
+        <option value="0">— 请先添加账号 —</option>
+        {% endif %}
+      </select>
+    </label>
+  </div>
+
+  <label>
+    关键词（逗号分隔）
+    <input type="text" name="keywords" placeholder="例如: 旅行, 美食, 科技" required>
+  </label>
+
+  <div class="grid">
+    <label>
+      排序
+      <select name="sort">
+        <option value="general">综合</option>
+        <option value="time_descending">最新</option>
+        <option value="popularity_descending">最热</option>
+      </select>
+    </label>
+
+    <label>
+      每关键词最大笔记数
+      <input type="number" name="max_posts" value="20" min="1" max="200">
+    </label>
+  </div>
+
+  <div class="grid">
+    <label>
+      <input type="checkbox" name="download_images" checked>
+      下载图片
+    </label>
+    <label>
+      <input type="checkbox" name="collect_comments" checked>
+      采集评论
+    </label>
+  </div>
+
+  <button type="submit">开始采集</button>
+</form>
+
+<div id="task-result" class="task-result"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('htmx:afterRequest', function(evt) {
+  var result = document.getElementById('task-result');
+  if (evt.detail.successful) {
+    var data;
+    try { data = JSON.parse(evt.detail.xhr.responseText); } catch(e) { return; }
+    if (data.ok && data.task_id) {
+      result.innerHTML = '<article><p>任务已创建 (#' + data.task_id + ')，正在启动...</p>' +
+        '<p>任务状态将通过 WebSocket 实时更新。</p>' +
+        '<a href="/tasks/' + data.task_id + '" class="button">查看任务详情</a></article>';
+    } else {
+      result.innerHTML = '<article><p style="color:var(--pico-del-color)">' +
+        (data.error || '创建失败') + '</p></article>';
+    }
+  } else if (evt.detail.failed) {
+    result.innerHTML = '<article><p style="color:var(--pico-del-color)">请求失败</p></article>';
+  }
+});
+</script>
+{% endblock %}

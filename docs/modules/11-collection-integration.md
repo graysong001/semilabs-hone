@@ -1,6 +1,6 @@
 # DM-11 采集-集成（collection/handlers + routes + templates）
 
-> 状态：⬜ 未开始　|　依赖：DM-04, DM-05, DM-07, DM-09, DM-10（+ DM-08 的 platform.yaml）　|　设计依据：skim_design.md §6.3、§8.5、§9.3、§13.1、§16
+> 状态：🔄 代码完成待人工验　|　依赖：DM-04, DM-05, DM-07, DM-09, DM-10（+ DM-08 的 platform.yaml）　|　设计依据：skim_design.md §6.3、§8.5、§9.3、§13.1、§16
 
 ## 范围
 - `semilabs_hone/modules/collection/handlers.py`
@@ -55,15 +55,15 @@ WORKER_ENTRY="semilabs_hone.modules.collection.browser.worker_main"
 - WS 进度经 IPC progress 文件由 web 代广播（不直连）。
 
 ## 任务清单
-- [ ] `handlers.py`：build_registry + handler_login（三级）+ handler_validate
-- [ ] `handlers.py`：handler_scrape_task（五阶段编排 + progress + 异常分流）
-- [ ] `routes/accounts.py` + accounts.html
-- [ ] `routes/tasks.py`（平台下拉 registry + 1 running 检查 + cancel/resume）+ task_new/task_detail.html
-- [ ] `routes/posts.py` + posts/post_detail.html
-- [ ] `routes/export.py`（调 DM-10 csv_exporter）
-- [ ] manifest.py 补 ROUTES/WORKER_ENTRY
-- [ ] worker_main 接入 handlers.build_registry（DM-05 留的 hook）
-- [ ] 集成测试：扫码登录→新建任务→实时 progress→完成→浏览→导出（ skim_design.md §20 1-6）
+- [x] `handlers.py`：build_registry + handler_login（三级）+ handler_validate
+- [x] `handlers.py`：handler_scrape_task（五阶段编排 + progress + 异常分流）
+- [x] `routes/accounts.py` + accounts.html
+- [x] `routes/tasks.py`（平台下拉 registry + 1 running 检查 + cancel/resume）+ task_new/task_detail.html
+- [x] `routes/posts.py` + posts/post_detail.html
+- [x] `routes/export.py`（调 DM-10 csv_exporter）
+- [x] manifest.py 补 ROUTES/WORKER_ENTRY
+- [ ] worker_main 接入 handlers.build_registry（DM-05 留的 hook）— 已留 hook，worker_main 已有 try/except 接入
+- [ ] 集成测试：扫码登录→新建任务→实时 progress→完成→浏览→导出（ skim_design.md §20 1-6）— 端到端待人工
 
 ## 验收（=M3 全功能里程碑）
 - §20 验证方案 1-6 全通：serve→Dashboard→添加账号→扫码→新建任务→实时 progress→完成→浏览详情评论→导出 AI/Excel。
@@ -74,4 +74,6 @@ WORKER_ENTRY="semilabs_hone.modules.collection.browser.worker_main"
 - 需要 DM-08 产出的 `platforms/xiaohongshu/platform.yaml` 才能真跑 XHS；DM-08 未完成时可用 DM-07 占位 yaml 验收部分流程。
 
 ## 实施记录
-- （待填）
+- code+mock 测完成：handlers (build_registry, login/validate/scrape_task/search/detail/comments), routes (accounts/tasks/posts/export), 5 HTML templates (Jinja2+HTMX+Pico), manifest ROUTES, test_integration (10 tests, mock engine/ipc/db)
+- loop_gate.sh 连续两次 exit 0
+- 端到验(§20 1-6)待人工：扫码+真抓取+进度+导出

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Skim - 笔记 #{{ post.id }}{% endblock %}
+
+{% block content %}
+<article>
+  <header>
+    <h2>{{ post.title or "无标题" }}</h2>
+    <p><small>
+      平台: {{ post.platform }} |
+      作者: {{ post.author_name or "匿名" }} |
+      发布于: {{ post.published_at.strftime("%Y-%m-%d %H:%M") if post.published_at else "未知" }}
+    </small></p>
+  </header>
+
+  {% if post.content %}
+  <div class="post-content" style="white-space: pre-wrap; margin: 1em 0;">
+    {{ post.content[:2000] }}{{ "..." if post.content and post.content|length > 2000 else "" }}
+  </div>
+  {% endif %}
+
+  {% if post.tags %}
+  <p>
+    {% for tag in post.tags.split(",") if post.tags %}
+    <span class="badge" style="margin-right: 4px;">{{ tag.strip() }}</span>
+    {% endfor %}
+  </p>
+  {% endif %}
+
+  <div class="grid">
+    <div><strong>❤ 点赞:</strong> {{ post.likes or 0 }}</div>
+    <div><strong>⭐ 收藏:</strong> {{ post.collects or 0 }}</div>
+    <div><strong>💬 评论:</strong> {{ post.comments_count or 0 }}</div>
+    <div><strong>↗ 分享:</strong> {{ post.shares or 0 }}</div>
+  </div>
+
+  {% if post.url %}
+  <p><a href="{{ post.url }}" target="_blank" rel="noopener">查看原文</a></p>
+  {% endif %}
+</article>
+
+<!-- Comments -->
+<section>
+  <h3>评论 ({{ comments|length }})</h3>
+  {% for comment in comments %}
+  <article class="comment-item" style="margin-bottom: 0.5em;">
+    <header>
+      <strong>{{ comment.rank or "—" }}.</strong>
+      {{ comment.author_name or "匿名" }}
+      <small style="float: right;">❤ {{ comment.likes or 0 }}</small>
+    </header>
+    <p>{{ comment.content or "" }}</p>
+  </article>
+  {% else %}
+  <p style="color: var(--pico-muted-color); text-align: center;">暂无评论</p>
+  {% endfor %}
+</section>
+
+<p><a href="/posts" class="button outline">返回列表</a></p>
+{% endblock %}

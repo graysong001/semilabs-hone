@@ -14,6 +14,7 @@ Algorithm:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from pathlib import Path
 from typing import Callable
@@ -143,7 +144,21 @@ async def serve_worker(
                 _write_result(request_id, "cancelled")
                 continue
 
-            handler_result = handler(payload, progress_cb)
+            # Support both sync and async handlers
+            is_async = inspect.iscoroutinefunction(handler)
+            if is_async:
+                handler_result = await handler(payload, progress_cb)
+            else:
+                handler_result = handler(payload, progress_cb)
+
+            # Check if handler returned a dict with its own status (e.g. "paused")
+            if isinstance(handler_result, dict) and "status" in handler_result:
+                _write_result(
+                    request_id,
+                    handler_result["status"],
+                    data={k: v for k, v in handler_result.items() if k != "status"},
+                )
+                continue
 
             # Check cancel after handler returns
             if _is_cancelled(request_id):

@@ -44,7 +44,7 @@
 | 08 | 录制器+LLM | 🔄 | 🟡 | 05,07 | `pytest tests/collection/test_llm_mapper.py -q` | 人录制+anthropic key+真站点 | [08](modules/08-scrapers-recorder.md) |
 | 09 | 验证码+调度 | ✅ | ✅ | 05,06 | `pytest tests/collection/test_rhythm.py -q` | captcha 真样本 | [09](modules/09-collection-captcha-scheduler.md) |
 | 10 | 导出+图片磁盘 | ✅ | ✅ | 02 | `pytest tests/collection/test_csv_export.py -q` | — | [10](modules/10-collection-export-image.md) |
-| 11 | 采集-集成 | ⬜ | 🟡 | 04,05,07,09,10 | 各上游模块自动门全绿 | 扫码+真抓取端到端(§20 1-6) | [11](modules/11-collection-integration.md) |
+| 11 | 采集-集成 | 🔄 | 🟡 | 04,05,07,09,10 | `pytest tests/collection/test_integration.py -q` | 扫码+真抓取端到端(§20 1-6) | [11](modules/11-collection-integration.md) |
 | 12 | 测试 | 🔄 | ✅ | 各模块 | `pytest -q --cov=semilabs_hone --cov-fail-under=85` | — | [12](modules/12-tests.md) |
 
 > **loop 自动交付候选（✅）**：01,02,03,04,06,07,09,10,12 —— 共 9 个，loop 可全程自动标 done。

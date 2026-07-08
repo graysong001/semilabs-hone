@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Skim - 账号管理{% endblock %}
+
+{% block content %}
+<h2>账号管理</h2>
+
+<section>
+  <h3>添加账号</h3>
+  <form hx-post="/api/accounts" hx-target="#accounts-list" hx-swap="outerHTML" hx-on::after-request="this.reset()">
+    <div class="grid">
+      <label>
+        平台
+        <select name="platform">
+          {% for p in platforms %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+          {% if not platforms %}
+          <option value="xiaohongshu">xiaohongshu</option>
+          {% endif %}
+        </select>
+      </label>
+      <label>
+        昵称
+        <input type="text" name="nickname" placeholder="可选">
+      </label>
+    </div>
+    <button type="submit">添加账号</button>
+  </form>
+</section>
+
+<section>
+  <h3>导入 Cookie</h3>
+  <form hx-post="/api/accounts/import-cookies" hx-target="#accounts-list" hx-swap="outerHTML">
+    <label>
+      账号 ID
+      <input type="number" name="account_id" required>
+    </label>
+    <label>
+      Cookie JSON
+      <textarea name="cookies" rows="3" placeholder='[{"name":"...", "value":"...", "domain":"..."}]'></textarea>
+    </label>
+    <button type="submit">导入</button>
+  </form>
+</section>
+
+<section id="accounts-list">
+  <h3>账号列表 ({{ accounts|length }})</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>平台</th>
+        <th>昵称</th>
+        <th>状态</th>
+        <th>最后登录</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for acct in accounts %}
+      <tr>
+        <td>{{ acct.id }}</td>
+        <td>{{ acct.platform }}</td>
+        <td>{{ acct.nickname or "—" }}</td>
+        <td>
+          <span class="badge {{ 'active' if acct.status == 'active' else 'inactive' if acct.status == 'inactive' else 'suspended' if acct.status == 'suspended' else '' }}">
+            {{ acct.status }}
+          </span>
+        </td>
+        <td>{{ acct.last_login_at.strftime("%Y-%m-%d %H:%M") if acct.last_login_at else "—" }}</td>
+        <td>
+          <button hx-post="/api/accounts/{{ acct.id }}/login"
+                  hx-swap="none"
+                  class="secondary outline"
+                  title="登录">
+            登录
+          </button>
+          <button hx-post="/api/accounts/{{ acct.id }}/validate"
+                  hx-swap="none"
+                  class="secondary outline"
+                  title="验证">
+            验证
+          </button>
+          <button hx-delete="/api/accounts/{{ acct.id }}"
+                  hx-confirm="确定删除此账号？"
+                  hx-target="#accounts-list"
+                  hx-swap="outerHTML"
+                  class="outline"
+                  style="color: var(--pico-del-color)">
+            删除
+          </button>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="6" style="text-align: center; color: var(--pico-muted-color);">
+          暂无账号，请添加或导入。
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<!-- Notifications area -->
+<div id="notification-area" class="notification-area"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('htmx:afterRequest', function(evt) {
+  if (evt.detail.failed) {
+    showNotification('操作失败: ' + (evt.detail.xhr?.responseText || '未知错误'), 'error');
+  }
+});
+
+function showNotification(message, type) {
+  var area = document.getElementById('notification-area');
+  var div = document.createElement('div');
+  div.className = 'alert alert-' + type;
+  div.textContent = message;
+  area.appendChild(div);
+  setTimeout(function() { div.remove(); }, 5000);
+}
+</script>
+{% endblock %}

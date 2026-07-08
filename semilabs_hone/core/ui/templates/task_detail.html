@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Skim - 任务 #{{ task.id }}{% endblock %}
+
+{% block content %}
+<h2>任务 #{{ task.id }}</h2>
+
+<div class="grid">
+  <div>
+    <p><strong>平台:</strong> {{ task.platform }}</p>
+    <p><strong>状态:</strong>
+      <span class="badge
+        {{ 'active' if task.status == 'running' else '' }}
+        {{ 'success' if task.status == 'completed' else '' }}
+        {{ 'error' if task.status in ('failed', 'error') else '' }}
+        {{ 'warning' if task.status == 'paused' else '' }}">
+        {{ task.status }}
+      </span>
+    </p>
+  </div>
+  <div>
+    <p><strong>每关键词最大:</strong> {{ task.max_posts_per_keyword }}</p>
+    <p><strong>排序:</strong> {{ task.sort_type }}</p>
+  </div>
+</div>
+
+<!-- Progress -->
+<div class="progress-container">
+  <h3>进度</h3>
+  <div class="progress-bar">
+    <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+  </div>
+  <p id="progress-text">等待开始...</p>
+</div>
+
+<!-- Stats -->
+<div class="grid" id="stats-grid">
+  <div>
+    <p><strong>已抓取:</strong> <span id="posts-scraped">{{ task.posts_scraped }}</span></p>
+  </div>
+  <div>
+    <p><strong>断点索引:</strong> <span id="last-note-index">{{ task.last_note_index }}</span></p>
+  </div>
+</div>
+
+<!-- Real-time log -->
+<div class="log-container">
+  <h3>实时日志</h3>
+  <div id="task-log" class="task-log" style="max-height: 400px; overflow-y: auto; background: var(--pico-code-background); padding: 1em; border-radius: 4px; font-family: monospace; font-size: 0.85em;">
+  </div>
+</div>
+
+<!-- Notifications -->
+<div id="notification-area" class="notification-area"></div>
+
+<!-- Action buttons -->
+<div class="action-buttons" style="margin-top: 1em;">
+  {% if task.status == 'running' %}
+    <button id="btn-cancel" hx-post="/api/tasks/{{ task.id }}/cancel" hx-swap="none" class="secondary outline">
+      取消任务
+    </button>
+  {% endif %}
+
+  {% if task.status in ('failed', 'error', 'paused') %}
+    <button id="btn-resume" hx-post="/api/tasks/{{ task.id }}/resume" hx-swap="none" class="primary">
+      继续任务
+    </button>
+  {% endif %}
+
+  {% if task.status == 'completed' %}
+    <a href="/api/export?task_id={{ task.id }}&format=ai" class="button">导出 AI CSV</a>
+    <a href="/api/export?task_id={{ task.id }}&format=excel" class="button secondary">导出 Excel ZIP</a>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  var taskId = {{ task.id }};
+  var logDiv = document.getElementById('task-log');
+  var progressFill = document.getElementById('progress-fill');
+  var progressText = document.getElementById('progress-text');
+  var postsScraped = document.getElementById('posts-scraped');
+  var lastNoteIndex = document.getElementById('last-note-index');
+  var status = '{{ task.status }}';
+
+  // WS message handler
+  function handleWSMessage(data) {
+    if (data.task_id !== taskId && data.module === 'collection') return;
+
+    var timestamp = new Date().toLocaleTimeString();
+    var line = document.createElement('div');
+    line.textContent = '[' + timestamp + '] ' + (data.message || '');
+    logDiv.appendChild(line);
+    logDiv.scrollTop = logDiv.scrollHeight;
+
+    if (data.type === 'progress' && data.data) {
+      if (data.data.posts_scraped !== undefined) {
+        postsScraped.textContent = data.data.posts_scraped;
+      }
+      if (data.data.last_note_index !== undefined) {
+        lastNoteIndex.textContent = data.data.last_note_index;
+      }
+    }
+    if (data.type === 'task_completed' || data.type === 'error') {
+      progressText.textContent = data.message || '任务结束';
+      if (data.type === 'error') {
+        showNotification('任务失败: ' + (data.data && data.data.category || '未知错误'), 'error');
+      }
+    }
+  }
+
+  // Listen for WS messages from app.js
+  document.addEventListener('ws:message', function(evt) {
+    handleWSMessage(evt.detail);
+  });
+
+  // Fallback: poll progress file via HTMX
+  function pollProgress() {
+    if (status === 'running') {
+      fetch('/api/tasks/' + taskId + '/progress')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (d.message) {
+            progressText.textContent = d.message;
+          }
+        })
+        .catch(function() {});
+    }
+  }
+  setInterval(pollProgress, 3000);
+
+  function showNotification(message, type) {
+    var area = document.getElementById('notification-area');
+    var div = document.createElement('div');
+    div.className = 'alert alert-' + type;
+    div.textContent = message;
+    area.appendChild(div);
+    setTimeout(function() { div.remove(); }, 8000);
+  }
+})();
+</script>
+{% endblock %}
