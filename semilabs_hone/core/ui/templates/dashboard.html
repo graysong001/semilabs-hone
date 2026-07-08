@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - semilabs-hone{% endblock %}
+
+{% block content %}
+<h1>全局概览</h1>
+
+{% if account_count == 0 %}
+<article class="guidance-card">
+  <header>开始使用</header>
+  <p>尚未添加任何采集账号。</p>
+  <p>请先前往<strong>采集</strong>模块添加账号并登录，然后创建抓取任务。</p>
+  <footer>
+    <a href="/collection" role="button">前往采集模块</a>
+  </footer>
+</article>
+{% else %}
+<article>
+  <header>账号概览</header>
+  <p>已激活 <strong>{{ account_count }}</strong> 个采集账号。</p>
+</article>
+{% endif %}
+
+<section class="module-cards">
+  {% set mods = get_modules() %}
+  {% if mods %}
+  {% for mid, mod in mods.items() %}
+  <article class="module-card">
+    <h3>{{ mod.name }}</h3>
+    <p>模块 ID: <code>{{ mid }}</code></p>
+    {% if mod.worker_entry %}
+    <small>Worker: {{ mod.worker_entry }}</small>
+    {% endif %}
+  </article>
+  {% endfor %}
+  {% else %}
+  <p>暂无已注册模块。</p>
+  {% endif %}
+</section>
+{% endblock %}
