@@ -1,6 +1,6 @@
 # DM-07 采集-抓取引擎运行时（collection/scrapers/engine 侧）
 
-> 状态：⬜ 未开始　|　依赖：DM-05, DM-06　|　设计依据：skim_design.md §5.2、§8.1、§8.2、§8.5、§8.7、§8.8
+> 状态：✅ 已完成　|　依赖：DM-05, DM-06　|　设计依据：skim_design.md §5.2、§8.1、§8.2、§8.5、§8.7、§8.8
 
 ## 范围
 - `semilabs_hone/modules/collection/scrapers/base.py`
@@ -70,13 +70,13 @@ def get(platform: str) -> tuple[...]       # op 路由用
 - adapter 可缺省（XHS 走纯 yaml）；adapter 调 `super()` 复用 engine。
 
 ## 任务清单
-- [ ] `base.py`：ABC + schema group 常量
-- [ ] `spec.py`：PlatformSpec/Flow/Step/LoginSpec pydantic（对应 §8.2 yaml）
-- [ ] `field_extract.py`：extract_api（jsonpath-ng）+ extract_dom（selectolax）+ render_template
-- [ ] `engine.py`：run_flow（回放 step 链，人类行为+API 拦截+提取+校验+轻兜底）
-- [ ] `registry.py`：load/list/get + adapter 覆盖
-- [ ] 占位 `platforms/xiaohongshu/platform.yaml`（手写一份，供本模块验收；DM-08 录制后覆盖）
-- [ ] 单测 `tests/collection/test_field_extract.py`：JSONPath/CSS 取值、空/畸形 JSON；`test_engine.py`：mock page 跑 run_flow
+- [x] `base.py`：ABC + schema group 常量
+- [x] `spec.py`：PlatformSpec/Flow/Step/LoginSpec pydantic（对应 §8.2 yaml）
+- [x] `field_extract.py`：extract_api（jsonpath-ng）+ extract_dom（selectolax）+ render_template
+- [x] `engine.py`：run_flow（回放 step 链，人类行为+API 拦截+提取+校验+轻兜底）
+- [x] `registry.py`：load/list/get + adapter 覆盖
+- [x] 占位 `platforms/xiaohongshu/platform.yaml`（手写一份，供本模块验收；DM-08 录制后覆盖）
+- [x] 单测 `tests/collection/test_field_extract.py`：JSONPath/CSS 取值、空/畸形 JSON；`test_engine.py`：mock page 跑 run_flow
 
 ## 验收
 - 用占位 XHS platform.yaml + mock page，`engine.search("咖啡","general")` 返回 list[ItemRef]。
@@ -84,4 +84,4 @@ def get(platform: str) -> tuple[...]       # op 路由用
 - `registry.list_platforms()` 含 xiaohongshu。
 
 ## 实施记录
-- （待填）
+- 实现了 base.py (ABC + group 常量), spec.py (PlatformSpec/Flow/Step/LoginSpec), field_extract.py (extract_api/extract_dom/render_template), engine.py (GenericEngine + run_flow + 轻LLLM兜底), registry.py (load/list/get), XHS 占位 platform.yaml。31 个单测全绿 (契约测试 + field_extract + engine)，loop_gate.sh 连续两次通过。

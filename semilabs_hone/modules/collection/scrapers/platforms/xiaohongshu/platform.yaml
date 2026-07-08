@@ -1,0 +1,78 @@
+platform: xiaohongshu
+display_name: 小红书
+base_url: https://www.xiaohongshu.com
+
+login:
+  type: qrcode
+  login_url: /login
+  success_detect: url_change
+  success_pattern: "^/"
+  timeout: 120
+
+flows:
+  search:
+    steps:
+      - type: navigate
+        url: "/search_result?keyword={keyword}&source=web_search_result_notes"
+      - type: wait_xhr
+        url_pattern: "/api/sns/web/v1/search/notes"
+        method: POST
+        save_as: search_resp
+        timeout_ms: 15000
+      - type: extract
+        from: search_resp
+        group: ItemRef
+        map:
+          item_id: "$.note_id"
+          title: "$.display_title"
+          author_name: "$.user.nickname"
+          likes: "$.interact_info.liked_count"
+
+  detail:
+    steps:
+      - type: navigate
+        url: "/explore/{item_id}"
+      - type: wait_xhr
+        url_pattern: "/api/sns/web/v1/feed"
+        method: POST
+        save_as: feed_resp
+        timeout_ms: 15000
+      - type: extract
+        from: feed_resp
+        group: Post.body
+        map:
+          platform_id: "$.note.note_id"
+          title: "$.note.title"
+          content: "$.note.desc"
+          author_name: "$.note.user.nickname"
+          post_type: "$.note.type"
+          published_at: "$.note.time"
+      - type: extract
+        from: feed_resp
+        group: Post.interactions
+        map:
+          likes: "$.note.interact_info.liked_count"
+          collects: "$.note.interact_info.collected_count"
+          comments_count: "$.note.interact_info.comment_count"
+          shares: "$.note.interact_info.share_count"
+
+  comments:
+    steps:
+      - type: wait_xhr
+        url_pattern: "/api/sns/web/v2/comment/page"
+        method: GET
+        save_as: cmt_resp
+        timeout_ms: 15000
+      - type: extract
+        from: cmt_resp
+        group: Comments
+        map:
+          platform_id: "$.id"
+          author_name: "$.user.nickname"
+          content: "$.content"
+          likes: "$.like_count"
+
+sort_values:
+  general: general
+  time_descending: time_descending
+  popularity_descending: popularity_descending
