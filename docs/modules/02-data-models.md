@@ -1,6 +1,6 @@
 # DM-02 数据模型（models / schemas）
 
-> 状态：⬜ 未开始　|　依赖：DM-01　|　设计依据：skim_design.md §7、§13.3、spec §4
+> 状态：✅ 已完成　|　依赖：DM-01　|　设计依据：skim_design.md §7、§13.3、spec §4
 
 ## 范围
 - `semilabs_hone/core/models/db.py`
@@ -38,15 +38,15 @@ def get_session() -> Session         # 会话工厂
 - ORM 与 Pydantic 分离：engine 输出 `ScrapedPost`，handlers 负责转 ORM upsert。
 
 ## 任务清单
-- [ ] `db.py`：Engine + init_db + get_session
-- [ ] 6 张 ORM 表（含 §7.1/7.2 补字段）
-- [ ] `schemas.py`：AccountCreate/TaskCreate/ProgressMessage/ItemRef/ScrapedPost/ScrapedComment
-- [ ] `init_db()` 跑通，生成 data/factory.db
-- [ ] 单测 `tests/core/test_models.py`：默认值、upsert 二次更新、task 生命周期、resume 保留 last_note_index
+- [x] `db.py`：Engine + init_db + get_session
+- [x] 6 张 ORM 表（含 §7.1/7.2 补字段）
+- [x] `schemas.py`：AccountCreate/TaskCreate/ProgressMessage/ItemRef/ScrapedPost/ScrapedComment
+- [x] `init_db()` 跑通，生成 data/factory.db
+- [x] 单测 `tests/core/test_models.py`：默认值、upsert 二次更新、task 生命周期、resume 保留 last_note_index
 
 ## 验收
 - `python -c "from semilabs_hone.core.models.db import init_db; init_db()"` 生成 db。
 - `pytest tests/core/test_models.py` 绿。
 
 ## 实施记录
-- （待填）
+- DM-02: 完成 6 张 ORM 表 + Pydantic schemas + 24 个单测。loop_gate.sh 退出 0。commit: (待提交)

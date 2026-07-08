@@ -35,7 +35,7 @@
 | DM | 模块 | 状态 | 可自动交付 | 依赖 | 自动门命令 | 人工门 | spec |
 |----|------|------|:-:|------|-----------|--------|------|
 | 01 | core 基座 | ✅ | ✅ | — | `pytest tests/core/test_retry.py -q` | — | [01](modules/01-core-foundation.md) |
-| 02 | 数据模型 | ⬜ | ✅ | 01 | `pytest tests/core/test_models.py -q` | — | [02](modules/02-data-models.md) |
+| 02 | 数据模型 | ✅ | ✅ | 01 | `pytest tests/core/test_models.py -q` | — | [02](modules/02-data-models.md) |
 | 03 | IPC 总线 | ⬜ | ✅ | 01 | `pytest tests/core/test_ipc.py -q` | — | [03](modules/03-ipc-bus.md) |
 | 04 | Web 外壳 | ⬜ | ✅ | 02,03 | `pytest tests/core/test_routes.py -q` | serve 起+人看渲染 | [04](modules/04-web-shell.md) |
 | 05 | 采集-浏览器 | ⬜ | 🟡 | 01,03 | `pytest tests/collection/test_cdp.py -q` | 真 Chrome+扫码+navigator.webdriver | [05](modules/05-collection-browser.md) |
