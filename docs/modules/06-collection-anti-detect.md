@@ -70,4 +70,4 @@ async def get_ua(ctx, account) -> str
 ## 实施记录
 - ✅ 完成 stealth/human_behavior/fingerprint/ua_pool + 两模块自测
 - loop_gate.sh 连续两次全绿（约束 linter + 全量 pytest）
-- commit: (待生成)
+- commit: aa28dae
