@@ -49,4 +49,4 @@ def get_session() -> Session         # 会话工厂
 - `pytest tests/core/test_models.py` 绿。
 
 ## 实施记录
-- DM-02: 完成 6 张 ORM 表 + Pydantic schemas + 24 个单测。loop_gate.sh 退出 0。commit: (待提交)
+- DM-02: 完成 6 张 ORM 表 + Pydantic schemas + 24 个单测。修复测试隔离 (lazy engine + conftest DB_URL 补丁)。loop_gate.sh 连续 3 次退出 0。commit: (待提交)

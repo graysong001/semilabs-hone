@@ -3,13 +3,15 @@
 Covers: default values, upsert, task lifecycle, resume last_note_index,
         ProgressMessage data field.
 Naming: test_<method>_<scenario>_<expected>.
+
+Uses conftest `db_session` fixture (temp DB via tmp_data_dir) for isolation.
 """
 import pytest
-from sqlalchemy import insert, update, select
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from datetime import datetime, timezone
 
-from semilabs_hone.core.models.db import Engine, Base, init_db, get_session
+from semilabs_hone.core.models.db import Base, init_db, get_session
 from semilabs_hone.core.models.account import Account
 from semilabs_hone.core.models.keyword import Keyword
 from semilabs_hone.core.models.task import ScrapeTask, TaskKeyword
@@ -24,21 +26,14 @@ from semilabs_hone.core.models.schemas import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True, scope="module")
-def _init_tables():
-    """Ensure tables exist before any test runs."""
-    init_db()
-
-
 @pytest.fixture()
-def session():
-    """Provide a session that rolls back after each test (no side effects)."""
-    s = get_session()
+def session(db_session):
+    """Wrap conftest db_session with rollback-after-test for isolation."""
     try:
-        yield s
+        yield db_session
     finally:
-        s.rollback()
-        s.close()
+        db_session.rollback()
+        db_session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +86,7 @@ class TestAccountDefaults:
 
 class TestKeywordDefaults:
     def test_keyword_create_defaults_platform(self, session):
-        kw = Keyword(text="test_kw")
+        kw = Keyword(text="kw_defaults_01")
         session.add(kw)
         session.commit()
         assert kw.platform == "xiaohongshu"

@@ -21,6 +21,7 @@ def tmp_data_dir(tmp_path, monkeypatch):
         import config  # noqa: F401  (repo 根在 sys.path)
         monkeypatch.setattr(config, "DATA_DIR", data, raising=False)
         monkeypatch.setattr(config, "DB_PATH", data / "factory.db", raising=False)
+        monkeypatch.setattr(config, "DB_URL", f"sqlite:///{data}/factory.db", raising=False)
         monkeypatch.setattr(config, "IPC_ROOT", data / "ipc", raising=False)
     except Exception:
         pass
@@ -31,6 +32,7 @@ def tmp_data_dir(tmp_path, monkeypatch):
 def db_session(tmp_data_dir):
     """临时 SQLite 会话; db 模块未建时 importorskip 本测试。"""
     db = pytest.importorskip("semilabs_hone.core.models.db")
+    db.reset_engine()  # clear any cached engine from prior imports
     db.init_db()
     return db.get_session()
 
