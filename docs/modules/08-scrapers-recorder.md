@@ -1,6 +1,6 @@
 # DM-08 采集-录制器 + LLM 映射（collection/scrapers/recorder 侧）
 
-> 状态：⬜ 未开始　|　依赖：DM-05, DM-07　|　设计依据：skim_design.md §8.3、§8.4、§19　|　**技术难点，建议单独完整会话攻坚**
+> 状态：🔄 代码完成待人工验　|　依赖：DM-05, DM-07　|　设计依据：skim_design.md §8.3、§8.4、§19　|　**技术难点，建议单独完整会话攻坚**
 
 ## 范围
 - `semilabs_hone/modules/collection/scrapers/recorder.py`
@@ -48,14 +48,14 @@ def build_platform_yaml(display_name, base_url, flows, maps) -> str
 - 点击 selector 捕获**多策略**，运行时按优先级回退降脆弱。
 
 ## 任务清单
-- [ ] `recorder.py`：CDP 事件监听（Page/Input/Network）→ step 捕获 + 多策略 selector
-- [ ] `recorder.py`：XHR 样本记录 + 启发式标注（操作时序对齐）
-- [ ] `recorder.py`：RecordingSession/Result + record_platform
-- [ ] `llm_mapper.py`：map_group（Haiku 结构化输出）+ validate_map（样本校验+重试）
-- [ ] `llm_mapper.py`：extract_custom_field + build_platform_yaml
+- [x] `recorder.py`：CDP 事件监听（Page/Input/Network）→ step 捕获 + 多策略 selector
+- [x] `recorder.py`：XHR 样本记录 + 启发式标注（操作时序对齐）
+- [x] `recorder.py`：RecordingSession/Result + record_platform
+- [x] `llm_mapper.py`：map_group（Haiku 结构化输出）+ validate_map（样本校验+重试）
+- [x] `llm_mapper.py`：extract_custom_field + build_platform_yaml
 - [ ] 端到端：录制 XHS search/detail/comments → LLM 生成 → 写 platforms/xiaohongshu/platform.yaml
 - [ ] 用 DM-07 engine 跑生成的 yaml，验证 search 返回 ItemRef
-- [ ] 单测 `tests/collection/test_llm_mapper.py`：mock anthropic，验证 map_group 结构化输出 + validate_map
+- [x] 单测 `tests/collection/test_llm_mapper.py`：mock anthropic，验证 map_group 结构化输出 + validate_map
 
 ## 验收
 - 录制 XHS 三条 flow → 生成 platform.yaml → engine 用它跑 search 拿到 ItemRef 列表（字段非空）。
@@ -68,4 +68,5 @@ def build_platform_yaml(display_name, base_url, flows, maps) -> str
 - 本模块是加站体验的关键，验收务必用一个**陌生**站点（非 XHS）验证零手写。
 
 ## 实施记录
-- （待填）
+- recorder.py + llm_mapper.py + test_llm_mapper.py 代码+mock 测完成；真录制待人工
+  commit: see git

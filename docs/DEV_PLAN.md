@@ -41,7 +41,7 @@
 | 05 | 采集-浏览器 | 🔄 | 🟡 | 01,03 | `pytest tests/collection/test_cdp.py -q` | 真 Chrome+扫码+navigator.webdriver | [05](modules/05-collection-browser.md) |
 | 06 | 采集-反检测 | ✅ | ✅ | 05 | `pytest tests/collection/test_human_behavior.py tests/collection/test_fingerprint.py -q` | 真实注入效果人看 | [06](modules/06-collection-anti-detect.md) |
 | 07 | 抓取引擎 | ✅ | ✅ | 05,06 | `pytest tests/collection/test_field_extract.py tests/collection/test_engine.py -q` | 真跑 XHR(可选) | [07](modules/07-scrapers-engine.md) |
-| 08 | 录制器+LLM | ⬜ | 🟡 | 05,07 | `pytest tests/collection/test_llm_mapper.py -q` | 人录制+anthropic key+真站点 | [08](modules/08-scrapers-recorder.md) |
+| 08 | 录制器+LLM | 🔄 | 🟡 | 05,07 | `pytest tests/collection/test_llm_mapper.py -q` | 人录制+anthropic key+真站点 | [08](modules/08-scrapers-recorder.md) |
 | 09 | 验证码+调度 | ✅ | ✅ | 05,06 | `pytest tests/collection/test_rhythm.py -q` | captcha 真样本 | [09](modules/09-collection-captcha-scheduler.md) |
 | 10 | 导出+图片磁盘 | ✅ | ✅ | 02 | `pytest tests/collection/test_csv_export.py -q` | — | [10](modules/10-collection-export-image.md) |
 | 11 | 采集-集成 | ⬜ | 🟡 | 04,05,07,09,10 | 各上游模块自动门全绿 | 扫码+真抓取端到端(§20 1-6) | [11](modules/11-collection-integration.md) |
