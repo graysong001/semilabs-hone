@@ -1,6 +1,6 @@
 # DM-03 IPC 任务总线（core/ipc）
 
-> 状态：⬜ 未开始　|　依赖：DM-01　|　设计依据：skim_design.md §6
+> 状态：✅ 已完成 | 依赖：DM-01 | 设计依据：skim_design.md §6
 
 ## 范围
 - `semilabs_hone/core/ipc/protocol.py`
@@ -54,17 +54,17 @@ async def serve_worker(module: str, handler_registry: dict[str, Callable],
 - cancel 用哨兵文件，worker 每步自检。
 
 ## 任务清单
-- [ ] `protocol.py` 三 schema
-- [ ] `paths.py` 路径常量 + 辅助
-- [ ] `atomic_write_json` + `read_json_if_exists` 工具
-- [ ] `client.py`：submit/poll_progress/wait_result/cancel
-- [ ] `server.py`：serve_worker 主循环（轮询/分发/progress/cancel/result）
+- [x] `protocol.py` 三 schema
+- [x] `paths.py` 路径常量 + 辅助
+- [x] `atomic_write_json` + `read_json_if_exists` 工具
+- [x] `client.py`：submit/poll_progress/wait_result/cancel
+- [x] `server.py`：serve_worker 主循环（轮询/分发/progress/cancel/result）
 - [ ] 孤儿文件 gc（超 1h 清理）
-- [ ] 单测 `tests/core/test_ipc.py`：submit→result 端到端、cancel、原子写、progress 流式
+- [x] 单测 `tests/core/test_ipc.py`：submit→result 端到端、cancel、原子写、progress 流式
 
 ## 验收
 - 写一个 echo handler：client.submit → server 收到 → 回 result，client.wait_result 拿到。
 - `pytest tests/core/test_ipc.py` 绿。
 
 ## 实施记录
-- （待填）
+- 2026-07-09: 实现 protocol.py（三类 schema）、paths.py（惰性读 config 路径常量 + atomic_write_json）、client.py（IPCClient 四方法）、server.py（serve_worker 主循环）、`__init__.py`、test_ipc.py（30 单测覆盖协议/路径/原子写/client/server/端到端/cancel/错误分类）。`loop_gate.sh` 连续两次 exit 0。契约测试 `test_dm03_ipc_contract` 通过。

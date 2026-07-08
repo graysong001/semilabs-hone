@@ -1,0 +1,413 @@
+"""IPC bus module tests — submit/result, cancel, atomic write, progress, error.
+
+Uses the tmp_data_dir fixture from conftest.py to isolate all file I/O.
+Naming: test_<method>_<scenario>_<expected>
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from semilabs_hone.core.ipc.protocol import IPCRequest, IPCProgress, IPCResult
+from semilabs_hone.core.ipc.paths import (
+    requests_dir,
+    results_dir,
+    progress_dir,
+    control_cancel_dir,
+    request_path,
+    result_path,
+    progress_path,
+    cancel_sentinel,
+    atomic_write_json,
+    read_json_if_exists,
+)
+from semilabs_hone.core.ipc.client import IPCClient
+from semilabs_hone.core.ipc.server import serve_worker
+
+
+# ── Protocol tests ──────────────────────────────────────────────────
+
+def test_protocol_ipc_request_model_fields():
+    """IPCRequest has all required fields and sensible defaults."""
+    req = IPCRequest(request_id="r1", module="collection", op="login")
+    assert req.request_id == "r1"
+    assert req.module == "collection"
+    assert req.op == "login"
+    assert req.account_id is None
+    assert req.payload == {}
+    assert isinstance(req.created_at, float)
+
+
+def test_protocol_ipc_progress_model_fields():
+    """IPCProgress serializes to dict and back."""
+    prog = IPCProgress(request_id="r1", message="working", data={"step": 1})
+    d = prog.model_dump()
+    assert d["request_id"] == "r1"
+    assert d["data"] == {"step": 1}
+
+
+def test_protocol_ipc_result_ok():
+    """IPCResult with status=ok."""
+    res = IPCResult(request_id="r1", status="ok", data={"count": 42})
+    assert res.status == "ok"
+    assert res.data == {"count": 42}
+    assert res.error is None
+    assert res.ws_events is None
+
+
+def test_protocol_ipc_result_error_with_category():
+    """IPCResult error includes category and fix_hint."""
+    res = IPCResult(
+        request_id="r1",
+        status="error",
+        error={"category": "PageLoadError", "message": "timeout", "fix_hint": "retry later"},
+    )
+    assert res.error["category"] == "PageLoadError"
+
+
+def test_protocol_ipc_result_status_values():
+    """IPCResult accepts all four status literals."""
+    for s in ["ok", "error", "paused", "cancelled"]:
+        r = IPCResult(request_id="x", status=s)
+        assert r.status == s
+
+
+def test_protocol_ipc_result_ws_events_field():
+    """IPCResult has ws_events field for client to broadcast."""
+    res = IPCResult(
+        request_id="r1", status="ok", ws_events=[{"type": "progress", "data": {}}]
+    )
+    assert len(res.ws_events) == 1
+
+
+# ── Paths tests ─────────────────────────────────────────────────────
+
+def test_paths_directories_exist(tmp_data_dir):
+    """requests/results/progress/control directories are accessible."""
+    assert requests_dir().exists()
+    assert results_dir().exists()
+    assert progress_dir().exists()
+    assert control_cancel_dir().exists()
+
+
+def test_paths_request_path_builds_correctly(tmp_data_dir):
+    """request_path returns the expected path."""
+    p = request_path("abc123")
+    assert p == requests_dir() / "abc123.json"
+    assert str(p).endswith("abc123.json")
+
+
+def test_paths_result_path_builds_correctly(tmp_data_dir):
+    """result_path returns the expected path."""
+    p = result_path("abc123")
+    assert p == results_dir() / "abc123.json"
+
+
+def test_paths_progress_path_builds_correctly(tmp_data_dir):
+    """progress_path returns the expected path."""
+    p = progress_path("abc123")
+    assert p == progress_dir() / "abc123.json"
+
+
+def test_paths_cancel_sentinel_builds_correctly(tmp_data_dir):
+    """cancel_sentinel returns the expected path."""
+    p = cancel_sentinel("abc123")
+    assert p == control_cancel_dir() / "abc123"
+
+
+def test_paths_lazy_reads_config(tmp_data_dir, monkeypatch):
+    """Path functions lazily read config, not frozen at import time."""
+    # tmp_data_dir already monkeypatched config.IPC_ROOT
+    # So requests_dir() should point under tmp_data_dir
+    assert "data" in str(requests_dir())
+
+
+# ── atomic_write_json tests ─────────────────────────────────────────
+
+def test_atomic_write_json_roundtrip(tmp_data_dir):
+    """Write then read returns the same data."""
+    path = requests_dir() / "test.json"
+    obj = {"request_id": "r1", "module": "test", "op": "echo"}
+    atomic_write_json(path, obj)
+    assert read_json_if_exists(path) == obj
+
+
+def test_atomic_write_json_no_partial_file(tmp_data_dir):
+    """atomic_write_json does not leave a .tmp file behind."""
+    path = results_dir() / "test.json"
+    atomic_write_json(path, {"x": 1})
+    tmp = path.with_suffix(".tmp")
+    assert not tmp.exists(), ".tmp file should not remain after atomic write"
+
+
+def test_atomic_write_json_overwrites(tmp_data_dir):
+    """Second write replaces the first atomically."""
+    path = progress_dir() / "test.json"
+    atomic_write_json(path, {"v": 1})
+    atomic_write_json(path, {"v": 2})
+    assert read_json_if_exists(path) == {"v": 2}
+
+
+def test_atomic_write_json_creates_parent_dirs(tmp_data_dir):
+    """atomic_write_json creates parent directories if missing."""
+    deep = tmp_data_dir / "ipc" / "deep" / "nested" / "test.json"
+    atomic_write_json(deep, {"k": "v"})
+    assert read_json_if_exists(deep) == {"k": "v"}
+
+
+def test_read_json_if_exists_returns_none(tmp_data_dir):
+    """read_json_if_exists returns None for missing file."""
+    assert read_json_if_exists(requests_dir() / "nonexistent.json") is None
+
+
+# ── IPCClient tests ─────────────────────────────────────────────────
+
+def test_client_submit_creates_request_file(tmp_data_dir):
+    """IPCClient.submit writes a request file and returns the id."""
+    client = IPCClient()
+    req = IPCRequest(request_id="sub1", module="collection", op="login")
+    rid = client.submit(req)
+    assert rid == "sub1"
+    assert request_path("sub1").exists()
+    data = read_json_if_exists(request_path("sub1"))
+    assert data["module"] == "collection"
+
+
+def test_client_submit_returns_request_id(tmp_data_dir):
+    """submit returns the request_id from the request."""
+    client = IPCClient()
+    req = IPCRequest(request_id="rid42", module="test", op="echo", payload={"x": 1})
+    rid = client.submit(req)
+    assert rid == "rid42"
+
+
+@pytest.mark.asyncio
+async def test_client_poll_progress_returns_none_when_no_progress(tmp_data_dir):
+    """poll_progress returns None if no progress file exists yet."""
+    client = IPCClient()
+    prog = await client.poll_progress("no_exist")
+    assert prog is None
+
+
+@pytest.mark.asyncio
+async def test_client_poll_progress_returns_data(tmp_data_dir):
+    """poll_progress reads and returns IPCProgress."""
+    atomic_write_json(
+        progress_path("pr1"),
+        IPCProgress(request_id="pr1", message="step1", data={"n": 1}).model_dump(),
+    )
+    client = IPCClient()
+    prog = await client.poll_progress("pr1")
+    assert prog is not None
+    assert prog.message == "step1"
+    assert prog.data == {"n": 1}
+
+
+@pytest.mark.asyncio
+async def test_client_wait_result_returns_ok(tmp_data_dir):
+    """wait_result polls and returns IPCResult when it appears."""
+    rid = "wr1"
+
+    # Simulate result appearing after a short delay
+    async def write_result_later():
+        await asyncio.sleep(0.3)
+        atomic_write_json(
+            result_path(rid),
+            IPCResult(request_id=rid, status="ok", data={"count": 5}).model_dump(),
+        )
+
+    asyncio.create_task(write_result_later())
+    client = IPCClient()
+    res = await client.wait_result(rid, timeout=5)
+    assert res.status == "ok"
+    assert res.data == {"count": 5}
+
+
+@pytest.mark.asyncio
+async def test_client_wait_result_timeout(tmp_data_dir):
+    """wait_result raises TimeoutError when no result appears."""
+    client = IPCClient()
+    with pytest.raises(asyncio.TimeoutError):
+        await client.wait_result("nonexistent", timeout=0.5)
+
+
+def test_client_cancel_creates_sentinel(tmp_data_dir):
+    """cancel writes a sentinel file."""
+    client = IPCClient()
+    client.cancel("c1")
+    assert cancel_sentinel("c1").exists()
+    data = read_json_if_exists(cancel_sentinel("c1"))
+    assert data["cancelled"] is True
+
+
+# ── End-to-end: submit -> handler -> result (echo) ──────────────────
+
+def _echo_handler(payload: dict, progress_cb):
+    """Simple echo handler for testing."""
+    progress_cb("echoing", {"input": payload})
+    return {"echo": payload}
+
+
+@pytest.mark.asyncio
+async def test_e2e_submit_to_result_echo(tmp_data_dir):
+    """Full cycle: client submits, server processes echo handler, client gets result."""
+    client = IPCClient()
+    req = IPCRequest(
+        request_id="e2e1", module="test_module", op="echo", payload={"msg": "hello"}
+    )
+    rid = client.submit(req)
+    assert rid == "e2e1"
+
+    # Run server briefly to pick up the request
+    handler_reg = {"echo": _echo_handler}
+    task = asyncio.create_task(
+        serve_worker("test_module", handler_reg, poll_interval=0.1)
+    )
+
+    # Give it time to process
+    await asyncio.sleep(0.5)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    res = await client.wait_result("e2e1", timeout=2)
+    assert res.status == "ok"
+    assert res.data["echo"] == {"msg": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_e2e_progress_streaming(tmp_data_dir):
+    """Handler streams progress updates visible to client."""
+    def multi_step_handler(payload: dict, progress_cb):
+        progress_cb("step 1", {"progress": 25})
+        progress_cb("step 2", {"progress": 50})
+        progress_cb("step 3", {"progress": 75})
+        progress_cb("done", {"progress": 100})
+        return {"steps": 4}
+
+    client = IPCClient()
+    req = IPCRequest(
+        request_id="e2e_prog", module="test_mod", op="multi", payload={}
+    )
+    client.submit(req)
+
+    handler_reg = {"multi": multi_step_handler}
+    task = asyncio.create_task(
+        serve_worker("test_mod", handler_reg, poll_interval=0.1)
+    )
+    await asyncio.sleep(0.5)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # Check progress was written (last overwrite)
+    prog = await client.poll_progress("e2e_prog")
+    assert prog is not None
+    assert "done" in prog.message
+
+
+# ── Cancel sentinel test ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_server_cancel_stops_processing(tmp_data_dir):
+    """When cancel sentinel exists, server writes cancelled result."""
+    client = IPCClient()
+    req = IPCRequest(
+        request_id="cancel1", module="test_mod", op="slow", payload={}
+    )
+    client.submit(req)
+
+    # Write cancel sentinel before server picks it up
+    client.cancel("cancel1")
+
+    handler_reg = {"slow": lambda p, cb: (cb("working"), time.sleep(10), {"done": True})[-1]}
+    task = asyncio.create_task(
+        serve_worker("test_mod", handler_reg, poll_interval=0.1)
+    )
+    await asyncio.sleep(0.5)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    res = await client.wait_result("cancel1", timeout=2)
+    assert res.status == "cancelled"
+
+
+# ── Error result with category/fix_hint ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_server_error_result_has_category_and_fix_hint(tmp_data_dir):
+    """Handler exception produces error result with category and fix_hint."""
+    def failing_handler(payload, progress_cb):
+        raise ValueError("something went wrong")
+
+    client = IPCClient()
+    req = IPCRequest(
+        request_id="err1", module="test_mod", op="fail", payload={}
+    )
+    client.submit(req)
+
+    handler_reg = {"fail": failing_handler}
+    task = asyncio.create_task(
+        serve_worker("test_mod", handler_reg, poll_interval=0.1)
+    )
+    await asyncio.sleep(0.5)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    res = await client.wait_result("err1", timeout=2)
+    assert res.status == "error"
+    assert res.error is not None
+    assert "category" in res.error
+    assert "fix_hint" in res.error
+
+
+@pytest.mark.asyncio
+async def test_server_unknown_op_error(tmp_data_dir):
+    """Unknown op produces error result with UnknownOp category."""
+    client = IPCClient()
+    req = IPCRequest(
+        request_id="unk1", module="test_mod", op="nonexistent_op", payload={}
+    )
+    client.submit(req)
+
+    handler_reg = {}  # No handlers registered
+    task = asyncio.create_task(
+        serve_worker("test_mod", handler_reg, poll_interval=0.1)
+    )
+    await asyncio.sleep(0.5)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    res = await client.wait_result("unk1", timeout=2)
+    assert res.status == "error"
+    assert res.error["category"] == "UnknownOp"
+
+
+# ── Lazy config path test ───────────────────────────────────────────
+
+def test_paths_lazy_config_not_frozen_at_import(tmp_data_dir, monkeypatch):
+    """Path helpers re-read config each call, not frozen at import time."""
+    # After tmp_data_dir monkeypatch, paths should point under tmp
+    rd = requests_dir()
+    assert rd.exists()
+    # Verify it's under the temp dir, not the real data/
+    assert "tmp" in str(rd) or "pytest" in str(rd)
