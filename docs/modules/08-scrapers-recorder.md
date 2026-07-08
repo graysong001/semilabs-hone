@@ -69,4 +69,4 @@ def build_platform_yaml(display_name, base_url, flows, maps) -> str
 
 ## 实施记录
 - recorder.py + llm_mapper.py + test_llm_mapper.py 代码+mock 测完成；真录制待人工
-  commit: see git
+  commit: 7e79588
