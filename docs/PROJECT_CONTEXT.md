@@ -81,6 +81,17 @@ semilabs-hone web (core/ui, :8530, FastAPI+WS)  ◀──file IPC──▶  coll
 - 在模块文档"实施记录"附一句本次做了什么/留了什么。
 - `git add` 相关文件 + Conventional Commit + `git push`。
 
+## 6.5 Definition of Done（loop 自动交付的质量门）
+
+防止 loop 跑偏烧 token：**done 必须是机器可判定 0/1 的门，不是散文/视觉/e2e。**
+
+- **约束 linter**：`python3 scripts/check_constraints.py` 退出 0（禁 launch/stealth/automation flag/WebGL伪造/硬编码密钥 + cdp.py 参数白名单）。
+- **自动门命令**：DEV_PLAN 表每模块的"自动门"列（该模块 pytest 目标）。
+- **全量回归**：`scripts/loop_gate.sh` 退出 0（约束 linter + 全量 pytest，不破坏已✅模块）。
+- **可自动交付**：✅ loop 全程自动标 done；🟡 loop 写代码+单测、done 需人工签；❌ loop 跳过。
+- **loop 规则**：选 `✅` 且依赖全✅ 的模块 → 实现 → `loop_gate.sh` 退出 0 才标✅+commit+push；3 次不过标⛔停；🟡 只做代码半标🔄，不碰端到验。
+- **覆盖率门**（M4）：核心业务/API ≥85%。
+
 ## 7. 常用路径速查
 
 | 什么 | 在哪 |
@@ -91,5 +102,7 @@ semilabs-hone web (core/ui, :8530, FastAPI+WS)  ◀──file IPC──▶  coll
 | 全局工作流铁律 | CLAUDE.md（根，自动加载） |
 | 本地偏好/环境 | CLAUDE.local.md |
 | 配置 | config.py（路径/端口/节律/磁盘/UA/LLM） |
+| 约束 linter | scripts/check_constraints.py（loop 必过） |
+| 交付自动门 | scripts/loop_gate.sh（约束 linter + 全量 pytest） |
 | 入口 | `python -m semilabs_hone {serve,worker,version}` |
 | 运行时数据 | data/（gitignored）：factory.db / ipc/ / collection/ |
