@@ -1,9 +1,63 @@
 # PRD_ALIGN_TASKS — Skim 采集模块 PRD 对齐任务切分
 
-> **单一进度真相源**（与 PRD 对齐迭代）。每次会话查本表选一个 ⬜ 任务，做完跑门禁、更新本表状态、commit+push。  
-> **切分原则**：每个任务 = 一个会话上下文可完成的闭环（少量文件 + 一个 pytest 门禁），防止单会话上下文溢出引发幻觉。  
-> 设计裁决依据：`docs/semilabs_hone_skim_sepc.md`（PRD）+ 本仓库 `~/.claude/plans/semilabs-hone-docs-semilabs-hone-skim-s-snoopy-swan.md`（已批准）。  
+> **单一进度真相源**（与 PRD 对齐迭代）。每次会话查本表选一个 ⬜ 会话（S），做完跑门禁、更新本表状态、commit+push。  
+> **两层粒度**：上层 **会话 S1-S9**（每个=一个有界会话上下文，内聚一组改动）；下层 **T 子任务**（会话内 checklist，不必每 T 开一个会话）。  
+> 设计裁决依据：`docs/semilabs_hone_skim_sepc.md`（PRD）+ `~/.claude/plans/semilabs-hone-docs-semilabs-hone-skim-s-snoopy-swan.md`（已批准）。  
 > 取舍总纲：**PRD 安全/正确性红线全盘接受并推翻已实现违规代码；架构层（WS 推送、recorder+LLM 通用引擎）保留只补 PRD 行为；验证码自动解作为可选能力沉淀（默认关）**。
+
+---
+
+## ⛓️ 共享上下文契约（每会话开工先读，不可擅自漂移）
+
+> 这些是跨会话的**不可变契约**。任何会话若需修改，必须回写本节并标注 `[契约变更]`——这是跨会话决策，不是单会话可定。  
+> 每个会话开工第一步：读本节 + 自己的 S 段 + 目标文件，**不需要**重读全部历史。
+
+**1. 状态枚举（DB `status` + IPC `status`，全厂统一）**
+- 任务 DB status：`pending | running | need_human | paused | completed | error`
+- IPC result status：`ok | error | paused | cancelled`（`need_human` 映射为 `paused` + `data.current_stage=captcha_or_login_blocked`）
+- 瞬态（仅 IPC `progress/`，不入 DB）：`fetching_list / reading_content / resting / night_sleep / captcha_detected / login_expired`
+
+**2. 数据表契约（PRD §6，旧 `scrape_tasks/posts/comments` 标 deprecated，不 DROP）**
+- `collection_tasks`：id(UUID str36) PK · platform · task_type(`keyword_search`/`author_homepage`) · target_value · status · expected_count · actual_count · error_msg · created_at · updated_at
+- `collection_items`：id PK · task_id FK · platform · platform_id · url · title · content_text · author_name · metrics_json(TEXT,`{"likes","comments_count",...}`) · publish_time(VARCHAR 容错) · scraped_at · UNIQUE(platform,platform_id)
+- `collection_comments`：id PK · item_id FK · platform_comment_id · author_name · content_text · like_count · scraped_at · UNIQUE(item_id,platform_comment_id)
+- upsert：`INSERT ... ON CONFLICT(...) DO UPDATE`（断点续传+去重幂等）
+- 引擎：WAL + `check_same_thread=False` + `timeout=15`
+
+**3. IPC 契约（PRD §3.4/§7.2）**
+- 目录 `data/ipc/{requests,results,progress,control}`（control 扁平，无 cancel 子层；`control/cancel/` 仅旧哨兵兼容）
+- 命名：`requests/<id>.json` · `results/<id>.json` · `progress/<id>.json` · `progress/heartbeat.json` · `control/ctrl_<id>.json`
+- 读后即焚：request/control 文件加载入内存后**立即 `burn()`**；坏 JSON catch+burn 不崩（PRD §8.3 场景3.1）
+- 心跳：worker 每 10s 写 `progress/heartbeat.json`；web 30s 过期→task running→paused + WS 广播
+- 单任务并发锁：同时仅 1 个 `running`（MVP 单浏览器）
+
+**4. 反检测红线（PRD §7.1，约束 linter 守）**
+- ❌ 零脚本注入（stealth/Canvas/Audio 全 no-op）；✅ 真实 Chrome UA（CDP 读取）
+- ❌ `page.evaluate(scrollBy)` 瞬移；✅ `mouse.wheel` 多步+微停顿
+- ❌ `element.click()` 正中心；✅ `bounding_box`+随机偏移±10px+`mouse.click`
+- ❌ 裸 `time.sleep(N)`；✅ `wait_for_selector`+`random.uniform(1.5,3.5)`
+- ❌ `while True`/`while is_captcha:` 死循环重试刷新
+- ✅ 夜间 22:00-07:00 长 `asyncio.sleep` 至 07:00，零网络请求
+
+**5. 验证码可选能力契约（新增裁决）**
+- `platform.yaml` 字段：`risk_tier: account|anonymous`（默认 account）· `captcha_policy: manual|auto_then_manual`（默认 manual）
+- 默认 manual：命中即 `need_human` 立即转人工（XHS/知乎）
+- 仅 `anonymous + auto_then_manual`（cargo 类无登录站点）才走 slide/ocr，失败 1 次转人工、不死循环
+- 全局默认：`config.CAPTCHA_DEFAULT_POLICY="manual"`，`CAPTCHA_AUTO_SOLVE_PLATFORMS=[]`
+
+**6. CSV 交付契约（PRD §4.6）**
+- 左连接宽表：一笔记 N 评论→N 行；0 评论→1 行评论列空
+- 10 列中文表头：平台/笔记ID/笔记标题/笔记正文/笔记点赞数/笔记发布时间/笔记链接/评论者昵称/评论内容/评论点赞数
+- `utf-8-sig` BOM；`csv.DictWriter` 正确转义 emoji/逗号/引号；0 条→拦截+Toast
+
+**7. UI 契约（保留 WS 推送 + 补 HTMX 局部交互）**
+- WS 负责流式进度（worker→progress 文件→web 代广播）；HTMX 负责徽章/dialog/master-detail/Toast 局部替换
+- 全程无整页 reload；错误走 Toast/内联红字
+
+**8. 架构保留裁决（不推翻）**
+- 保留 `recorder+llm_mapper+GenericEngine` 通用引擎 + `platform.yaml`（比硬编码更强，XHS yaml 已成型）
+- 保留 FastAPI + WebSocket 外壳
+- 加站 = 录制三 flow + LLM 生成 yaml（知乎首站）；非硬编码 adapter
 
 ---
 
@@ -13,19 +67,40 @@
 
 ## 门禁定义（Definition of Done）
 
-每个任务 done = 机器可判 0/1：
+每个**会话 S** done = 机器可判 0/1：
 1. **约束 linter**：`python3 scripts/check_constraints.py` 退出 0。
-2. **任务门**：本表「门禁」列 pytest 退出 0。
-3. **全量回归**：`bash scripts/loop_gate.sh` 退出 0（约束 + 全量 pytest，不破坏已✅任务）。
+2. **会话门**：该 S 段列出的 pytest 目标退出 0。
+3. **全量回归**：`bash scripts/loop_gate.sh` 退出 0（约束 + 全量 pytest，不破坏已✅会话）。
 4. **可自动**：✅=loop 全程自动；🟡=loop 写代码+单测、done 需人工签；❌=纯人工 loop 跳过。
 
-**熔断**：单任务 3 次不过门 → ⛔ 停、报根因、等介入（CLAUDE.md §错误熔断）。
+**熔断**：单会话 3 次不过门 → ⛔ 停、报根因、等介入（CLAUDE.md §错误熔断）。
+
+---
+
+## 会话级编排（S1-S9 = 9 个有界会话）
+
+> 每个 S = 一个会话上下文。内含 T 子任务作为会话内 checklist（勾完即 done）。下一会话只接一个 S。
+
+| 会话 | 状态 | 可自动 | 依赖 | 主题 | 范围 | 会话门（pytest） |
+|---|:-:|:-:|---|---|---|---|
+| S1 | ✅ | ✅ | — | P0 反检测+节律+IPC 原语 | T01-T04 | test_human_behavior/test_rhythm/test_fingerprint/test_ipc |
+| S2 | ⬜ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
+| S3 | ⬜ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 · T16 搬迁脚本 | test_models/test_routes/migrate 脚本 |
+| S4 | ⬜ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
+| S5 | ⬜ | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🟡 知乎录制 platform.yaml | 新 test_solver + 人验 zhihu |
+| S6 | ⬜ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
+| S7 | ⬜ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
+| S8 | ⬜ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
+| S9 | ⬜ | 🟡/❌ | S2-S8 | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
+
+**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S7 → S8 → S9。  
+**跨会话并发安全**：同一时刻只推进一个 S（共享同一批文件+DB+IPC 契约，并行会冲突）。
 
 ---
 
 ## P0 — 安全红线与正确性修复（最高优先）
 
-> 目标：消除封号风险源 + 卡死 bug。不动表结构。
+> 目标：消除封号风险源 + 卡死 bug。不动表结构。S1 已完成 T01-T04，S2 待开。
 
 | 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
 |---|:-:|:-:|---|---|---|
@@ -33,7 +108,7 @@
 | T02 拟人滚动/点击/等待 | ✅ | ✅ | T01 | human_behavior.py mouse.wheel + smart_wait | test_human_behavior |
 | T03 夜间长 sleep | ✅ | ✅ | — | rhythm.py is_quiet_hours+sleep_until_wakeup | test_rhythm |
 | T04 IPC 原语 | ✅ | ✅ | — | paths.py control_dir/burn/heartbeat/bad-JSON | test_ipc |
-| T05 IPC server 读后即焚+坏文件+心跳 | 🔄 | ✅ | T04 | server.py: 请求加载后立即 burn；坏 JSON catch+burn；serve 循环每 10s write_heartbeat；control 文件读后即焚分发 pause/resume/stop | test_ipc(新增 server 读后即焚+坏文件+心跳用例) |
+| T05 IPC server 读后即焚+坏文件+心跳 | ⬜ | ✅ | T04 | server.py: 请求加载后立即 burn；坏 JSON catch+burn；serve 循环每 10s write_heartbeat；control 文件读后即焚分发 pause/resume/stop | test_ipc(新增 server 读后即焚+坏文件+心跳用例) |
 | T06 心跳看门狗 | ⬜ | ✅ | T04,T05 | client.py poll_heartbeat；web 侧 30s 过期→DB task running→paused + WS 广播「引擎异常中断」 | test_ipc(看门狗) + test_routes |
 | T07 单任务并发锁 | ⬜ | ✅ | — | routes/tasks.py 建/启动前查 status=running 计数>0 拒绝排队（PRD 8.2 场景2.2） | test_routes |
 | T08 cdp 端口冲突 | ⬜ | ✅ | — | browser/cdp.py 9333-9340 探测递增；CDP 连接失败→paused+UI 提示关 Chrome（PRD 8.1 场景1.2） | test_cdp |
@@ -114,34 +189,23 @@
 
 ---
 
-## 依赖 DAG（任务级）
+## 依赖 DAG（会话级，主链顺序）
 
 ```
-T01 → T02
-T04 → T05 → T06 → T35
-T05 → T24 → T26
-T10 → T11 → T12 → T13 → T14 → (T20,T23,T40)
-T11 → T15 → T32
-T30 → (T31,T32,T33,T34,T36)
-T22 → T23 → T27(🟡)
-T07（独立）
-T08（独立）
-T09（独立, 依赖 T01）
+S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
+        \____ S3 → S6（UI 依赖表）; S3 → S7（CSV 依赖表）; S2 → S6（心跳指示灯）
 ```
 
-**可并行批次**：A:T01,T03,T04,T07,T08,T09 → B:T02,T05,T10 → C:T06,T11,T22,T24 → D:T12,T14,T25,T26 → E:T13,T20,T23,T30 → F:T31-T36,T40 → G:T50,T51。
+> **不并行**：MVP 单浏览器 + 共享同一批文件/DB/IPC 契约，同一时刻只推进一个 S。  
+> 任务级细 DAG（T 子任务内部依赖）见各 P 段表格的「依赖」列，仅作会话内排序参考。
 
-## 续接协议（新会话怎么接）
+## 续接协议（新会话怎么接，3 步开干）
 
-1. 读 `~/.claude/plans/semilabs-hone-docs-semilabs-hone-skim-s-snoopy-swan.md`（裁决）+ 本表（选任务）。
-2. 选一个 ⬜ 且依赖全✅ 的任务（loop 只选 ✅ 列）。
-3. 读目标文件 + 对应 PRD 章节。
-4. 实现 → 跑 `bash scripts/loop_gate.sh` → 退出 0 才标 ✅ → commit + push。
-5. 🟡 任务 loop 标 🔄，不标 ✅；❌ 任务跳过。
-6. 跨会话交接：本表状态行 + commit message 标 `[task TNN]`。
+1. **读三件套**（控制上下文量，不重读全部）：① 本文件「⛓️ 共享上下文契约」节（不可漂移）② 当前会话 S 段（范围+门禁+T 子任务）③ 目标文件 + 对应 PRD 章节。
+2. **干完**：勾 S 段 T checklist → 跑 `bash scripts/loop_gate.sh` → 退出 0 才标该 S ✅ → 原子化 commit（`[session SNN] <desc>`）+ push。
+3. **交接**：更新本表该 S 状态行 + 「当前进度快照」；🟡 标 🔄 不标 ✅；❌ 跳过。契约若被改 → 回写「共享上下文契约」节并标 `[契约变更]`。
 
 ## 当前进度快照（2026-07-10）
 
-- ✅ 完成：T01,T02,T03,T04（P0 反检测+节律+IPC 原语），已 commit `5de4d26`/`3dba7c3`，分支 `feat/skim-prd-align`。
-- 🔄 进行中：T05（IPC server 读后即焚 wiring）—— 原语已就绪（T04），server.py 接入待下一会话。
-- 下一个会话首选：**T05**（依赖 T04 已✅，可自动✅，范围聚焦 server.py 单文件+test_ipc）。
+- ✅ **S1 完成**（T01-T04：stealth 零注入 / mouse.wheel+smart_wait / 夜间长 sleep / IPC 原语），commit `5de4d26`/`3dba7c3`，分支 `feat/skim-prd-align` 已 push。
+- ⬜ **下一会话 = S2**（P0 IPC/安全 wiring：T05 server 读后即焚+坏文件+心跳+control 分发 / T06 心跳看门狗 / T07 单任务并发锁 / T08 cdp 端口冲突 / T09 约束 linter 扩展）。依赖 S1 已✅，可自动✅。范围聚焦 `core/ipc/server.py`+`client.py`+`browser/cdp.py`+`routes/tasks.py`+`scripts/check_constraints.py`，门禁 test_ipc/test_routes/test_cdp/check_constraints。
