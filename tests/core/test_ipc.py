@@ -20,12 +20,18 @@ from semilabs_hone.core.ipc.paths import (
     results_dir,
     progress_dir,
     control_cancel_dir,
+    control_dir,
+    control_path,
+    heartbeat_path,
     request_path,
     result_path,
     progress_path,
     cancel_sentinel,
     atomic_write_json,
     read_json_if_exists,
+    burn,
+    heartbeat_age,
+    write_heartbeat,
 )
 from semilabs_hone.core.ipc.client import IPCClient
 from semilabs_hone.core.ipc.server import serve_worker
@@ -411,3 +417,77 @@ def test_paths_lazy_config_not_frozen_at_import(tmp_data_dir, monkeypatch):
     assert rd.exists()
     # Verify it's under the temp dir, not the real data/
     assert "tmp" in str(rd) or "pytest" in str(rd)
+
+
+# ── PRD §7.2 control/ flat dir + control_path ─────────────────────────
+
+
+def test_paths_control_dir_flat(tmp_data_dir):
+    """control/ is flat (PRD §7.2), not nested under cancel/."""
+    assert control_dir() == _ipc_root_pub() / "control"
+    assert control_cancel_dir() == _ipc_root_pub() / "control" / "cancel"
+
+
+def test_paths_control_path_uses_ctrl_prefix(tmp_data_dir):
+    """control_path uses ctrl_<id>.json naming (PRD §7.2)."""
+    p = control_path("t42")
+    assert p.name == "ctrl_t42.json"
+    assert p.parent == control_dir()
+
+
+def _ipc_root_pub():
+    from config import IPC_ROOT
+    return IPC_ROOT
+
+
+# ── PRD §7.2 read-after-burn (burn) ────────────────────────────────────
+
+
+def test_burn_deletes_existing_file(tmp_data_dir):
+    """burn() removes a file that exists."""
+    p = request_path("burn1")
+    atomic_write_json(p, {"x": 1})
+    assert p.exists()
+    burn(p)
+    assert not p.exists()
+
+
+def test_burn_swallows_missing_file(tmp_data_dir):
+    """burn() on a non-existent file must NOT raise (PRD: no crash on re-burn)."""
+    burn(request_path("never_existed"))
+    # no exception raised == pass
+
+
+# ── PRD §3.3 heartbeat primitives ──────────────────────────────────────
+
+
+def test_write_then_read_heartbeat_age(tmp_data_dir):
+    """write_heartbeat then heartbeat_age reflects elapsed seconds."""
+    write_heartbeat("alive", now=1000.0)
+    age = heartbeat_age(now=1005.0)
+    assert age == 5.0
+
+
+def test_heartbeat_age_none_when_absent(tmp_data_dir):
+    """No heartbeat file => None (worker never started / dead)."""
+    assert heartbeat_age(now=1000.0) is None
+
+
+def test_heartbeat_stale_threshold(tmp_data_dir):
+    """Heartbeat older than 30s is detectable as stale (PRD §3.3 watchdog)."""
+    write_heartbeat(now=1000.0)
+    assert heartbeat_age(now=1035.0) >= 30  # stale
+    write_heartbeat(now=1025.0)
+    assert heartbeat_age(now=1030.0) < 30  # fresh
+
+
+# ── PRD §8.3 场景 3.1 bad-JSON tolerance ──────────────────────────────
+
+
+def test_read_json_if_exists_raises_on_corrupt(tmp_data_dir):
+    """Corrupt JSON must raise JSONDecodeError so the server can burn it."""
+    p = request_path("corrupt")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"action": "pau', encoding="utf-8")  # truncated
+    with pytest.raises(json.JSONDecodeError):
+        read_json_if_exists(p)
