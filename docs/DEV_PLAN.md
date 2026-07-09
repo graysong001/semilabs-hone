@@ -3,6 +3,10 @@
 > 这是 semilabs-hone 的**单一进度真相源**。每次会话开始查此表选模块，结束更新此表。
 > 模块切分依据 docs/skim_design.md §18，按依赖 DAG 拆成 12 个**单会话可完成**的独立单元。
 
+> ⚠️ **当前主线 = PRD 对齐迭代**（`docs/semilabs_hone_skim_sepc.md` 8 章 PRD 与已建代码存在根本性冲突）。
+> 进度跟踪已迁移到 **[docs/PRD_ALIGN_TASKS.md](PRD_ALIGN_TASKS.md)**（任务级切分，跨会话防上下文溢出）。
+> 下方原 12-DM 模块表为骨架建设期的历史记录；PRD 对齐期间以 PRD_ALIGN_TASKS 为准，本表里程碑章节同步更新。
+
 ---
 
 ## Definition of Done（防止 loop 跑偏烧 token）
@@ -90,3 +94,16 @@
 - **M3 采集全功能**：09/10/11 ✅，扫码→抓取→存库→导出→验证码/恢复全通（11 需人工）。
 - **M4 测试达标**：覆盖率核心 ≥85%（DM-12 自动门）。
 - **M5（未来）**：analysis/production/operations 挂同一 core。
+
+## PRD 对齐迭代里程碑（当前主线，详见 PRD_ALIGN_TASKS.md）
+
+- **P0 安全/正确性** 🔄：T01-T03 ✅，T04 ✅，T05 进行中（IPC 读后即焚 wiring）。
+- **P1 数据模型** ⬜：collection_* 表对齐 + WAL + upsert。
+- **P2 采集能力** ⬜：跳过/边界/探针/节律/可选验证码；知乎录制🟡。
+- **P3 UI 行为** ⬜：保留 WS + 补 HTMX 徽章/dialog/展开/心跳/Toast。
+- **P4 CSV 宽表** ⬜：左连接宽表 + 10 中文表头 + utf-8-sig。
+- **P5 测试门禁** ⬜：PRD §8 BDD + 覆盖率 ≥85%。
+- **P6 文档同步** ⬜：spec/design/context 与实现对齐。
+- **P7 端到端** ❌：扫码+真抓取+导出（人工）。
+
+> 分支 `feat/skim-prd-align`；裁决计划 `~/.claude/plans/semilabs-hone-docs-semilabs-hone-skim-s-snoopy-swan.md`。

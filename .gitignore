@@ -19,3 +19,6 @@ claude-rules/
 .idea/
 .vscode/
 *.swp
+
+# Claude Code 个人本地设置 (bash 自动授权等, 不入库)
+.claude/settings.local.json
