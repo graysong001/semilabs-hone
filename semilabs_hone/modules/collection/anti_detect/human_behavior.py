@@ -93,12 +93,35 @@ async def _move_mouse_bezier(page: "Page", target_x: float, target_y: float, ste
 
 
 async def random_scroll(page: "Page", max_times: int, wait_ms: int) -> None:
-    """Scroll page randomly up to max_times, each wait_ms apart."""
+    """Scroll page randomly up to max_times, each wait_ms apart.
+
+    Uses physical mouse.wheel with multi-step small deltas + micro-pauses
+    (PRD §4.2.1 human-scroll redline). Forbids page.evaluate("window.scrollBy")
+    instant teleportation — that synthesizes a trusted-less event with no
+    pointer trail and is a strong machine signal.
+    """
     for _ in range(random.randint(1, max_times)):
-        scroll_amount = random.randint(200, 800)
-        await page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+        # Split the scroll into several small wheel deltas with tiny pauses,
+        # simulating a finger flick / mouse wheel roll.
+        total = random.randint(300, 900)
+        steps = random.randint(3, 6)
+        per = max(1, total // steps)
+        for _ in range(steps):
+            await page.mouse.wheel(0, per)
+            await asyncio.sleep(random.uniform(0.1, 0.3))
         jitter = random.uniform(-0.3, 0.3) * wait_ms
-        await asyncio.sleep(max(100, wait_ms + jitter) / 1000)
+        await asyncio.sleep(max(0.1, (wait_ms + jitter) / 1000))
+
+
+async def smart_wait(page: "Page", selector: str, timeout: float = 5000) -> None:
+    """Wait for an element to be ready, then add a human reaction delay.
+
+    PRD §4.2.1 smart-wait redline: never bare time.sleep(5). Must first ensure
+    the element exists via wait_for_selector, THEN stack a random
+    1.5-3.5s human reaction latency on top.
+    """
+    await page.wait_for_selector(selector, timeout=timeout)
+    await asyncio.sleep(random.uniform(1.5, 3.5))
 
 
 async def random_browse(page: "Page", pages: tuple[int, int]) -> None:

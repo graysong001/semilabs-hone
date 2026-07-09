@@ -13,9 +13,12 @@ def test_dm05_browser_contract():
 
 def test_dm06_anti_detect_contract():
     st = pytest.importorskip("semilabs_hone.modules.collection.anti_detect.stealth")
-    assert hasattr(st, "NOISE_ONLY_SCRIPT") and callable(getattr(st, "inject_noise", None))
+    # PRD zero-injection redline: inject_noise must exist as a callable no-op
+    # (NOISE_ONLY_SCRIPT kept as empty sentinel for backward-compat imports)
+    assert callable(getattr(st, "inject_noise", None))
+    assert getattr(st, "NOISE_ONLY_SCRIPT", None) == ""
     hb = pytest.importorskip("semilabs_hone.modules.collection.anti_detect.human_behavior")
-    for name in ["human_type", "human_click", "random_scroll", "random_browse", "generate_slide_track"]:
+    for name in ["human_type", "human_click", "random_scroll", "random_browse", "generate_slide_track", "smart_wait"]:
         assert callable(getattr(hb, name, None)), f"human_behavior 缺 {name}"
     fp = pytest.importorskip("semilabs_hone.modules.collection.anti_detect.fingerprint")
     assert hasattr(fp, "Fingerprint")
@@ -54,7 +57,8 @@ def test_dm09_captcha_scheduler_contract():
     assert callable(getattr(slv, "detect_and_solve", None))
     rh = pytest.importorskip("semilabs_hone.modules.collection.scheduler.rhythm")
     for name in ["check_quiet_hours", "check_daily_limit", "note_delay", "keyword_delay",
-                 "should_pause_for_captcha"]:
+                 "should_pause_for_captcha", "is_quiet_hours", "seconds_until_wakeup",
+                 "sleep_until_wakeup"]:
         assert callable(getattr(rh, name, None)), f"rhythm 缺 {name}"
     wu = pytest.importorskip("semilabs_hone.modules.collection.scheduler.warmup")
     assert callable(getattr(wu, "random_browse", None))

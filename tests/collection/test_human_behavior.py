@@ -15,6 +15,7 @@ from semilabs_hone.modules.collection.anti_detect.human_behavior import (
     human_type,
     random_browse,
     random_scroll,
+    smart_wait,
 )
 
 
@@ -158,15 +159,19 @@ class TestRandomScroll:
     """Tests for random_scroll."""
 
     @pytest.mark.asyncio
-    async def test_random_scroll_scrolls_at_least_once(self, monkeypatch):
-        """random_scroll should scroll at least once."""
+    async def test_random_scroll_uses_mouse_wheel(self, monkeypatch):
+        """random_scroll must use physical mouse.wheel, NOT page.evaluate(scrollBy)."""
         mock_page = AsyncMock()
+        mock_mouse = AsyncMock()
+        mock_page.mouse = mock_mouse
 
         monkeypatch.setattr("random.randint", lambda a, b: 3)
 
         await random_scroll(mock_page, max_times=5, wait_ms=500)
 
-        assert mock_page.evaluate.call_count >= 1
+        assert mock_mouse.wheel.call_count >= 1
+        # PRD redline: instant teleport via evaluate(window.scrollBy) is forbidden
+        assert mock_page.evaluate.call_count == 0
 
 
 # ─── random_browse tests ────────────────────────────────────────────────────
@@ -220,3 +225,45 @@ class TestHumanClick:
 
         assert mock_mouse.move.call_count > 0
         assert mock_mouse.click.call_count == 1
+
+
+# ─── smart_wait tests ───────────────────────────────────────────────────────
+
+
+class TestSmartWait:
+    """Tests for smart_wait (wait_for_selector + human reaction delay)."""
+
+    @pytest.mark.asyncio
+    async def test_smart_wait_waits_for_selector_then_sleeps(self, monkeypatch):
+        """smart_wait must call wait_for_selector then sleep in 1.5-3.5s range."""
+        mock_page = AsyncMock()
+
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("random.uniform", lambda a, b: 2.5)
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        await smart_wait(mock_page, "div.note", timeout=5000)
+
+        mock_page.wait_for_selector.assert_called_once_with("div.note", timeout=5000)
+        assert sleeps == [2.5]
+
+    @pytest.mark.asyncio
+    async def test_smart_wait_delay_in_prd_range(self, monkeypatch):
+        """Human reaction delay must be within PRD §4.2.1 1.5-3.5s range."""
+        mock_page = AsyncMock()
+
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        for _ in range(20):
+            await smart_wait(mock_page, "div.note")
+            assert 1.5 <= sleeps[-1] <= 3.5
+

@@ -12,6 +12,7 @@ from semilabs_hone.modules.collection.anti_detect.human_behavior import (
     human_type,
     random_browse,
     random_scroll,
+    smart_wait,
 )
 from semilabs_hone.modules.collection.anti_detect.stealth import (
     NOISE_ONLY_SCRIPT,
@@ -29,6 +30,7 @@ __all__ = [
     "human_type",
     "random_browse",
     "random_scroll",
+    "smart_wait",
     "NOISE_ONLY_SCRIPT",
     "inject_noise",
     "get_ua",
