@@ -16,16 +16,23 @@ from semilabs_hone.core.utils.retry import DailyLimitError, QuietHoursError
 
 
 def is_quiet_hours(now: datetime | None = None) -> bool:
-    """Whether the current local time is within quiet hours (22:00-07:00).
+    """Whether the current local time is within the quiet window.
 
-    Pure predicate (PRD §4.5.1/§7.4). The main loop calls this before each
-    request; when True it should enter night-sleep via sleep_until_wakeup()
-    rather than throw-and-retry.
+    Handles both window shapes (PRD §4.5.1/§7.4):
+    - same-day window (start < end, e.g. 02:00-08:00): quiet iff start<=hour<end
+    - midnight-spanning window (start > end, e.g. 22:00-07:00): quiet iff
+      hour>=start or hour<end
+    Pure predicate; the main loop calls this before each request, and when
+    True enters night-sleep via sleep_until_wakeup() rather than throw-and-retry.
     """
     if now is None:
         now = datetime.now()
-    quiet_start, quiet_end = config.QUIET_HOURS  # (22, 7)
-    return now.hour >= quiet_start or now.hour < quiet_end
+    start, end = config.QUIET_HOURS
+    if start < end:
+        return start <= now.hour < end
+    if start > end:
+        return now.hour >= start or now.hour < end
+    return False  # start == end: degenerate, no quiet window
 
 
 def seconds_until_wakeup(now: datetime | None = None) -> float:

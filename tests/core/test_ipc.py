@@ -78,8 +78,8 @@ def test_protocol_ipc_result_error_with_category():
 
 
 def test_protocol_ipc_result_status_values():
-    """IPCResult accepts all four status literals."""
-    for s in ["ok", "error", "paused", "cancelled"]:
+    """IPCResult accepts all five status literals incl. need_human (契约变更)."""
+    for s in ["ok", "error", "paused", "cancelled", "need_human"]:
         r = IPCResult(request_id="x", status=s)
         assert r.status == s
 

@@ -33,12 +33,15 @@ class IPCProgress(BaseModel):
 class IPCResult(BaseModel):
     """Final result written by the worker into results/.
 
-    status: "ok" | "error" | "paused" | "cancelled"
+    status: "ok" | "error" | "paused" | "cancelled" | "need_human"
+      - need_human: captcha/login-expired probe hit → worker suspended, awaiting
+        human relay; UI shows red blinking badge (PRD §4.4). Distinct from
+        paused (user/system-initiated suspend) so the UI can branch.
     error: {category, message, fix_hint} when status=="error"
     ws_events: optional list of WS event dicts for client to broadcast.
     """
     request_id: str
-    status: Literal["ok", "error", "paused", "cancelled"]
+    status: Literal["ok", "error", "paused", "cancelled", "need_human"]
     data: dict | None = None
     error: dict | None = None
     ws_events: list[dict] | None = None

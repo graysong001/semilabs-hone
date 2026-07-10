@@ -24,7 +24,7 @@ WEB_HOST = os.getenv("SEMILABS_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("SEMILABS_PORT", "8530"))
 
 # 采集节律 (collection 模块)
-QUIET_HOURS = (22, 7)  # 22:00-07:00 停跑
+QUIET_HOURS = (2, 8)  # 02:00-08:00 夜间静默 (PRD §2.2 场景; §4.5.1 写 22-07 与之矛盾, 以场景为准)
 DAILY_LIMIT_PER_ACCOUNT = 200
 NOTE_DELAY = (30, 90)          # 秒, 随机
 KEYWORD_DELAY = (60, 180)      # 秒, 随机

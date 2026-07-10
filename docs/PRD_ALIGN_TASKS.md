@@ -12,17 +12,24 @@
 > 这些是跨会话的**不可变契约**。任何会话若需修改，必须回写本节并标注 `[契约变更]`——这是跨会话决策，不是单会话可定。  
 > 每个会话开工第一步：读本节 + 自己的 S 段 + 目标文件，**不需要**重读全部历史。
 
+**[契约变更 2026-07-10]**
+- 夜间休眠窗口 22:00-07:00 → **02:00-08:00**（取 PRD §2.2 场景；§4.5.1 与之矛盾，以场景为准）。已同步 config/rhythm/测试。
+- IPC `IPCResult.status` 新增 `need_human` 字面量（原映射 paused+current_stage 改为显式枚举值）。
+- 数据表采用**原地改表**（无 Alembic、factory.db 被 gitignore、无生产数据 → create_all 重建，dev 数据可丢），删除 T16 搬迁脚本。
+- control 指令 JSON 统一 `{"action":"pause"|"resume"|"stop"}`。
+
 **1. 状态枚举（DB `status` + IPC `status`，全厂统一）**
 - 任务 DB status：`pending | running | need_human | paused | completed | error`
-- IPC result status：`ok | error | paused | cancelled`（`need_human` 映射为 `paused` + `data.current_stage=captcha_or_login_blocked`）
+- IPC result status：`ok | error | paused | cancelled | need_human`（命中验证码/登录失效直接 `need_human`，UI 据此红灯）
 - 瞬态（仅 IPC `progress/`，不入 DB）：`fetching_list / reading_content / resting / night_sleep / captcha_detected / login_expired`
 
-**2. 数据表契约（PRD §6，旧 `scrape_tasks/posts/comments` 标 deprecated，不 DROP）**
+**2. 数据表契约（PRD §6，原地改表：无 Alembic、factory.db 被 gitignore、无生产数据，create_all 重建即可）**
 - `collection_tasks`：id(UUID str36) PK · platform · task_type(`keyword_search`/`author_homepage`) · target_value · status · expected_count · actual_count · error_msg · created_at · updated_at
 - `collection_items`：id PK · task_id FK · platform · platform_id · url · title · content_text · author_name · metrics_json(TEXT,`{"likes","comments_count",...}`) · publish_time(VARCHAR 容错) · scraped_at · UNIQUE(platform,platform_id)
 - `collection_comments`：id PK · item_id FK · platform_comment_id · author_name · content_text · like_count · scraped_at · UNIQUE(item_id,platform_comment_id)
 - upsert：`INSERT ... ON CONFLICT(...) DO UPDATE`（断点续传+去重幂等）
 - 引擎：WAL + `check_same_thread=False` + `timeout=15`
+- 旧 `scrape_tasks/posts/comments` 模型直接改名/改字段（不保留双表、不写搬迁脚本）
 
 **3. IPC 契约（PRD §3.4/§7.2）**
 - 目录 `data/ipc/{requests,results,progress,control}`（control 扁平，无 cancel 子层；`control/cancel/` 仅旧哨兵兼容）
@@ -37,7 +44,7 @@
 - ❌ `element.click()` 正中心；✅ `bounding_box`+随机偏移±10px+`mouse.click`
 - ❌ 裸 `time.sleep(N)`；✅ `wait_for_selector`+`random.uniform(1.5,3.5)`
 - ❌ `while True`/`while is_captcha:` 死循环重试刷新
-- ✅ 夜间 22:00-07:00 长 `asyncio.sleep` 至 07:00，零网络请求
+- ✅ 夜间 **02:00-08:00** 长 `asyncio.sleep` 至 08:00，零网络请求
 
 **5. 验证码可选能力契约（新增裁决）**
 - `platform.yaml` 字段：`risk_tier: account|anonymous`（默认 account）· `captcha_policy: manual|auto_then_manual`（默认 manual）
@@ -85,7 +92,7 @@
 |---|:-:|:-:|---|---|---|---|
 | S1 | ✅ | ✅ | — | P0 反检测+节律+IPC 原语 | T01-T04 | test_human_behavior/test_rhythm/test_fingerprint/test_ipc |
 | S2 | ⬜ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
-| S3 | ⬜ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 · T16 搬迁脚本 | test_models/test_routes/migrate 脚本 |
+| S3 | ⬜ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
 | S4 | ⬜ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
 | S5 | ⬜ | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🟡 知乎录制 platform.yaml | 新 test_solver + 人验 zhihu |
 | S6 | ⬜ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
@@ -116,7 +123,7 @@
 
 ## P1 — 数据模型对齐（PRD §6）
 
-> 不 DROP 旧表（database.md 红线）：新增 collection_* 表 + 数据搬迁 + 切换读写 + 旧表 deprecated。
+> 契约变更：原地改表（无 Alembic、factory.db 被 gitignore、无生产数据），create_all 重建，dev 数据可丢。旧模型直接改名/改字段，不写搬迁脚本。
 
 | 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
 |---|:-:|:-:|---|---|---|
@@ -126,7 +133,7 @@
 | T13 collection_comments 表 | ⬜ | ✅ | T12 | models/comment.py→collection_comment.py UNIQUE(item_id,platform_comment_id) | test_models |
 | T14 repository upsert | ⬜ | ✅ | T12,T13 | models/repository.py ON CONFLICT DO UPDATE upsert_item/upsert_comment | test_models |
 | T15 schemas 校验 | ⬜ | ✅ | T11 | schemas.py TaskCreate 校验 http 前缀+count[1,200]截断 | test_routes |
-| T16 数据搬迁脚本 | ⬜ | ✅ | T11-T13 | scripts/migrate_to_collection_tables.py 幂等搬迁 | 运行脚本+断言行数 |
+| ~~T16 数据搬迁脚本~~ | — | — | — | 契约变更删除（原地改表，无需搬迁） | — |
 
 ## P2 — 采集能力补全（PRD §4.2-4.5）
 
