@@ -4,6 +4,13 @@ Design: docs/skim_design.md §13.1.
 - Platform dropdown from registry.list_platforms()
 - Only 1 running task at a time (check DB)
 - POST /api/tasks → IPC submit → {request_id, status}
+
+[契约变更 2026-07-10] S3: model renamed ScrapeTask→CollectionTask; task PK is now
+a UUID str. This route still accepts the legacy form (account_id/keywords/sort/
+max_posts/download_images/collect_comments) and derives the PRD §6.1 columns
+(task_type/target_value/expected_count) from it, so the create flow stays green
+while the full dialog/form migration is deferred to S6/T32. task_id path/IPC now
+str (UUID).
 """
 from __future__ import annotations
 
@@ -58,14 +65,14 @@ async def page_new_task(request: Request) -> HTMLResponse:
 
 
 @router.get("/tasks/{task_id}", response_class=HTMLResponse)
-async def page_task_detail(request: Request, task_id: int) -> HTMLResponse:
+async def page_task_detail(request: Request, task_id: str) -> HTMLResponse:
     """GET /tasks/{id} — task detail page with progress."""
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
 
     sess = get_session()
     try:
-        task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
     except Exception:
         task = None
     finally:
@@ -110,19 +117,21 @@ async def api_create_task(
     Returns {request_id, status, task_id}.
     """
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import ScrapeTask, TaskKeyword
+    from semilabs_hone.core.models.task import CollectionTask, TaskKeyword
     from semilabs_hone.core.models.keyword import Keyword
+
+    keyword_list = [k.strip() for k in keywords.split(",") if k.strip()]
 
     sess = get_session()
     try:
         # Single-running lock: is a task already running?
-        already_running = sess.query(ScrapeTask).filter(
-            ScrapeTask.status == "running"
+        already_running = sess.query(CollectionTask).filter(
+            CollectionTask.status == "running"
         ).first() is not None
 
         # Create task as pending (queueable — PRD §8.2 场景 2.2 allows B/C pending
         # while A runs).
-        task = ScrapeTask(
+        task = CollectionTask(
             account_id=account_id,
             platform=platform,
             status="pending",
@@ -130,13 +139,18 @@ async def api_create_task(
             sort_type=sort,
             download_images=download_images,
             collect_comments=collect_comments,
+            # PRD §6.1 canonical columns derived from the legacy form (S6/T32 owns
+            # the full dialog migration onto these directly).
+            task_type="keyword_search",
+            target_value=keyword_list[0] if keyword_list else "",
+            expected_count=max_posts,
         )
         sess.add(task)
         sess.flush()
         task_id = task.id
 
         # Upsert keywords and link
-        for kw_text in [k.strip() for k in keywords.split(",") if k.strip()]:
+        for kw_text in keyword_list:
             kw = (
                 sess.query(Keyword)
                 .filter(Keyword.text == kw_text, Keyword.platform == platform)
@@ -173,7 +187,7 @@ async def api_create_task(
         payload={
             "task_id": task_id,
             "platform": platform,
-            "keywords": [k.strip() for k in keywords.split(",") if k.strip()],
+            "keywords": keyword_list,
             "sort": sort,
             "max_posts_per_keyword": max_posts,
             "download_images": download_images,
@@ -195,17 +209,17 @@ async def api_create_task(
 
 
 @router.post("/api/tasks/{task_id}/cancel")
-async def api_cancel_task(task_id: int) -> JSONResponse:
+async def api_cancel_task(task_id: str) -> JSONResponse:
     """POST /api/tasks/{id}/cancel — cancel running task."""
     IPCClient, _ = _ipc_client()
     # Cancel is done via IPC client cancel method
     # We also update DB status
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
 
     sess = get_session()
     try:
-        task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
         if task:
             task.status = "cancelled"
             sess.commit()
@@ -222,22 +236,22 @@ async def api_cancel_task(task_id: int) -> JSONResponse:
 
 
 @router.post("/api/tasks/{task_id}/resume")
-async def api_resume_task(task_id: int) -> JSONResponse:
+async def api_resume_task(task_id: str) -> JSONResponse:
     """POST /api/tasks/{id}/resume — resume failed task from checkpoint."""
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
 
     sess = get_session()
     try:
-        task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
         if not task:
             return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
 
         # Single-running lock: only reject if ANOTHER task is already running
         # (a pending task does not block resuming this one — PRD §8.2 场景 2.2).
-        other_running = sess.query(ScrapeTask).filter(
-            ScrapeTask.id != task_id,
-            ScrapeTask.status == "running",
+        other_running = sess.query(CollectionTask).filter(
+            CollectionTask.id != task_id,
+            CollectionTask.status == "running",
         ).first()
         if other_running:
             return JSONResponse(

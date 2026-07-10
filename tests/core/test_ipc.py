@@ -709,10 +709,10 @@ def test_check_heartbeat_fresh(tmp_data_dir):
 
 def test_reap_stale_running_task_flips_to_paused(db_session, tmp_data_dir):
     """A stale heartbeat flips a running task → paused + returns a WS event."""
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
     from semilabs_hone.core.ipc.watchdog import reap_stale_running_task
 
-    task = ScrapeTask(account_id=1, platform="xiaohongshu", status="running")
+    task = CollectionTask(account_id=1, platform="xiaohongshu", status="running")
     db_session.add(task)
     db_session.commit()
 
@@ -730,10 +730,10 @@ def test_reap_stale_running_task_flips_to_paused(db_session, tmp_data_dir):
 
 def test_reap_fresh_heartbeat_no_op(db_session, tmp_data_dir):
     """Fresh heartbeat → no task reaped, returns None."""
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
     from semilabs_hone.core.ipc.watchdog import reap_stale_running_task
 
-    task = ScrapeTask(account_id=1, platform="xiaohongshu", status="running")
+    task = CollectionTask(account_id=1, platform="xiaohongshu", status="running")
     db_session.add(task)
     db_session.commit()
 

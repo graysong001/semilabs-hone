@@ -199,8 +199,8 @@ class TestHandlerScrapeTask:
         mock_engine.page = None
 
         # Create task in DB
-        from semilabs_hone.core.models.task import ScrapeTask
-        task = ScrapeTask(
+        from semilabs_hone.core.models.task import CollectionTask
+        task = CollectionTask(
             account_id=1,
             platform="xiaohongshu",
             status="running",

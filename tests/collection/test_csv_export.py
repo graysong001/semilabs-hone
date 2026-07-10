@@ -27,14 +27,14 @@ from semilabs_hone.modules.collection.export.csv_exporter import (
 
 def _seed_basic(db_session):
     """Insert one post + two comments."""
-    from semilabs_hone.core.models.post import Post
-    from semilabs_hone.core.models.comment import Comment
+    from semilabs_hone.core.models.post import CollectionItem
+    from semilabs_hone.core.models.comment import CollectionComment
     from semilabs_hone.core.models.keyword import Keyword
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
 
-    task = ScrapeTask(id=1, account_id=1, platform="xiaohongshu", status="completed")
+    task = CollectionTask(id=1, account_id=1, platform="xiaohongshu", status="completed")
     kw = Keyword(id=1, text="test_kw", platform="xiaohongshu")
-    post = Post(
+    post = CollectionItem(
         id=1, platform="xiaohongshu", platform_id="note_001",
         task_id=1, keyword_id=1, url="https://xhs.link/note_001",
         title="Test Post", author_name="AuthorA", content="Hello world",
@@ -42,9 +42,9 @@ def _seed_basic(db_session):
         comments_count=2, shares=5, published_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
         image_count=3, scraped_at=datetime(2025, 7, 1, tzinfo=timezone.utc),
     )
-    c1 = Comment(id=1, post_id=1, author_name="UserX", content="Great!", likes=50,
+    c1 = CollectionComment(id=1, post_id=1, author_name="UserX", content="Great!", likes=50,
                  sub_comment_count=2, is_author_liked=True, rank=1)
-    c2 = Comment(id=2, post_id=1, author_name="UserY", content="Nice", likes=30,
+    c2 = CollectionComment(id=2, post_id=1, author_name="UserY", content="Nice", likes=30,
                  sub_comment_count=0, is_author_liked=False, rank=2)
     for obj in [task, kw, post, c1, c2]:
         db_session.add(obj)
@@ -108,13 +108,13 @@ class TestExportCsvAi:
 
     def test_export_csv_ai_no_comments(self, db_session):
         """AI mode with post but no comments has empty top_comments."""
-        from semilabs_hone.core.models.post import Post
+        from semilabs_hone.core.models.post import CollectionItem
         from semilabs_hone.core.models.keyword import Keyword
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
 
-        task = ScrapeTask(id=2, account_id=1, platform="xiaohongshu", status="completed")
+        task = CollectionTask(id=2, account_id=1, platform="xiaohongshu", status="completed")
         kw = Keyword(id=2, text="no_comments", platform="xiaohongshu")
-        post = Post(
+        post = CollectionItem(
             id=2, platform="xiaohongshu", platform_id="note_002",
             task_id=2, keyword_id=2, title="No comments post",
             author_name="AuthorB",
@@ -203,41 +203,41 @@ class TestExportCsvFiltering:
 
     def test_export_csv_filter_by_task_id(self, db_session):
         """Only posts for the given task_id are exported."""
-        from semilabs_hone.core.models.post import Post
+        from semilabs_hone.core.models.post import CollectionItem
         from semilabs_hone.core.models.keyword import Keyword
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
 
-        t1 = ScrapeTask(id=10, account_id=1, platform="xiaohongshu", status="completed")
-        t2 = ScrapeTask(id=11, account_id=1, platform="xiaohongshu", status="completed")
+        t1 = CollectionTask(id=10, account_id=1, platform="xiaohongshu", status="completed")
+        t2 = CollectionTask(id=11, account_id=1, platform="xiaohongshu", status="completed")
         kw1 = Keyword(id=10, text="kw_a", platform="xiaohongshu")
         kw2 = Keyword(id=11, text="kw_b", platform="xiaohongshu")
-        p1 = Post(id=10, platform="xiaohongshu", platform_id="n10",
+        p1 = CollectionItem(id=10, platform="xiaohongshu", platform_id="n10",
                   task_id=10, keyword_id=10, title="Post for task 10",
                   author_name="A10")
-        p2 = Post(id=11, platform="xiaohongshu", platform_id="n11",
+        p2 = CollectionItem(id=11, platform="xiaohongshu", platform_id="n11",
                   task_id=11, keyword_id=11, title="Post for task 11",
                   author_name="A11")
         for obj in [t1, t2, kw1, kw2, p1, p2]:
             db_session.add(obj)
         db_session.commit()
 
-        path = export_csv(task_id=10, fmt="ai")
+        path = export_csv(task_id="10", fmt="ai")
         rows = _read_csv(path)
         assert len(rows) == 1
         assert rows[0]["note_id"] == "n10"
 
     def test_export_csv_filter_by_keyword(self, db_session):
         """Only posts for the given keyword text are exported."""
-        from semilabs_hone.core.models.post import Post
+        from semilabs_hone.core.models.post import CollectionItem
         from semilabs_hone.core.models.keyword import Keyword
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
 
-        task = ScrapeTask(id=20, account_id=1, platform="xiaohongshu", status="completed")
+        task = CollectionTask(id=20, account_id=1, platform="xiaohongshu", status="completed")
         kw1 = Keyword(id=20, text="alpha", platform="xiaohongshu")
         kw2 = Keyword(id=21, text="beta", platform="xiaohongshu")
-        p1 = Post(id=20, platform="xiaohongshu", platform_id="n20",
+        p1 = CollectionItem(id=20, platform="xiaohongshu", platform_id="n20",
                   task_id=20, keyword_id=20, title="Alpha post", author_name="Alpha")
-        p2 = Post(id=21, platform="xiaohongshu", platform_id="n21",
+        p2 = CollectionItem(id=21, platform="xiaohongshu", platform_id="n21",
                   task_id=20, keyword_id=21, title="Beta post", author_name="Beta")
         for obj in [task, kw1, kw2, p1, p2]:
             db_session.add(obj)

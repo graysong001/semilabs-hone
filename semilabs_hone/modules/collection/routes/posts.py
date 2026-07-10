@@ -3,6 +3,11 @@
 Design: docs/skim_design.md §13.1.
 GET /posts — filter by platform/keyword, pagination
 GET /posts/{id} — post detail with comments
+
+[契约变更 2026-07-10] S3: model renamed Post→CollectionItem / Comment→
+CollectionComment; PK is now a UUID str so path params are str. Reads the
+retained legacy columns (content/likes/post_id/rank/keyword_id/...) which
+S4/S7 will migrate onto the PRD §6.2/§6.3 columns.
 """
 from __future__ import annotations
 
@@ -32,15 +37,15 @@ async def page_posts(
 ) -> HTMLResponse:
     """GET /posts — browse scraped posts with filters and pagination."""
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.post import Post
+    from semilabs_hone.core.models.post import CollectionItem
     from semilabs_hone.core.models.keyword import Keyword
 
     sess = get_session()
     try:
-        q = sess.query(Post)
+        q = sess.query(CollectionItem)
 
         if platform:
-            q = q.filter(Post.platform == platform)
+            q = q.filter(CollectionItem.platform == platform)
 
         if keyword:
             kw_ids = (
@@ -50,11 +55,11 @@ async def page_posts(
             )
             kw_id_list = [k.id for k in kw_ids]
             if kw_id_list:
-                q = q.filter(Post.keyword_id.in_(kw_id_list))
+                q = q.filter(CollectionItem.keyword_id.in_(kw_id_list))
 
         total = q.count()
         posts = (
-            q.order_by(Post.id.desc())
+            q.order_by(CollectionItem.id.desc())
             .offset((page - 1) * per_page)
             .limit(per_page)
             .all()
@@ -98,23 +103,23 @@ async def page_posts(
 
 
 @router.get("/posts/{post_id}", response_class=HTMLResponse)
-async def page_post_detail(request: Request, post_id: int) -> HTMLResponse:
+async def page_post_detail(request: Request, post_id: str) -> HTMLResponse:
     """GET /posts/{id} — post detail with comments."""
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.post import Post
-    from semilabs_hone.core.models.comment import Comment
+    from semilabs_hone.core.models.post import CollectionItem
+    from semilabs_hone.core.models.comment import CollectionComment
 
     sess = get_session()
     try:
-        post = sess.query(Post).filter(Post.id == post_id).first()
+        post = sess.query(CollectionItem).filter(CollectionItem.id == post_id).first()
         if post is None:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Post not found")
 
         comments = (
-            sess.query(Comment)
-            .filter(Comment.post_id == post.id)
-            .order_by(Comment.rank)
+            sess.query(CollectionComment)
+            .filter(CollectionComment.post_id == post.id)
+            .order_by(CollectionComment.rank)
             .all()
         )
     except Exception:

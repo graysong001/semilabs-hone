@@ -470,15 +470,15 @@ async def _download_images_for_post(
 
 def _upsert_post(
     post: Any,
-    task_id: int | None,
+    task_id: str | None,
     keyword: str,
     comments: list | None = None,
     progress_cb: Callable | None = None,
 ) -> None:
     """Upsert post and comments to SQLite."""
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.post import Post
-    from semilabs_hone.core.models.comment import Comment
+    from semilabs_hone.core.models.post import CollectionItem
+    from semilabs_hone.core.models.comment import CollectionComment
     from semilabs_hone.core.models.keyword import Keyword
 
     sess = get_session()
@@ -501,8 +501,8 @@ def _upsert_post(
         )
 
         existing = (
-            sess.query(Post)
-            .filter(Post.platform == platform, Post.platform_id == platform_id)
+            sess.query(CollectionItem)
+            .filter(CollectionItem.platform == platform, CollectionItem.platform_id == platform_id)
             .first()
         )
 
@@ -529,7 +529,7 @@ def _upsert_post(
                 setattr(existing, k, v)
             post_obj = existing
         else:
-            post_obj = Post(
+            post_obj = CollectionItem(
                 platform=platform,
                 platform_id=platform_id or "",
                 **{k: v for k, v in post_fields.items() if k not in ("task_id", "keyword_id")},
@@ -545,8 +545,8 @@ def _upsert_post(
             for rank, c in enumerate(comments, 1):
                 c_platform_id = getattr(c, "platform_id", None) or (c.get("platform_id") if isinstance(c, dict) else None)
                 existing_c = (
-                    sess.query(Comment)
-                    .filter(Comment.post_id == post_obj.id, Comment.platform_id == c_platform_id)
+                    sess.query(CollectionComment)
+                    .filter(CollectionComment.post_id == post_obj.id, CollectionComment.platform_id == c_platform_id)
                     .first()
                 )
                 c_data = {
@@ -560,7 +560,7 @@ def _upsert_post(
                     for k, v in c_data.items():
                         setattr(existing_c, k, v)
                 else:
-                    comment_obj = Comment(
+                    comment_obj = CollectionComment(
                         post_id=post_obj.id,
                         platform_id=c_platform_id,
                         **c_data,
@@ -575,7 +575,7 @@ def _upsert_post(
 
 
 def _update_task_progress(
-    task_id: int | None,
+    task_id: str | None,
     last_note_index: int,
     posts_scraped: int,
     progress_cb: Callable,
@@ -585,10 +585,10 @@ def _update_task_progress(
         return
     try:
         from semilabs_hone.core.models.db import get_session
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
         sess = get_session()
         try:
-            task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
                 task.last_note_index = last_note_index
                 task.posts_scraped = posts_scraped
@@ -599,16 +599,16 @@ def _update_task_progress(
         logger.warning(f"Failed to update task progress: {exc}")
 
 
-def _load_task(task_id: int | None, progress_cb: Callable | None = None) -> dict | None:
+def _load_task(task_id: str | None, progress_cb: Callable | None = None) -> dict | None:
     """Load task from DB."""
     if task_id is None:
         return None
     try:
         from semilabs_hone.core.models.db import get_session
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
         sess = get_session()
         try:
-            task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
                 return {
                     "id": task.id,
@@ -626,7 +626,7 @@ def _load_task(task_id: int | None, progress_cb: Callable | None = None) -> dict
 
 
 def _complete_task(
-    task_id: int | None,
+    task_id: str | None,
     posts_scraped: int,
     comments_count: int,
     last_note_index: int,
@@ -637,10 +637,10 @@ def _complete_task(
         return
     try:
         from semilabs_hone.core.models.db import get_session
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
         sess = get_session()
         try:
-            task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
                 task.status = "completed"
                 task.posts_scraped = posts_scraped

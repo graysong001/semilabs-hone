@@ -221,11 +221,11 @@ def _create_task_form(keywords: str) -> dict:
 
 def _get_task_statuses() -> dict:
     from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
 
     sess = get_session()
     try:
-        tasks = sess.query(ScrapeTask).order_by(ScrapeTask.id.asc()).all()
+        tasks = sess.query(CollectionTask).order_by(CollectionTask.id.asc()).all()
         return {t.id: t.status for t in tasks}
     finally:
         sess.close()

@@ -31,6 +31,15 @@
 - 引擎：WAL + `check_same_thread=False` + `timeout=15`
 - 旧 `scrape_tasks/posts/comments` 模型直接改名/改字段（不保留双表、不写搬迁脚本）
 
+**[契约变更 2026-07-10 S3 过渡态]**（实测消费者耦合后的最小逻辑改动裁决）
+- S3 已上 PRD §6 全部新列 + UUID str36 PK + CASCADE FK(item_id/task_id) + UNIQUE 新名(uix_platform_item/uix_item_comment) + WAL + repository.upsert；类名 `ScrapeTask/Post/Comment→CollectionTask/CollectionItem/CollectionComment`，文件 `post.py/comment.py` 类改名（文件名保留以零 import 改动）。
+- **超表过渡**：为不破坏 S4/S7 拥有的 `handlers._upsert_post`/`csv_exporter`（仍读写旧列 `content/likes/collects/comments_count/shares/tags/post_type/image_count/post_id/platform_id(评论)/sub_comment_count/is_author_liked/rank/published_at/max_posts_per_keyword/posts_scraped/last_note_index/sort_type/download_images/collect_comments/error_message/error_category/account_id/keyword_id/...`）与 `test_csv_export`/`test_integration` 的 int-id seeding，S3 **保留**这些旧列并保留旧 `UNIQUE(post_id,platform_id)`，与 PRD 新列并存。旧列 FK 已移除（account_id/keyword_id/post_id 仅裸列）。
+- **`metrics_json` 闲置**：S3 只建列+repository 写它；handlers 仍写旧 `likes` 等。S4 改 handlers 走 `repository.upsert_item`(content_text/metrics_json) 时切聚合；S7 改 csv_exporter 读 `content_text/metrics_json` 并落宽表；届时从模型删旧列 + 旧 UNIQUE（create_all 重建即生效）。
+- **`task_id` 类型**：全链 int→str(UUID)。`routes/handlers/csv_exporter` 的 `task_id` 参数注解 int→str、`test_csv_export`/`test_integration` 显式 int id seeding→str——均机械，零逻辑改动。watchdog 仅类名替换（status/error_message/error_category 旧列保留）。
+- **PRD NOT NULL 暂缓**：`collection_items.url`、`collection_comments.platform_comment_id` PRD 标 NOT NULL，但旧 seeding/handlers 不填；S3 暂设 nullable，S4/S7 切换后改回 NOT NULL。
+- **routes 创建表单**：`routes/tasks.py` 仍收旧 form(account_id/keywords/sort/max_posts/download_images/collect_comments) 并派生填 PRD 列(task_type="keyword_search"/target_value=kw[0]/expected_count=max_posts)，IPC payload 向后兼容。完整 dialog 迁移属 S6/T32。
+- **清理责任**：S4 删 handlers 旧列引用+切 metrics_json；S6 删 routes 旧 form/TaskKeyword/Keyword 链；S7 删 csv_exporter 旧列读+落宽表+删旧 UNIQUE。各 session 清理后从模型删对应旧列。
+
 **3. IPC 契约（PRD §3.4/§7.2）**
 - 目录 `data/ipc/{requests,results,progress,control}`（control 扁平，无 cancel 子层；`control/cancel/` 仅旧哨兵兼容）
 - 命名：`requests/<id>.json` · `results/<id>.json` · `progress/<id>.json` · `progress/heartbeat.json` · `control/ctrl_<id>.json`
@@ -106,7 +115,7 @@
 |---|:-:|:-:|---|---|---|---|
 | S1 | ✅ | ✅ | — | P0 反检测+节律+IPC 原语 | T01-T04 | test_human_behavior/test_rhythm/test_fingerprint/test_ipc |
 | S2 | ✅ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
-| S3 | ⬜ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
+| S3 | ✅ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
 | S4 | ⬜ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
 | S5 | ⬜ | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🟡 知乎录制 platform.yaml | 新 test_solver + 人验 zhihu |
 | S6 | ⬜ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
@@ -141,12 +150,12 @@
 
 | 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
 |---|:-:|:-:|---|---|---|
-| T10 DB 引擎 WAL | ⬜ | ✅ | — | models/db.py check_same_thread=False+timeout=15+PRAGMA journal_mode=WAL | test_models |
-| T11 collection_tasks 表 | ⬜ | ✅ | T10 | models/task.py CollectionTask(UUID PK, task_type/target_value/expected/actual/error_msg/updated_at) | test_models |
-| T12 collection_items 表 | ⬜ | ✅ | T11 | models/post.py→collection_item.py metrics_json TEXT+publish_time VARCHAR+UNIQUE(platform,platform_id) | test_models |
-| T13 collection_comments 表 | ⬜ | ✅ | T12 | models/comment.py→collection_comment.py UNIQUE(item_id,platform_comment_id) | test_models |
-| T14 repository upsert | ⬜ | ✅ | T12,T13 | models/repository.py ON CONFLICT DO UPDATE upsert_item/upsert_comment | test_models |
-| T15 schemas 校验 | ⬜ | ✅ | T11 | schemas.py TaskCreate 校验 http 前缀+count[1,200]截断 | test_routes |
+| T10 DB 引擎 WAL | ✅ | ✅ | — | models/db.py check_same_thread=False+timeout=15+PRAGMA journal_mode=WAL | test_models |
+| T11 collection_tasks 表 | ✅ | ✅ | T10 | models/task.py CollectionTask(UUID PK, task_type/target_value/expected/actual/error_msg/updated_at) | test_models |
+| T12 collection_items 表 | ✅ | ✅ | T11 | models/post.py→collection_item.py metrics_json TEXT+publish_time VARCHAR+UNIQUE(platform,platform_id) | test_models |
+| T13 collection_comments 表 | ✅ | ✅ | T12 | models/comment.py→collection_comment.py UNIQUE(item_id,platform_comment_id) | test_models |
+| T14 repository upsert | ✅ | ✅ | T12,T13 | models/repository.py ON CONFLICT DO UPDATE upsert_item/upsert_comment | test_models |
+| T15 schemas 校验 | ✅ | ✅ | T11 | schemas.py TaskCreate 校验 http 前缀+count[1,200]截断 | test_routes |
 | ~~T16 数据搬迁脚本~~ | — | — | — | 契约变更删除（原地改表，无需搬迁） | — |
 
 ## P2 — 采集能力补全（PRD §4.2-4.5）
@@ -232,4 +241,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
 - ✅ **S2 完成**（T05 server 读后即焚+坏文件+心跳+control 分发 / T06 心跳看门狗 30s→paused+WS / T07 单任务并发锁(PRD 2.2 pending 排队) / T08 CDPAttachError+worker 优雅退出 / T09 linter 禁 while True/is_captcha/account+auto_then_manual）。新增 `core/ipc/watchdog.py`，全量回归 291 passed，门禁全绿。
   - **裁决记 WHY**：T07 PRD §8.2 场景2.2（B、C 创建为 pending 排队）与原 T07 措辞「拒绝排队」表面矛盾——以 PRD 验收场景为准：创建恒为 pending，仅当无 running 时晋升 running，其余 submit IPC 按 mtime 顺序排队；pending→running 的 pick-up 晋升交给 S4 engine/handler 层（避免与 engine 双重晋升冲突）。
   - T08 task→paused 的「立即性」由 T06 看门狗（≤30s）兜底；精确文案端到端验证属 S9 人工（T70）。
-- ⬜ **下一会话 = S3**（P1 数据模型对齐：T10 WAL · T11-T13 collection_* 三表原地改名 · T14 repository upsert · T15 schemas 校验）。依赖 S2 已✅，可自动✅。范围聚焦 `models/db.py`+`task.py`+`post.py`+`comment.py`+`repository.py`+`schemas.py`，门禁 test_models/test_routes。
+- ✅ **S3 完成**（T10 db.py WAL+check_same_thread+timeout=15 / T11-T13 collection_* 三表：CollectionTask/CollectionItem/CollectionComment，UUID str36 PK + PRD §6 新列 + CASCADE FK + UNIQUE 新名 + 旧列保留过渡 / T14 repository.upsert_item/upsert_comment ON CONFLICT+metrics_json pack / T15 schemas TaskCreate 重构 task_type/target_value/expected_count + http 前缀校验 + count[1,200] 截断）。全量回归 302 passed，门禁全绿。
+  - **裁决记 WHY（最小逻辑改动 vs 契约字面）**：PRD §6 全字段重排会破坏 S4/S7 拥有的 handlers/csv_exporter/test_csv_export/test_integration（读写旧列 content/likes/post_id + int-id seeding）。按用户判据「名字差异→存量越小越好；新增→按设计文档」选**保留旧列+加 PRD 新列**过渡：存量消费者零逻辑改动（仅类名+task_id 类型机械替换），PRD 新列/UUID/UNIQUE/WAL/repository 全上。超表过渡态与清理责任见「共享上下文契约 §2 [契约变更 2026-07-10 S3 过渡态]」。
+  - **遗留清理**：metrics_json 闲置(待 S4 切聚合) / 旧列+旧 UNIQUE(待 S4/S6/S7 删) / routes 旧 form(待 S6/T32) / PRD NOT NULL(url/platform_comment_id 暂缓,待 S4/S7)。
+- ⬜ **下一会话 = S4**（P2 引擎+探针+节律：T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环）。依赖 S3 已✅。范围 `modules/collection/{engine,handlers,scrapers/field_extract,risk_probes(新)}`，门禁 test_engine/test_field_extract/test_rhythm + 新 test_risk_probes。**S4 须顺手清理**：handlers `_upsert_post` 切走 `repository.upsert_item`(content_text/metrics_json)、删旧列引用；pending→running 晋升逻辑（S2 T07 遗留）。

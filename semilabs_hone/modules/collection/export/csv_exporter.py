@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from semilabs_hone.core.models.db import get_session
-from semilabs_hone.core.models.post import Post
-from semilabs_hone.core.models.comment import Comment
+from semilabs_hone.core.models.post import CollectionItem
+from semilabs_hone.core.models.comment import CollectionComment
 from semilabs_hone.core.models.keyword import Keyword
-from semilabs_hone.core.models.task import ScrapeTask, TaskKeyword
+from semilabs_hone.core.models.task import CollectionTask, TaskKeyword
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ def _fmt_dt(val: Any) -> str:
     return str(val)
 
 
-def _build_top_comments(comments: list[Comment]) -> str:
+def _build_top_comments(comments: list[CollectionComment]) -> str:
     """Return pipe-separated "Author:Content(N likes)" for top comments."""
     parts: list[str] = []
     for c in sorted(comments, key=lambda x: x.likes or 0, reverse=True):
@@ -53,29 +53,29 @@ def _build_top_comments(comments: list[Comment]) -> str:
 
 
 def _query_posts(
-    task_id: int | None,
+    task_id: str | None,
     keyword: str | None,
-) -> list[tuple[Post, str, list[Comment]]]:
+) -> list[tuple[CollectionItem, str, list[CollectionComment]]]:
     """Return list of (post, keyword_text, [comments]) matching filters."""
     sess = get_session()
     try:
-        q = sess.query(Post)
+        q = sess.query(CollectionItem)
 
         if task_id is not None:
-            q = q.filter(Post.task_id == task_id)
+            q = q.filter(CollectionItem.task_id == task_id)
 
         if keyword is not None:
             # Find keyword_id(s) matching the text
             kw_sub = sess.query(Keyword.id).filter(Keyword.text == keyword)
-            q = q.filter(Post.keyword_id.in_(kw_sub))
+            q = q.filter(CollectionItem.keyword_id.in_(kw_sub))
 
-        posts = q.order_by(Post.id).all()
+        posts = q.order_by(CollectionItem.id).all()
 
         # Fetch comments for these posts in one query
         post_ids = [p.id for p in posts]
-        comments_map: dict[int, list[Comment]] = {}
+        comments_map: dict[int, list[CollectionComment]] = {}
         if post_ids:
-            comments_list = sess.query(Comment).filter(Comment.post_id.in_(post_ids)).all()
+            comments_list = sess.query(CollectionComment).filter(CollectionComment.post_id.in_(post_ids)).all()
             for c in comments_list:
                 comments_map.setdefault(c.post_id, []).append(c)
 
@@ -88,7 +88,7 @@ def _query_posts(
                 kws = sess.query(Keyword).filter(Keyword.id.in_(kw_ids)).all()
                 keyword_map = {kw.id: kw.text for kw in kws}
 
-        result: list[tuple[Post, str, list[Comment]]] = []
+        result: list[tuple[CollectionItem, str, list[CollectionComment]]] = []
         for p in posts:
             kw_text = keyword_map.get(p.keyword_id, "") if p.keyword_id is not None else ""
             result.append((p, kw_text, comments_map.get(p.id, [])))
@@ -99,7 +99,7 @@ def _query_posts(
 
 
 def _ai_csv_rows(
-    posts_data: list[tuple[Post, str, list[Comment]]],
+    posts_data: list[tuple[CollectionItem, str, list[CollectionComment]]],
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for post, kw_text, comments in posts_data:
@@ -150,7 +150,7 @@ _COMMENT_EXCEL_FIELDS = [
 
 
 def _write_excel_zip(
-    posts_data: list[tuple[Post, str, list[Comment]]],
+    posts_data: list[tuple[CollectionItem, str, list[CollectionComment]]],
     path: Path,
 ) -> None:
     posts_rows: list[dict[str, str]] = []
@@ -206,7 +206,7 @@ def _write_excel_zip(
 # ---------------------------------------------------------------------------
 
 def export_csv(
-    task_id: int | None = None,
+    task_id: str | None = None,
     keyword: str | None = None,
     fmt: str = "ai",
 ) -> Path:

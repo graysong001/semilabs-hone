@@ -34,19 +34,50 @@ def test_dm02_models_contract():
     acct = pytest.importorskip("semilabs_hone.core.models.account")
     assert hasattr(acct, "Account")
     tsk = pytest.importorskip("semilabs_hone.core.models.task")
-    assert hasattr(tsk, "ScrapeTask") and hasattr(tsk, "TaskKeyword")
-    # D6: scrape_tasks 必须有 download_images / collect_comments 列
-    cols = {c.name for c in tsk.ScrapeTask.__table__.columns}
-    assert "download_images" in cols, "ScrapeTask 缺 download_images (D6)"
-    assert "collect_comments" in cols, "ScrapeTask 缺 collect_comments (D6)"
+    assert hasattr(tsk, "CollectionTask") and hasattr(tsk, "TaskKeyword")
+    # PRD §6.1: collection_tasks 必须有 PRD 规范列
+    cols = {c.name for c in tsk.CollectionTask.__table__.columns}
+    for prd_col in ["id", "platform", "task_type", "target_value", "status",
+                    "expected_count", "actual_count", "error_msg",
+                    "created_at", "updated_at"]:
+        assert prd_col in cols, f"collection_tasks 缺 PRD 列 {prd_col}"
+    # id 必须是 String(36) UUID PK (PRD §6.1)
+    id_col = tsk.CollectionTask.__table__.columns["id"]
+    assert id_col.primary_key and str(id_col.type).upper().startswith("VARCHAR"), "collection_tasks.id 非 UUID PK"
+    # D6 legacy 列保留 (S4/S6 迁移后再删)
+    assert "download_images" in cols and "collect_comments" in cols, "CollectionTask 缺 download_images/collect_comments (D6 过渡保留)"
     post = pytest.importorskip("semilabs_hone.core.models.post")
-    pcols = {c.name for c in post.Post.__table__.columns}
-    assert "raw_json" in pcols and "platform_id" in pcols, "Post 缺 raw_json/platform_id"
+    assert hasattr(post, "CollectionItem")
+    pcols = {c.name for c in post.CollectionItem.__table__.columns}
+    # PRD §6.2: collection_items 规范列 + UNIQUE(platform,platform_id)
+    for prd_col in ["id", "task_id", "platform", "platform_id", "url", "title",
+                    "content_text", "author_name", "metrics_json",
+                    "publish_time", "scraped_at"]:
+        assert prd_col in pcols, f"collection_items 缺 PRD 列 {prd_col}"
+    uq_names = {c.name for c in post.CollectionItem.__table__.constraints}
+    assert "uix_platform_item" in uq_names, "collection_items 缺 UNIQUE uix_platform_item"
+    # D6 legacy 列保留
+    assert "raw_json" in pcols and "platform_id" in pcols, "CollectionItem 缺 raw_json/platform_id (过渡保留)"
     cmt = pytest.importorskip("semilabs_hone.core.models.comment")
-    assert hasattr(cmt, "Comment")
+    assert hasattr(cmt, "CollectionComment")
+    ccols = {c.name for c in cmt.CollectionComment.__table__.columns}
+    # PRD §6.3: collection_comments 规范列 + UNIQUE(item_id,platform_comment_id)
+    for prd_col in ["id", "item_id", "platform_comment_id", "author_name",
+                    "content_text", "like_count", "scraped_at"]:
+        assert prd_col in ccols, f"collection_comments 缺 PRD 列 {prd_col}"
+    cuq_names = {c.name for c in cmt.CollectionComment.__table__.constraints}
+    assert "uix_item_comment" in cuq_names, "collection_comments 缺 UNIQUE uix_item_comment"
+    # repository (PRD §6.4): upsert 入口
+    repo = pytest.importorskip("semilabs_hone.core.models.repository")
+    for fn in ["upsert_item", "upsert_comment", "pack_metrics", "unpack_metrics"]:
+        assert callable(getattr(repo, fn, None)), f"repository 缺 {fn}"
     sch = pytest.importorskip("semilabs_hone.core.models.schemas")
     for name in ["AccountCreate", "TaskCreate", "ProgressMessage", "ItemRef", "ScrapedPost", "ScrapedComment"]:
         assert hasattr(sch, name), f"schemas 缺 {name}"
+    # PRD §4.1/§6.1: TaskCreate 规范字段
+    tc_fields = set(sch.TaskCreate.model_fields)
+    for f in ["platform", "task_type", "target_value", "expected_count"]:
+        assert f in tc_fields, f"TaskCreate 缺 PRD 字段 {f}"
     # D8: ProgressMessage 必须有 data 字段
     assert "data" in sch.ProgressMessage.model_fields, "ProgressMessage 缺 data (D8)"
 

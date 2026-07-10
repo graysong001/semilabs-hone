@@ -16,7 +16,7 @@ router = APIRouter()
 
 @router.get("/api/export", response_model=None)
 async def api_export(
-    task_id: int | None = Query(default=None),
+    task_id: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
     fmt: str = Query(default="ai", alias="format"),
 ) -> None:

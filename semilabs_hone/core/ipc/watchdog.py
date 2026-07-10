@@ -51,13 +51,13 @@ def reap_stale_running_task(session, now: float | None = None, threshold: float 
     ProgressMessage-shaped dict for ws_manager.broadcast. Returns None when
     no stale running task is found.
     """
-    from semilabs_hone.core.models.task import ScrapeTask
+    from semilabs_hone.core.models.task import CollectionTask
 
     is_stale, age, message = check_heartbeat(now=now, threshold=threshold)
     if not is_stale:
         return None
 
-    task = session.query(ScrapeTask).filter(ScrapeTask.status == "running").first()
+    task = session.query(CollectionTask).filter(CollectionTask.status == "running").first()
     if task is None:
         return None
 
