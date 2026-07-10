@@ -116,7 +116,7 @@
 | S1 | ✅ | ✅ | — | P0 反检测+节律+IPC 原语 | T01-T04 | test_human_behavior/test_rhythm/test_fingerprint/test_ipc |
 | S2 | ✅ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
 | S3 | ✅ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
-| S4 | ⬜ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
+| S4 | ✅ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
 | S5 | ⬜ | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🟡 知乎录制 platform.yaml | 新 test_solver + 人验 zhihu |
 | S6 | ⬜ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
 | S7 | ⬜ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
@@ -235,7 +235,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
 2. **干完**：勾 S 段 T checklist → 跑 `bash scripts/loop_gate.sh` → 退出 0 才标该 S ✅ → 原子化 commit（`[session SNN] <desc>`）+ push。
 3. **交接**：更新本表该 S 状态行 + 「当前进度快照」；🟡 标 🔄 不标 ✅；❌ 跳过。契约若被改 → 回写「共享上下文契约」节并标 `[契约变更]`。
 
-## 当前进度快照（2026-07-10）
+## 当前进度快照（2026-07-11）
 
 - ✅ **S1 完成**（T01-T04：stealth 零注入 / mouse.wheel+smart_wait / 夜间长 sleep / IPC 原语），commit `5de4d26`/`3dba7c3`，分支 `feat/skim-prd-align` 已 push。
 - ✅ **S2 完成**（T05 server 读后即焚+坏文件+心跳+control 分发 / T06 心跳看门狗 30s→paused+WS / T07 单任务并发锁(PRD 2.2 pending 排队) / T08 CDPAttachError+worker 优雅退出 / T09 linter 禁 while True/is_captcha/account+auto_then_manual）。新增 `core/ipc/watchdog.py`，全量回归 291 passed，门禁全绿。
@@ -244,4 +244,15 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
 - ✅ **S3 完成**（T10 db.py WAL+check_same_thread+timeout=15 / T11-T13 collection_* 三表：CollectionTask/CollectionItem/CollectionComment，UUID str36 PK + PRD §6 新列 + CASCADE FK + UNIQUE 新名 + 旧列保留过渡 / T14 repository.upsert_item/upsert_comment ON CONFLICT+metrics_json pack / T15 schemas TaskCreate 重构 task_type/target_value/expected_count + http 前缀校验 + count[1,200] 截断）。全量回归 302 passed，门禁全绿。
   - **裁决记 WHY（最小逻辑改动 vs 契约字面）**：PRD §6 全字段重排会破坏 S4/S7 拥有的 handlers/csv_exporter/test_csv_export/test_integration（读写旧列 content/likes/post_id + int-id seeding）。按用户判据「名字差异→存量越小越好；新增→按设计文档」选**保留旧列+加 PRD 新列**过渡：存量消费者零逻辑改动（仅类名+task_id 类型机械替换），PRD 新列/UUID/UNIQUE/WAL/repository 全上。超表过渡态与清理责任见「共享上下文契约 §2 [契约变更 2026-07-10 S3 过渡态]」。
   - **遗留清理**：metrics_json 闲置(待 S4 切聚合) / 旧列+旧 UNIQUE(待 S4/S6/S7 删) / routes 旧 form(待 S6/T32) / PRD NOT NULL(url/platform_comment_id 暂缓,待 S4/S7)。
-- ⬜ **下一会话 = S4**（P2 引擎+探针+节律：T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环）。依赖 S3 已✅。范围 `modules/collection/{engine,handlers,scrapers/field_extract,risk_probes(新)}`，门禁 test_engine/test_field_extract/test_rhythm + 新 test_risk_probes。**S4 须顺手清理**：handlers `_upsert_post` 切走 `repository.upsert_item`(content_text/metrics_json)、删旧列引用；pending→running 晋升逻辑（S2 T07 遗留）。
+- ✅ **S4 完成**（T20 单条 try-except→detail_skip_error 进度+continue+计数 / T21 spec 增 `go_back`+`scroll_collect`(max_scrolls=20/empty_break=5) 步骤类型，engine 删 `scrollBy` 改 `mouse.wheel`，滚动边界 dedup+连续空跳出 / T22 `parse_likes`("1.2w"/"1.5万"→int,"赞"→0)+`title_fallback`(content[:20]) / T23 评论 sorted(likes desc)[:20] / T24 新 `risk_probes.py` probe(XHS captcha/知乎 signin/QR)+engine `on_risk` 钩子+`RiskProbeHit`→need_human+`_await_resume` 轮询 control / T25 `_night_sleep_if_quiet` 长睡不抛+主循环+逐条接入）。新增 `modules/collection/risk_probes.py`、`tests/collection/test_risk_probes.py`。全量回归 338 passed，门禁全绿。
+  - **裁决记 WHY**：
+    - **need_human = handler 内挂起轮询 control，非返回 need_human 结束**。PRD §4.4.2 明令 worker 每 2s 轮询 `control/` 等 resume、resume 后**重跑探针再从当前 URL 续抓**；返回状态结束会丢页面状态、与 PRD §4.4.3「重置探针→从中断 URL 重抓」冲突。故 handler 内 `_handle_need_human`→`_await_resume`(读后即焚 control)→重试同一 ref（engine 再 goto 触发探针）。`_await_resume` 用 `while waiting:` 非 `while True` 以过 §7.4 linter（有 resume/stop 出口，非刷新死循环）。
+    - **节律长睡替代抛错**。PRD §4.5.1 是长 `asyncio.sleep` 至 08:00 非 throw-and-retry；`_check_rhythm` 移除 `check_quiet_hours()` raise，quiet 全交 `_night_sleep_if_quiet`（Phase1 前置 + 逐条前置，gate 在任何网络请求前）。`now=` 注入 + 测试 patch 规避墙钟 flaky（会话经验 #7）。
+    - **探针粒度=engine 内钩子**。PRD §4.4.1「每次 goto/scroll/click 后立刻探针」粒度细于 handler 外层包；engine 持 `on_risk` 回调在 navigate/scroll/scroll_collect/click 后触发、命中抛 `RiskProbeHit`，handler 统一翻译为 need_human。mock engine 时 `on_risk=None` 不影响现有 engine 单测。
+    - **S3 清理**：handlers `_upsert_post` 切 `repository.upsert_item`/`upsert_comment`（content_text/metrics_json 聚合 + `parse_likes` 清洗 + `title_fallback`），删旧列写入引用；`_update_task_progress`/`_complete_task` 写 PRD `actual_count`；`_promote_to_running` 落 pending→running 晋升（S2 T07 遗留）。
+  - **遗留清理（S4 后仍 open）**：
+    - **route resume→control wiring 缺口**：`routes/tasks.py /api/tasks/{id}/resume` 目前是发新 IPC request（op scrape_task, resume=True），**未**按 PRD §4.4.3 step4 写 `control/ctrl_<rid>.json {action:resume}`。handler `_await_resume` 轮询 control/ 的行为正确，但真实 /resume 路径未对接（handler 测试用直接写 control 文件覆盖）。属 UI/路由 wiring，归 **S6(T32 dialog)/S9(T70 端到验)** 补 resume→control 写入 + UI「我已处理」按钮。
+    - **评论 3 次滚动加载**：T23「最多 3 次滚动」语义落在 comments flow 的 `scroll_collect`(max_scrolls=3)；engine 已支持，XHS comments flow yaml 未加 scroll_collect 步骤（录制侧，🟡 S5/T27 知乎录制时统一补）。
+    - **model 旧列/NOT NULL 不动**（契约 §2：列删除+url/platform_comment_id NOT NULL 归 S7 csv_exporter 切换时）。
+    - **scroll_collect 真增量 XHR**：当前对静态 saved 快照重抽 dedup（测边界 20/5）；真实浏览器「滚动触发新 XHR→累积」需 flow 在每次 scroll 后再 wait_xhr，属录制侧真实化（🟡 S5/S9）。
+- ⬜ **下一会话 = S5**（P2 可选验证码 + 知乎录制：T26 solver `detect_and_solve` 加 `risk_tier`/`captcha_policy` 参数默认 manual→立即 need_human；anonymous+auto_then_manual 才走 slide/ocr 失败 1 次转人工 · T27 🟡 知乎录制 search/detail/comments 三 flow 生成 `platforms/zhihu/platform.yaml`）。依赖 S4 已✅。门禁 新 test_solver + 人验 zhihu。

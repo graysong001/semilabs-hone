@@ -264,7 +264,14 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     # --- Phase 1: Warmup ---
     progress_cb("phase1_warmup", {"task_id": task_id})
 
-    # Check rhythm
+    # Night-sleep gate before ANY network (PRD §4.5.1/§7.4): long-sleep, not throw.
+    await _night_sleep_if_quiet(progress_cb)
+
+    # pending→running promotion (S2 T07 遗留): a queued task becomes running
+    # when the worker picks up its IPC request. Resume counters preserved.
+    _promote_to_running(task_id, progress_cb)
+
+    # Daily-cap guard (quiet hours handled above via long-sleep).
     _check_rhythm(account_id, progress_cb)
 
     # Get page/engine (lazy)
@@ -272,6 +279,16 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     if engine is None:
         from semilabs_hone.core.utils.retry import BrowserClosedError
         raise BrowserClosedError("无法获取浏览器页面")
+
+    # Wire risk probe: the engine fires it after every goto/scroll/click and
+    # raises RiskProbeHit on a hit (PRD §4.4.1). The handler translates a hit
+    # into a need_human sink + human-resume wait.
+    try:
+        from semilabs_hone.modules.collection.risk_probes import probe as _risk_probe
+        engine.on_risk = lambda page, _p=platform: _risk_probe(page, _p)
+    except Exception:
+        # engine without probe wiring still works (probes are best-effort).
+        pass
 
     # Warmup browse
     await _do_warmup(engine, progress_cb)
@@ -295,7 +312,7 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
             progress_cb("keyword_delay", {"keyword": keyword, "index": ki})
             # In real mode, this sleeps per keyword_delay
             # For handler, just signal
-            await asyncio.sleep(0.1)  # Short delay for test; real config.NOTE_DELAY is 60-180s
+            await asyncio.sleep(0.1)  # Short delay for test; real config.KEYWORD_DELAY is 60-180s
 
         # --- Phase 2: Search ---
         progress_cb("phase2_search", {
@@ -307,8 +324,11 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
         try:
             item_refs = await engine.search(keyword, sort)
         except Exception as exc:
-            # Re-raise SkimError subclasses (CaptchaError, QuietHoursError, etc.)
-            # so the IPC server can handle them properly.
+            from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+            if isinstance(exc, RiskProbeHit):
+                # Captcha/login wall during search goto/scroll → suspend.
+                await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                break  # task suspended (need_human); stop the keyword loop
             from semilabs_hone.core.utils.retry import SkimError
             if isinstance(exc, SkimError):
                 raise
@@ -345,59 +365,87 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 "note_index": last_note_index,
             })
 
-            # Fetch detail
-            try:
-                post = await engine.fetch_item(ref)
-            except Exception as exc:
-                from semilabs_hone.core.utils.retry import SkimError
-                if isinstance(exc, SkimError):
-                    raise
-                logger.warning(f"Detail fetch failed for '{platform_id}': {exc}")
-                continue
+            # Night-sleep gate per item (PRD §4.5.1).
+            await _night_sleep_if_quiet(progress_cb)
 
-            # Download images if enabled
-            images_downloaded = 0
-            if download_images:
-                image_urls = getattr(post, "image_urls", None) or (post.get("image_urls") if isinstance(post, dict) else [])
-                if image_urls:
-                    try:
-                        await _download_images_for_post(image_urls, platform_id, progress_cb)
-                        images_downloaded = len(image_urls) if isinstance(image_urls, list) else 0
-                    except Exception as exc:
-                        logger.warning(f"Image download failed for '{platform_id}': {exc}")
-
-            total_images += images_downloaded
-
-            # Note delay
-            await asyncio.sleep(0.05)  # Short for test; real is 30-90s
-
-            # --- Phase 4: Comments ---
-            comments_fetched = 0
-            if collect_comments:
-                progress_cb("phase4_comments", {
-                    "task_id": task_id,
-                    "platform_id": platform_id,
-                })
+            # Retry-after-resume loop: a RiskProbeHit suspends → await human
+            # resume → re-run the same ref (engine re-probes on its next goto).
+            # `while not done` (not bare `while True`) per the §7.4 linter: exits
+            # on success (done=True) or skip (break); only resumes via continue.
+            done = False
+            while not done:
                 try:
-                    comments = await engine.fetch_comments(ref)
-                    # Top 20 by likes
-                    comments = sorted(comments, key=lambda c: getattr(c, "likes", 0) if hasattr(c, "likes") else c.get("likes", 0), reverse=True)[:20]
-                    comments_fetched = len(comments)
+                    post = await engine.fetch_item(ref)
                 except Exception as exc:
-                    logger.warning(f"Comments fetch failed for '{platform_id}': {exc}")
-                    comments = []
+                    from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+                    if isinstance(exc, RiskProbeHit):
+                        await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                        continue  # retry same ref after resume (done still False)
+                    from semilabs_hone.core.utils.retry import SkimError
+                    if isinstance(exc, SkimError):
+                        raise
+                    # T20 (PRD 8.4 场景4.1): single-item skip + count — the
+                    # note_index already advanced (consumed); keep going.
+                    progress_cb("detail_skip_error", {
+                        "platform_id": platform_id, "error": str(exc),
+                    })
+                    break  # give up this ref, move to the next
 
-            total_comments += comments_fetched
+                # Download images if enabled
+                images_downloaded = 0
+                if download_images:
+                    image_urls = getattr(post, "image_urls", None) or (post.get("image_urls") if isinstance(post, dict) else [])
+                    if image_urls:
+                        try:
+                            await _download_images_for_post(image_urls, platform_id, progress_cb)
+                            images_downloaded = len(image_urls) if isinstance(image_urls, list) else 0
+                        except Exception as exc:
+                            logger.warning(f"Image download failed for '{platform_id}': {exc}")
 
-            # --- Phase 5: Store ---
-            try:
-                _upsert_post(post, task_id, keyword, comments, progress_cb)
-                total_posts += 1
-            except Exception as exc:
-                logger.warning(f"Store failed for '{platform_id}': {exc}")
+                total_images += images_downloaded
 
-            # Update last_note_index
-            _update_task_progress(task_id, last_note_index, total_posts, progress_cb)
+                # Note delay (PRD §4.5.2: 30-90s warmup dwell; test short).
+                await asyncio.sleep(0.05)
+
+                # --- Phase 4: Comments (Top 20 by likes, PRD §4.3.2) ---
+                comments_fetched = 0
+                comments: list = []
+                if collect_comments:
+                    progress_cb("phase4_comments", {
+                        "task_id": task_id,
+                        "platform_id": platform_id,
+                    })
+                    try:
+                        raw_comments = await engine.fetch_comments(ref)
+                    except Exception as exc:
+                        from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+                        if isinstance(exc, RiskProbeHit):
+                            raise  # bubble to the outer retry loop
+                        logger.warning(f"Comments fetch failed for '{platform_id}': {exc}")
+                        raw_comments = []
+                    # Top 20 by likes descending; fewer than 20 → keep all.
+                    comments = sorted(
+                        raw_comments,
+                        key=lambda c: getattr(c, "likes", 0) if hasattr(c, "likes") else (c.get("likes", 0) if isinstance(c, dict) else 0),
+                        reverse=True,
+                    )[:20]
+                    comments_fetched = len(comments)
+
+                total_comments += comments_fetched
+
+                # --- Phase 5: Store (PRD §6 upsert via repository) ---
+                try:
+                    _upsert_post(post, task_id, keyword, comments, progress_cb)
+                    total_posts += 1
+                except Exception as exc:
+                    logger.warning(f"Store failed for '{platform_id}': {exc}")
+                    progress_cb("store_failed", {
+                        "platform_id": platform_id, "error": str(exc),
+                    })
+
+                # Update last_note_index + actual_count
+                _update_task_progress(task_id, last_note_index, total_posts, progress_cb)
+                done = True  # ref fully processed → exit retry loop, next item
 
     # Final update
     progress_cb("scrape_complete", {
@@ -421,13 +469,13 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
 
 
 def _check_rhythm(account_id: int | None, progress_cb: Callable) -> None:
-    """Check quiet hours and daily limits."""
-    from semilabs_hone.modules.collection.scheduler.rhythm import (
-        check_quiet_hours,
-        check_daily_limit,
-    )
+    """Check daily scrape limit.
 
-    check_quiet_hours()
+    Quiet-hours handling moved to _night_sleep_if_quiet (long-sleep per PRD
+    §4.5.1, not a throw — a task started in the quiet window must long-sleep
+    until 08:00, not error out). This guard keeps only the daily-cap check.
+    """
+    from semilabs_hone.modules.collection.scheduler.rhythm import check_daily_limit
 
     if account_id is not None:
         # Get account for daily limit check
@@ -444,6 +492,126 @@ def _check_rhythm(account_id: int | None, progress_cb: Callable) -> None:
         except Exception:
             # If account lookup fails, pass rhythm check
             pass
+
+
+async def _night_sleep_if_quiet(progress_cb: Callable, now=None) -> None:
+    """If within quiet hours, long-sleep until 08:00 (PRD §4.5.1).
+
+    PRD night-sleep mechanism: do NOT throw-and-retry; the worker suspends via
+    a single long asyncio.sleep and issues zero network requests during
+    02:00-08:00. ``now`` is injectable so tests never depend on the wall clock
+    (会话经验 #7).
+    """
+    from semilabs_hone.modules.collection.scheduler.rhythm import (
+        is_quiet_hours,
+        sleep_until_wakeup,
+    )
+    if is_quiet_hours(now):
+        progress_cb("night_sleep", {"wakeup": "08:00", "msg": "夜间静默休眠至 08:00"})
+        await sleep_until_wakeup(now)
+
+
+def _promote_to_running(task_id: str | None, progress_cb: Callable) -> None:
+    """Promote a queued (pending) task to running when the worker picks it up.
+
+    S2 T07 left the pending→running pick-up to the engine/handler layer: the
+    worker pulls requests in mtime order, but the DB status flip happens here.
+    Resume-critical counters (last_note_index/actual_count) are preserved.
+    """
+    if task_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+            if task and task.status == "pending":
+                task.status = "running"
+                sess.commit()
+                progress_cb("task_promoted", {"task_id": task_id})
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to promote task {task_id}: {exc}")
+
+
+def _set_task_need_human(task_id: str | None, progress_cb: Callable) -> None:
+    """Sink a task's DB status to need_human (PRD §4.4.2 step 2)."""
+    if task_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+            if task:
+                task.status = "need_human"
+                sess.commit()
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to set need_human for {task_id}: {exc}")
+
+
+async def _await_resume(request_id: str, poll_interval: float = 2.0) -> str | None:
+    """Block until a ``resume`` control directive arrives (PRD §4.4.2 step 4).
+
+    Polls ``control/ctrl_<request_id>.json`` every ``poll_interval`` seconds,
+    read-after-burn. Non-resume directives are burned and ignored (the worker
+    stays suspended waiting for a human relay). ``poll_interval`` is injectable
+    so tests never sleep the real 2s. Returns "resume" or "stop".
+
+    Note: this is a persistent *suspend-until-resume* poll with explicit return
+    exits (resume/stop), NOT a captcha-refresh death loop — written without a
+    bare ``while True`` per the §7.4 linter.
+    """
+    from semilabs_hone.core.ipc.paths import burn, control_path, read_json_if_exists
+    if not request_id:
+        return None
+    waiting = True
+    while waiting:
+        p = control_path(request_id)
+        data = None
+        try:
+            data = read_json_if_exists(p)
+        except Exception:
+            burn(p)
+            data = None
+        if data is not None:
+            burn(p)
+            action = data.get("action")
+            if action == "resume":
+                return "resume"
+            if action == "stop":
+                return "stop"
+            # pause/unknown during need_human: keep waiting
+        await asyncio.sleep(poll_interval)
+
+
+async def _handle_need_human(
+    task_id: str | None,
+    request_id: str,
+    hit: Any,
+    progress_cb: Callable,
+    last_note_index: int,
+) -> str | None:
+    """Sink to need_human, broadcast, and block until a human resumes (PRD §4.4.2).
+
+    On resume, the caller re-runs the interrupted action (the engine re-probes
+    on its next goto/scroll/click). Returns the resume/stop directive.
+    """
+    kind = getattr(hit, "kind", None)
+    progress_cb("need_human", {
+        "task_id": task_id,
+        "stage": "captcha_or_login_blocked",
+        "kind": kind,
+        "msg": "平台下发验证码或登录失效，请手动处理",
+        "last_note_index": last_note_index,
+    })
+    _set_task_need_human(task_id, progress_cb)
+    return await _await_resume(request_id)
 
 
 async def _do_warmup(engine: Any, progress_cb: Callable) -> None:
@@ -475,99 +643,73 @@ def _upsert_post(
     comments: list | None = None,
     progress_cb: Callable | None = None,
 ) -> None:
-    """Upsert post and comments to SQLite."""
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.post import CollectionItem
-    from semilabs_hone.core.models.comment import CollectionComment
-    from semilabs_hone.core.models.keyword import Keyword
+    """Upsert post + comments via the PRD §6.4 repository (idempotent ON CONFLICT).
 
+    [S4 cleanup] Switched from the legacy direct-ORM path (writing the retained
+    legacy columns content/likes/...) to repository.upsert_item/upsert_comment,
+    which target the canonical PRD columns content_text/metrics_json/like_count.
+    Interaction strings are cleansed via parse_likes (PRD §8.5 场景5.1); the
+    title falls back to body[:20] when empty (PRD §8.5 场景5.2). ``keyword`` is
+    retained in the signature for call-site compatibility but unused (PRD
+    collection_items has no keyword column).
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.repository import upsert_comment, upsert_item
+    from semilabs_hone.modules.collection.scrapers.field_extract import (
+        parse_likes,
+        title_fallback,
+    )
+
+    def _g(obj: Any, name: str, default=None):
+        return getattr(obj, name, default) if not isinstance(obj, dict) else obj.get(name, default)
+
+    platform = _g(post, "platform", "xiaohongshu") or "xiaohongshu"
+    platform_id = _g(post, "platform_id", "") or ""
+    content = _g(post, "content", None)
+    title = _g(post, "title", None)
+    author_name = _g(post, "author_name", None)
+    published_at = _g(post, "published_at", None)
+    metrics = {
+        "likes": parse_likes(_g(post, "likes", 0) or 0),
+        "collects": parse_likes(_g(post, "collects", 0) or 0),
+        "comments_count": parse_likes(_g(post, "comments_count", 0) or 0),
+        "shares": parse_likes(_g(post, "shares", 0) or 0),
+    }
+
+    now = datetime.now(timezone.utc)
     sess = get_session()
     try:
-        # Resolve keyword
-        keyword_obj = None
-        if keyword:
-            keyword_obj = (
-                sess.query(Keyword)
-                .filter(Keyword.text == keyword)
-                .first()
-            )
-
-        # Upsert post
-        platform_id = getattr(post, "platform_id", None) or (
-            post.get("platform_id") if isinstance(post, dict) else None
-        )
-        platform = getattr(post, "platform", "xiaohongshu") or (
-            post.get("platform") if isinstance(post, dict) else "xiaohongshu"
+        item = upsert_item(
+            sess,
+            task_id=task_id,
+            platform=platform,
+            platform_id=platform_id,
+            url=None,  # ScrapedPost carries no url; PRD NOT NULL deferred to S7
+            title=title_fallback(title, content),
+            content_text=content,
+            author_name=author_name,
+            metrics=metrics,
+            publish_time=(str(published_at) if published_at is not None else None),
+            scraped_at=now,
         )
 
-        existing = (
-            sess.query(CollectionItem)
-            .filter(CollectionItem.platform == platform, CollectionItem.platform_id == platform_id)
-            .first()
-        )
-
-        now = datetime.now(timezone.utc)
-        post_fields = {
-            "title": getattr(post, "title", None) or (post.get("title") if isinstance(post, dict) else None),
-            "content": getattr(post, "content", None) or (post.get("content") if isinstance(post, dict) else None),
-            "author_name": getattr(post, "author_name", None) or (post.get("author_name") if isinstance(post, dict) else None),
-            "url": getattr(post, "url", None) or (post.get("url") if isinstance(post, dict) else None),
-            "likes": getattr(post, "likes", 0) or (post.get("likes", 0) if isinstance(post, dict) else 0),
-            "collects": getattr(post, "collects", 0) or (post.get("collects", 0) if isinstance(post, dict) else 0),
-            "comments_count": getattr(post, "comments_count", 0) or (post.get("comments_count", 0) if isinstance(post, dict) else 0),
-            "shares": getattr(post, "shares", 0) or (post.get("shares", 0) if isinstance(post, dict) else 0),
-            "image_count": getattr(post, "image_count", 0) or (post.get("image_count", 0) if isinstance(post, dict) else 0),
-            "scraped_at": now,
-        }
-        if task_id:
-            post_fields["task_id"] = task_id
-        if keyword_obj:
-            post_fields["keyword_id"] = keyword_obj.id
-
-        if existing:
-            for k, v in post_fields.items():
-                setattr(existing, k, v)
-            post_obj = existing
-        else:
-            post_obj = CollectionItem(
-                platform=platform,
-                platform_id=platform_id or "",
-                **{k: v for k, v in post_fields.items() if k not in ("task_id", "keyword_id")},
-                task_id=post_fields.get("task_id"),
-                keyword_id=post_fields.get("keyword_id"),
-            )
-            sess.add(post_obj)
-
-        sess.flush()
-
-        # Upsert comments
+        # Top-20 comments are already capped by the caller (PRD §4.3.2).
         if comments:
             for rank, c in enumerate(comments, 1):
-                c_platform_id = getattr(c, "platform_id", None) or (c.get("platform_id") if isinstance(c, dict) else None)
-                existing_c = (
-                    sess.query(CollectionComment)
-                    .filter(CollectionComment.post_id == post_obj.id, CollectionComment.platform_id == c_platform_id)
-                    .first()
+                c_author = _g(c, "author_name", None)
+                c_content = _g(c, "content", "") or ""
+                c_likes = parse_likes(_g(c, "likes", 0) or 0)
+                c_pid = _g(c, "platform_id", None) or f"synth_{rank}"
+                upsert_comment(
+                    sess,
+                    item_id=item.id,
+                    platform_comment_id=c_pid,
+                    author_name=c_author,
+                    content_text=c_content,
+                    like_count=c_likes,
+                    scraped_at=now,
                 )
-                c_data = {
-                    "author_name": getattr(c, "author_name", None) or (c.get("author_name") if isinstance(c, dict) else None),
-                    "content": getattr(c, "content", "") or (c.get("content", "") if isinstance(c, dict) else ""),
-                    "likes": getattr(c, "likes", 0) or (c.get("likes", 0) if isinstance(c, dict) else 0),
-                    "rank": rank,
-                    "scraped_at": now,
-                }
-                if existing_c:
-                    for k, v in c_data.items():
-                        setattr(existing_c, k, v)
-                else:
-                    comment_obj = CollectionComment(
-                        post_id=post_obj.id,
-                        platform_id=c_platform_id,
-                        **c_data,
-                    )
-                    sess.add(comment_obj)
 
-        sess.commit()
         if progress_cb:
             progress_cb("post_stored", {"platform_id": platform_id, "comments": len(comments) if comments else 0})
     finally:
@@ -580,7 +722,7 @@ def _update_task_progress(
     posts_scraped: int,
     progress_cb: Callable,
 ) -> None:
-    """Update task progress in DB."""
+    """Update task progress in DB (last_note_index + PRD actual_count)."""
     if task_id is None:
         return
     try:
@@ -592,6 +734,7 @@ def _update_task_progress(
             if task:
                 task.last_note_index = last_note_index
                 task.posts_scraped = posts_scraped
+                task.actual_count = posts_scraped  # PRD §6.1 canonical progress
                 sess.commit()
         finally:
             sess.close()
@@ -644,6 +787,7 @@ def _complete_task(
             if task:
                 task.status = "completed"
                 task.posts_scraped = posts_scraped
+                task.actual_count = posts_scraped  # PRD §6.1 canonical count
                 task.last_note_index = last_note_index
                 task.completed_at = datetime.now(timezone.utc)
                 sess.commit()

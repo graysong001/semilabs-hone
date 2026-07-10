@@ -152,6 +152,11 @@ def _make_app():
 # handler_scrape_task tests
 # ---------------------------------------------------------------------------
 
+async def _noop_async(*args, **kwargs):
+    """Neutralizer for night-sleep/warmup helpers so tests never wall-clock."""
+    return None
+
+
 class TestHandlerScrapeTask:
     async def test_scrape_task_mock_engine_five_stages_ok(self, db_session, tmp_data_dir, monkeypatch):
         """handler_scrape_task with mocked engine returns ok + posts_scraped."""
@@ -230,8 +235,10 @@ class TestHandlerScrapeTask:
         # Patch _get_engine and _check_rhythm to bypass quiet hours
         original_get_engine = h_mod._get_engine
         original_check_rhythm = h_mod._check_rhythm
+        original_night_sleep = h_mod._night_sleep_if_quiet
         h_mod._get_engine = lambda platform, account_id, progress_cb: mock_engine
         h_mod._check_rhythm = lambda account_id, progress_cb: None
+        h_mod._night_sleep_if_quiet = _noop_async  # never wall-clock long-sleep
 
         try:
             payload = {
@@ -254,6 +261,7 @@ class TestHandlerScrapeTask:
         finally:
             h_mod._get_engine = original_get_engine
             h_mod._check_rhythm = original_check_rhythm
+            h_mod._night_sleep_if_quiet = original_night_sleep
 
     async def test_scrape_task_captcha_error_raises(self, db_session, tmp_data_dir):
         """handler_scrape_task propagates CaptchaError for IPC server to handle."""
@@ -269,8 +277,10 @@ class TestHandlerScrapeTask:
         import semilabs_hone.modules.collection.handlers as h_mod
         original_get_engine = h_mod._get_engine
         original_check_rhythm = h_mod._check_rhythm
+        original_night_sleep = h_mod._night_sleep_if_quiet
         h_mod._get_engine = lambda platform, account_id, progress_cb: mock_engine
         h_mod._check_rhythm = lambda account_id, progress_cb: None
+        h_mod._night_sleep_if_quiet = _noop_async
 
         progress_calls = []
 
@@ -296,6 +306,319 @@ class TestHandlerScrapeTask:
         finally:
             h_mod._get_engine = original_get_engine
             h_mod._check_rhythm = original_check_rhythm
+            h_mod._night_sleep_if_quiet = original_night_sleep
+
+
+# ---------------------------------------------------------------------------
+# helper: build a mock engine + patched handler env (no wall-clock, no real DB lookup)
+# ---------------------------------------------------------------------------
+
+def _patch_handler_env(h_mod, mock_engine):
+    """Swap the engine/rhythm/night-sleep hooks for a mock; return originals."""
+    orig = {
+        "engine": h_mod._get_engine,
+        "rhythm": h_mod._check_rhythm,
+        "night": h_mod._night_sleep_if_quiet,
+    }
+    h_mod._get_engine = lambda platform, account_id, progress_cb: mock_engine
+    h_mod._check_rhythm = lambda account_id, progress_cb: None
+    h_mod._night_sleep_if_quiet = _noop_async
+    return orig
+
+
+def _restore_handler_env(h_mod, orig):
+    h_mod._get_engine = orig["engine"]
+    h_mod._check_rhythm = orig["rhythm"]
+    h_mod._night_sleep_if_quiet = orig["night"]
+
+
+def _make_task(db_session, *, status="running", max_posts=10):
+    from semilabs_hone.core.models.task import CollectionTask
+    task = CollectionTask(account_id=1, platform="xiaohongshu",
+                         status=status, max_posts_per_keyword=max_posts)
+    db_session.add(task)
+    db_session.commit()
+    return task.id
+
+
+# ---------------------------------------------------------------------------
+# T20 — single-item skip + count (PRD §8.4 场景4.1)
+# ---------------------------------------------------------------------------
+
+class TestHandlerScrapeTaskSkipCount:
+    async def test_timeout_one_item_skips_and_continues(self, db_session, tmp_data_dir):
+        """A fetch_item TimeoutError on one ref skips it; the rest still store."""
+        from semilabs_hone.core.models.schemas import ScrapedPost, ItemRef
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        call_count = {"n": 0}
+
+        async def mock_fetch_item(ref):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise TimeoutError("page.goto timed out")
+            return ScrapedPost(platform_id=ref.item_id, title="ok",
+                               content="c", author_name="A")
+
+        async def mock_search(keyword, sort):
+            return [FakeRef("bad"), FakeRef("good")]
+
+        async def mock_fetch_comments(ref):
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=10)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 10, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-skip",
+            }, cap)
+            assert result["status"] == "ok"
+            assert result["posts_scraped"] == 1  # only the good ref stored
+            # skip surfaced as a progress event (PRD 8.4 场景4.1)
+            assert any(m == "detail_skip_error" for m, _ in progress)
+        finally:
+            _restore_handler_env(h_mod, orig)
+
+
+# ---------------------------------------------------------------------------
+# T23 — comments Top 20 (PRD §4.3.2)
+# ---------------------------------------------------------------------------
+
+class TestHandlerScrapeTaskCommentsTop20:
+    async def test_comments_capped_to_top20_by_likes(self, db_session, tmp_data_dir):
+        """25 comments → only top 20 stored, ordered by likes descending."""
+        from semilabs_hone.core.models.schemas import ScrapedPost, ScrapedComment
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.comment import CollectionComment
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        async def mock_fetch_item(ref):
+            return ScrapedPost(platform_id=ref.item_id, title="t", content="c")
+
+        async def mock_fetch_comments(ref):
+            # 25 comments, likes 1..25 (so top-20 keeps likes 25..6)
+            return [ScrapedComment(author_name=f"u{i}", content=f"c{i}",
+                                   likes=i, platform_id=f"cid{i}") for i in range(1, 26)]
+
+        mock_engine = MagicMock()
+        mock_engine.search = lambda kw, sort: _async_return([FakeRef("n1")])
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+
+        try:
+            await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": True, "account_id": 1,
+                "request_id": "req-top20",
+            }, lambda m, d=None: None)
+
+            sess = get_session()
+            try:
+                cmts = sess.query(CollectionComment).all()
+                assert len(cmts) == 20
+                # top comment must have the highest likes (25)
+                likes = sorted(c.like_count for c in cmts)
+                assert likes[-1] == 25
+                assert likes[0] == 6  # 25..6 inclusive = 20 comments
+            finally:
+                sess.close()
+        finally:
+            _restore_handler_env(h_mod, orig)
+
+
+async def _async_return(value):
+    return value
+
+
+# ---------------------------------------------------------------------------
+# T24 — risk probe → need_human → resume (PRD §4.4.2/§4.4.3)
+# ---------------------------------------------------------------------------
+
+class TestHandlerScrapeTaskNeedHuman:
+    async def test_probe_hit_then_resume_retries_same_ref(self, db_session, tmp_data_dir):
+        """fetch_item raises RiskProbeHit once → need_human + await_resume → retry succeeds."""
+        from semilabs_hone.core.models.schemas import ScrapedPost
+        from semilabs_hone.core.utils.retry import SkimError  # noqa
+        from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+        from semilabs_hone.modules.collection.risk_probes import ProbeHit
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        attempts = {"n": 0}
+
+        async def mock_fetch_item(ref):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RiskProbeHit(ProbeHit(kind="captcha", platform="xiaohongshu"))
+            return ScrapedPost(platform_id=ref.item_id, title="t", content="c")
+
+        async def mock_search(keyword, sort):
+            return [FakeRef("n1")]
+
+        async def mock_fetch_comments(ref):
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        # Resume immediately (no real 2s poll / human).
+        orig_await = h_mod._await_resume
+        h_mod._await_resume = _noop_async
+
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-needhuman",
+            }, cap)
+            assert result["status"] == "ok"
+            assert result["posts_scraped"] == 1
+            # need_human surfaced + ref retried after resume
+            assert any(m == "need_human" for m, _ in progress)
+            assert attempts["n"] == 2
+        finally:
+            h_mod._await_resume = orig_await
+            _restore_handler_env(h_mod, orig)
+
+
+# ---------------------------------------------------------------------------
+# T25 — night-sleep long-sleep, not throw (PRD §4.5.1)
+# ---------------------------------------------------------------------------
+
+class TestHandlerScrapeTaskNightSleep:
+    async def test_quiet_hours_triggers_night_sleep_before_network(self, db_session, tmp_data_dir, monkeypatch):
+        """In quiet hours the handler long-sleeps (does NOT raise QuietHoursError)."""
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+        from semilabs_hone.modules.collection.scheduler import rhythm as rhythm_mod
+        from datetime import datetime
+
+        slept = []
+
+        async def fake_sleep_until_wakeup(now=None):
+            slept.append(now)
+            return 0.0
+
+        # Real _night_sleep_if_quiet, but with a quiet `now` + patched sleep.
+        orig_night = h_mod._night_sleep_if_quiet
+        orig_rhythm_sleep = rhythm_mod.sleep_until_wakeup
+        # Force quiet: 03:00
+        monkeypatch.setattr(rhythm_mod, "is_quiet_hours", lambda now=None: True)
+        rhythm_mod.sleep_until_wakeup = fake_sleep_until_wakeup
+
+        # engine never reached (night-sleep gates before search); stub minimal.
+        mock_engine = MagicMock()
+        mock_engine.search = lambda kw, sort: _async_return([])
+        mock_engine.fetch_item = lambda ref: _async_return(None)
+        mock_engine.fetch_comments = lambda ref: _async_return([])
+        mock_engine.page = None
+        orig = _patch_handler_env(h_mod, mock_engine)
+        # Restore the REAL night-sleep helper (patch env above no-op'd it).
+        h_mod._night_sleep_if_quiet = orig_night
+
+        task_id = _make_task(db_session, max_posts=5)
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-night",
+            }, cap)
+            assert any(m == "night_sleep" for m, _ in progress)
+            assert slept, "sleep_until_wakeup must be invoked in quiet hours"
+        finally:
+            rhythm_mod.sleep_until_wakeup = orig_rhythm_sleep
+            _restore_handler_env(h_mod, {**orig, "night": orig_night})
+
+
+# ---------------------------------------------------------------------------
+# _await_resume — control polling (PRD §4.4.2 step 4)
+# ---------------------------------------------------------------------------
+
+class TestAwaitResume:
+    async def test_resume_control_file_returns_resume(self, tmp_data_dir, monkeypatch):
+        """A pre-written resume control directive is read-and-burned → returns 'resume'."""
+        import semilabs_hone.modules.collection.handlers as h_mod
+        from semilabs_hone.core.ipc.paths import atomic_write_json, control_path
+
+        rid = "resume-rid"
+        atomic_write_json(control_path(rid), {"action": "resume"})
+
+        result = await h_mod._await_resume(rid, poll_interval=0.01)
+        assert result == "resume"
+        # read-after-burn: the control file is gone
+        assert not control_path(rid).exists()
+
+    async def test_no_directive_keeps_polling_until_resume(self, tmp_data_dir, monkeypatch):
+        """No file → polls; once resume appears → returns."""
+        import semilabs_hone.modules.collection.handlers as h_mod
+        from semilabs_hone.core.ipc.paths import atomic_write_json, control_path
+
+        rid = "poll-rid"
+        # Write the resume file after a short delay (simulate human relay).
+        import asyncio
+
+        async def write_later():
+            await asyncio.sleep(0.05)
+            atomic_write_json(control_path(rid), {"action": "resume"})
+
+        task = asyncio.create_task(write_later())
+        result = await h_mod._await_resume(rid, poll_interval=0.01)
+        await task
+        assert result == "resume"
 
 
 # ---------------------------------------------------------------------------

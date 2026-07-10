@@ -8,7 +8,9 @@ import pytest
 from semilabs_hone.modules.collection.scrapers.field_extract import (
     extract_api,
     extract_dom,
+    parse_likes,
     render_template,
+    title_fallback,
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -227,6 +229,74 @@ class TestRenderTemplate:
     def test_extra_vars_ignored(self):
         result = render_template("/search?q={keyword}", keyword="x", unused="y")
         assert result == "/search?q=x"
+
+
+# ---------------------------------------------------------------------------
+# parse_likes / title_fallback (PRD §8.5 场景5.1/5.2)
+# ---------------------------------------------------------------------------
+
+class TestParseLikes:
+    """Interaction-string cleansing (PRD §8.5 场景5.1)."""
+
+    def test_parse_likes_w_unit(self):
+        assert parse_likes("1.2w") == 12000
+
+    def test_parse_likes_wan_unit(self):
+        assert parse_likes("1.5万") == 15000
+
+    def test_parse_likes_wan_integer(self):
+        assert parse_likes("3万") == 30000
+
+    def test_parse_likes_zan_text_returns_zero(self):
+        """"赞" (hidden count) → 0."""
+        assert parse_likes("赞") == 0
+
+    def test_parse_likes_empty_string_returns_zero(self):
+        assert parse_likes("") == 0
+
+    def test_parse_likes_none_returns_zero(self):
+        assert parse_likes(None) == 0
+
+    def test_parse_likes_plain_int_string(self):
+        assert parse_likes("1234") == 1234
+
+    def test_parse_likes_with_trailing_zan(self):
+        """"1.5w赞" → 15000 (trailing label ignored)."""
+        assert parse_likes("1.5w赞") == 15000
+
+    def test_parse_likes_k_unit(self):
+        assert parse_likes("1.2k") == 1200
+
+    def test_parse_likes_qian_unit(self):
+        assert parse_likes("1.2千") == 1200
+
+    def test_parse_likes_numeric_passthrough(self):
+        assert parse_likes(1234) == 1234
+        assert parse_likes(1.5) == 1
+
+    def test_parse_likes_no_digit_returns_zero(self):
+        assert parse_likes("很赞") == 0
+
+
+class TestTitleFallback:
+    """Title fallback to body[:20] (PRD §8.5 场景5.2)."""
+
+    def test_title_present_returns_title(self):
+        assert title_fallback("我的标题", "正文内容") == "我的标题"
+
+    def test_title_empty_uses_content_prefix(self):
+        content = "这是一段很长的正文内容超过二十个字符的部分会被截断掉对吧"
+        assert title_fallback("", content) == content[:20]
+
+    def test_title_none_uses_content_prefix(self):
+        assert title_fallback(None, "正文") == "正文"
+
+    def test_both_empty_returns_empty(self):
+        assert title_fallback("", "") == ""
+        assert title_fallback(None, None) == ""
+
+    def test_title_whitespace_only_falls_back(self):
+        assert title_fallback("   ", "正文") == "正文"
 
 
 # ---------------------------------------------------------------------------

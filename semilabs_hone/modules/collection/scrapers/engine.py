@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
@@ -32,6 +32,20 @@ _GROUP_MODEL_MAP = {
 }
 
 
+class RiskProbeHit(Exception):
+    """Raised inside run_flow when the on_risk probe callback reports a hit.
+
+    PRD §4.4.1/§4.4.2: after every goto/scroll/click the worker must run a risk
+    probe; on hit it must immediately break the scrape loop and surface
+    need_human. The engine fires probes at the action sites and raises this so
+    the handler can translate it into a need_human status + resume wait.
+    """
+
+    def __init__(self, hit: Any = None, msg: str = "") -> None:
+        self.hit = hit
+        super().__init__(msg or getattr(hit, "kind", None) or "risk_probe_hit")
+
+
 class GenericEngine(BasePlatformScraper):
     """Replay step chains from platform.yaml, intercept XHR, extract fields.
 
@@ -50,6 +64,10 @@ class GenericEngine(BasePlatformScraper):
         self.page: Any = None
         self._llm_fail_count = 0
         self._llm_fail_threshold = 3
+        # Optional risk-probe callback set by the handler: async (page) -> hit|None.
+        # When set, run_flow fires it after navigate/scroll/scroll_collect/click
+        # and raises RiskProbeHit on a hit (PRD §4.4.1).
+        self.on_risk: Callable[[Any], Awaitable[Any]] | None = None
 
     async def _ensure_page(self) -> Any:
         """Get or create a page from context. Mockable."""
@@ -79,6 +97,7 @@ class GenericEngine(BasePlatformScraper):
                 case "navigate":
                     url = render_template(step.url or "", **vars)
                     await page.goto(url)
+                    await self._probe(page)
 
                 case "input":
                     locator = step.locator
@@ -87,9 +106,25 @@ class GenericEngine(BasePlatformScraper):
 
                 case "click":
                     await self._human_click(page, step.locator)
+                    await self._probe(page)
 
                 case "scroll":
                     await self._random_scroll(page, step.max_times, step.wait_ms)
+                    await self._probe(page)
+
+                case "scroll_collect":
+                    # Bounded incremental list collection (PRD §8.4 场景4.2):
+                    # re-extract after each wheel scroll, dedup new item ids, stop
+                    # at max_scrolls (20) or empty_break (5) consecutive no-new.
+                    await self._scroll_collect(page, step, saved, out)
+
+                case "go_back":
+                    # Return from a detail page to the list (PRD §4.2.2 step 5).
+                    try:
+                        await page.go_back()
+                    except Exception as exc:
+                        logger.warning("page.go_back() failed: %s", exc)
+                    await self._probe(page)
 
                 case "wait_xhr":
                     resp_data = await self._wait_xhr(
@@ -116,6 +151,93 @@ class GenericEngine(BasePlatformScraper):
                             logger.warning("Selector not found: %s", step.selector)
 
         return out
+
+    async def _probe(self, page: Any) -> None:
+        """Fire the risk probe if wired; raise RiskProbeHit on a hit.
+
+        No-op when the handler hasn't set on_risk (engine unit tests).
+        """
+        if self.on_risk is None:
+            return
+        hit = await self.on_risk(page)
+        if hit is not None:
+            raise RiskProbeHit(hit)
+
+    @staticmethod
+    def _item_dedup_key(item: dict) -> str:
+        """Stable dedup key for an extracted item dict (item_id or platform_id)."""
+        return str(item.get("item_id") or item.get("platform_id") or id(item))
+
+    async def _scroll_collect(
+        self,
+        page: Any,
+        step: Any,
+        saved: dict[str, Any],
+        out: list,
+    ) -> None:
+        """Scroll-and-collect loop with hard caps (PRD §8.4 场景4.2).
+
+        Re-extracts ``from_``/``group``/``map`` from the saved XHR snapshot after
+        each wheel scroll, dedups against already-collected ids, appends fresh
+        validated items to ``out``. Stops at ``max_scrolls`` (default 20) or
+        ``empty_break`` (default 5) consecutive scrolls with no new items —
+        never deadlocks on an infinite loader.
+        """
+        resp = saved.get(step.from_ or "")
+        group = step.group
+        fmap = step.map
+        if resp is None or not group or not fmap:
+            return
+
+        collected: set[str] = set()
+        consecutive_empty = 0
+        scrolls = 0
+
+        # Seed: extract the current snapshot before any scroll.
+        fresh = self._extract_dedup(resp, group, fmap, collected)
+        if fresh:
+            out.extend(await self._validate_group(fresh, group))
+            consecutive_empty = 0
+        else:
+            consecutive_empty = 1
+
+        while scrolls < step.max_scrolls and consecutive_empty < step.empty_break:
+            await self._random_scroll(page, 1, step.wait_ms)
+            scrolls += 1
+            fresh = self._extract_dedup(resp, group, fmap, collected)
+            if fresh:
+                out.extend(await self._validate_group(fresh, group))
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+
+        logger.debug(
+            "scroll_collect: scrolls=%d items=%d consecutive_empty=%d",
+            scrolls, len(out), consecutive_empty,
+        )
+
+    def _extract_dedup(
+        self,
+        resp: Any,
+        group: str,
+        fmap: dict[str, str],
+        collected: set[str],
+    ) -> list[dict]:
+        """Extract from a snapshot, returning only items whose dedup key is new
+        (and registering them in ``collected``). Never raises.
+        """
+        try:
+            items = extract_api(resp, group, fmap)
+        except Exception:
+            return []
+        fresh: list[dict] = []
+        for it in items:
+            key = self._item_dedup_key(it)
+            if key in collected:
+                continue
+            collected.add(key)
+            fresh.append(it)
+        return fresh
 
     async def _validate_group(self, items: list[dict], group: str) -> list:
         """Validate items against the Pydantic model for the group.
@@ -203,14 +325,24 @@ class GenericEngine(BasePlatformScraper):
                 await page.click(selector)
 
     async def _random_scroll(self, page: Any, max_times: int, wait_ms: int):
-        """Random scroll to trigger lazy loading."""
+        """Random scroll to trigger lazy loading.
+
+        Delegates to DM-06 human_behavior.random_scroll (mouse.wheel multi-step
+        + micro-pauses). PRD §4.2.1 forbids instant-teleport evaluate scrolling,
+        so even the fallback path uses physical mouse.wheel deltas — never an
+        evaluate-based scroll.
+        """
         try:
             from semilabs_hone.modules.collection.anti_detect.human_behavior import random_scroll
             await random_scroll(page, max_times, wait_ms)
         except ImportError:
-            for _ in range(max_times):
-                await page.evaluate("window.scrollBy(0, window.innerHeight)")
-                await asyncio.sleep(wait_ms / 1000.0)
+            # Fallback: physical wheel deltas (never evaluate-based scroll — redline).
+            for _ in range(max(1, max_times)):
+                try:
+                    await page.mouse.wheel(0, 800)
+                except Exception:
+                    pass
+                await asyncio.sleep(max(0.05, wait_ms / 1000.0))
 
     async def _wait_xhr(
         self,

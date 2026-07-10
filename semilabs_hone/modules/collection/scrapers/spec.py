@@ -20,7 +20,7 @@ class Locator(BaseModel):
 class Step(BaseModel):
     """One step in a flow's step chain."""
     type: Literal[
-        "navigate", "input", "click", "scroll",
+        "navigate", "input", "click", "scroll", "scroll_collect", "go_back",
         "wait_xhr", "extract", "wait_selector"
     ]
 
@@ -34,9 +34,14 @@ class Step(BaseModel):
     # click
     # (uses locator from above)
 
-    # scroll
+    # scroll / scroll_collect
     max_times: int = 3
     wait_ms: int = 800
+    # scroll_collect: bounded incremental list collection (PRD §8.4 场景4.2).
+    # Re-extracts `from_`/`group`/`map` after each wheel scroll, dedups new
+    # item_ids, stops at `max_scrolls` or `empty_break` consecutive no-new.
+    max_scrolls: int = 20
+    empty_break: int = 5
 
     # wait_xhr
     url_pattern: str | None = None
