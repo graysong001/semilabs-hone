@@ -5,11 +5,16 @@ Core function:
 
 Algorithm:
     1. Poll requests/ for the earliest file whose .module matches ours.
-    2. Look up the handler by .op in handler_registry.
-    3. Run the handler, streaming progress updates.
-    4. Self-check cancel sentinel before each step.
-    5. Write result (ok/error/paused/cancelled).
-    6. On exception, write error result with category/fix_hint.
+    2. Read-after-burn: load request into memory, then immediately delete the
+       file (PRD §7.2 redline — zombie instructions cause infinite re-execution).
+    3. Bad-JSON tolerance: a corrupt/truncated request file is caught, logged,
+       and burned without crashing the loop (PRD §8.3 场景 3.1).
+    4. Dispatch the handler by .op, streaming progress updates.
+    5. Consume control directives {pause,resume,stop} from control/ — read after
+       burn — before/after the handler (PRD §3.4 / §8.3 场景 3.2).
+    6. Self-check cancel sentinel before each step.
+    7. Write heartbeat every ~10s while alive (PRD §3.3).
+    8. Write result (ok/error/paused/cancelled/need_human).
 """
 from __future__ import annotations
 
@@ -19,20 +24,28 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from loguru import logger
+
 from .paths import (
     atomic_write_json,
+    burn,
     cancel_sentinel,
+    control_path,
     read_json_if_exists,
     request_path,
     result_path,
     requests_dir,
     progress_path,
     progress_dir,
+    write_heartbeat,
 )
 from .protocol import IPCProgress, IPCRequest, IPCResult
 
 HandlerFn = Callable[[dict, Callable[[str, dict | None], None]], dict]
 OnProgressFn = Callable[[str, str, dict], None]
+
+# Heartbeat cadence (PRD §3.3: every ~10s while worker alive).
+HEARTBEAT_INTERVAL = 10.0
 
 
 def _list_requests() -> list[Path]:
@@ -46,7 +59,7 @@ def _list_requests() -> list[Path]:
 
 
 def _is_cancelled(request_id: str) -> bool:
-    """Check if a cancel sentinel exists."""
+    """Check if a legacy cancel sentinel exists."""
     return cancel_sentinel(request_id).exists()
 
 
@@ -74,6 +87,60 @@ def _write_result(
     atomic_write_json(result_path(request_id), res.model_dump())
 
 
+def _consume_control(request_id: str) -> str | None:
+    """Read a control directive for a request, then burn it (read-after-burn).
+
+    Returns one of {"pause", "resume", "stop"} or None when no directive is
+    present. Corrupt JSON is caught, logged, and burned without raising
+    (PRD §8.3 场景 3.1 tolerance extends to control/ files).
+    """
+    p = control_path(request_id)
+    if not p.exists():
+        return None
+    try:
+        data = read_json_if_exists(p)
+    except Exception as exc:
+        logger.warning(f"[ipc] bad control JSON for {request_id}, burning: {exc}")
+        burn(p)
+        return None
+    if data is None:
+        return None
+    action = data.get("action")
+    # Burn immediately after loading into memory (PRD §7.2 / §8.3 场景 3.2).
+    burn(p)
+    if action in ("pause", "resume", "stop"):
+        return action
+    logger.warning(f"[ipc] unknown control action '{action}' for {request_id}")
+    return None
+
+
+def _load_request_or_burn(path: Path) -> dict | None:
+    """Load a request file into memory; burn it regardless of parse outcome.
+
+    Read-after-burn (PRD §7.2): the file is deleted the instant it is loaded
+    into memory. Bad JSON is caught, logged, and burned without crashing the
+    worker (PRD §8.3 场景 3.1). Returns None if the file is missing, corrupt,
+    or already had a result written.
+    """
+    rid_hint = path.stem
+    try:
+        data = read_json_if_exists(path)
+    except Exception as exc:
+        logger.warning(f"[ipc] bad request JSON {path.name}, burning: {exc}")
+        burn(path)
+        return None
+    if data is None:
+        return None
+    # Burn the request file the instant it is in memory (PRD §7.2 redline).
+    burn(path)
+    rid = data.get("request_id", rid_hint)
+    # Skip if a result was already written (idempotent re-poll guard).
+    if result_path(rid).exists():
+        logger.debug(f"[ipc] {rid} already has a result, skipping re-poll")
+        return None
+    return data
+
+
 async def serve_worker(
     module: str,
     handler_registry: dict[str, HandlerFn],
@@ -91,18 +158,22 @@ async def serve_worker(
             external notification (e.g. logging).
         poll_interval: seconds between request directory polls.
     """
+    last_heartbeat = 0.0
+
     while True:
+        # Heartbeat: write at most every HEARTBEAT_INTERVAL (PRD §3.3).
+        now = time.monotonic()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            write_heartbeat("alive")
+            last_heartbeat = now
+
         req_files = _list_requests()
         picked = None
         req_data = None
 
         for f in req_files:
-            data = read_json_if_exists(f)
+            data = _load_request_or_burn(f)
             if data is None:
-                continue
-            rid = data.get("request_id", "")
-            # Skip if already has a result
-            if result_path(rid).exists():
                 continue
             if data.get("module") == module:
                 picked = f
@@ -116,6 +187,24 @@ async def serve_worker(
         request_id = req_data["request_id"]
         op = req_data["op"]
         payload = req_data.get("payload", {})
+
+        # Self-check legacy cancel sentinel + control directives before dispatch.
+        if _is_cancelled(request_id):
+            _write_result(request_id, "cancelled")
+            continue
+        pre_control = _consume_control(request_id)
+        if pre_control == "stop":
+            _write_result(request_id, "cancelled")
+            continue
+        if pre_control == "pause":
+            _write_progress(request_id, "paused", {"reason": "control:pause"})
+            _write_result(
+                request_id,
+                "paused",
+                error={"category": "Paused", "message": "paused by control",
+                       "fix_hint": "resume via a new request when ready"},
+            )
+            continue
 
         # Dispatch
         handler = handler_registry.get(op)
@@ -139,11 +228,6 @@ async def serve_worker(
                 if on_progress:
                     on_progress(request_id, message, data or {})
 
-            # Self-check cancel before starting
-            if _is_cancelled(request_id):
-                _write_result(request_id, "cancelled")
-                continue
-
             # Support both sync and async handlers
             is_async = inspect.iscoroutinefunction(handler)
             if is_async:
@@ -160,8 +244,12 @@ async def serve_worker(
                 )
                 continue
 
-            # Check cancel after handler returns
+            # Check cancel/control after handler returns.
             if _is_cancelled(request_id):
+                _write_result(request_id, "cancelled")
+                continue
+            post_control = _consume_control(request_id)
+            if post_control == "stop":
                 _write_result(request_id, "cancelled")
                 continue
 

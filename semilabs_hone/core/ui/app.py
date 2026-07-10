@@ -9,6 +9,7 @@ Design: docs/skim_design.md §13.1.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 from pathlib import Path
 
@@ -103,6 +104,23 @@ def create_app() -> FastAPI:
         modules = _discover_modules()
         _register_routes(app, modules)
         logger.info(f"Discovered {len(modules)} modules: {[m['name'] for m in modules]}")
+
+        # Launch the heartbeat watchdog (PRD §3.3): reaps zombie `running`
+        # tasks whose worker heartbeat has gone stale (>30s) → paused + WS.
+        from semilabs_hone.core.ipc.watchdog import run_heartbeat_watchdog
+        app.state.watchdog_task = asyncio.create_task(
+            run_heartbeat_watchdog()
+        )
+
+    @app.on_event("shutdown")
+    async def _shutdown() -> None:
+        task = getattr(app.state, "watchdog_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # Mount static files
     static_dir = Path(__file__).resolve().parent / "static"

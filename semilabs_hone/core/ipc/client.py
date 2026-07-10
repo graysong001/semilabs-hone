@@ -16,6 +16,7 @@ from .protocol import IPCProgress, IPCRequest, IPCResult
 from .paths import (
     atomic_write_json,
     cancel_sentinel,
+    heartbeat_age,
     progress_path,
     read_json_if_exists,
     request_path,
@@ -63,3 +64,12 @@ class IPCClient:
         sentinel = cancel_sentinel(request_id)
         # Touch the file atomically
         atomic_write_json(sentinel, {"cancelled": True})
+
+    def poll_heartbeat(self) -> float | None:
+        """Return seconds since the worker last wrote heartbeat.json, or None.
+
+        None means no heartbeat exists yet (worker never started / dead).
+        The web-side watchdog flips a `running` task to `paused` once this
+        age exceeds 30s (PRD §3.3).
+        """
+        return heartbeat_age()
