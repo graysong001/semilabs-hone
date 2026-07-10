@@ -78,10 +78,7 @@
 4. **裁决记 WHY 不只记 WHAT**。每条"保留/推翻"都附一句理由。例："保留 WS——流式进度推送本质更适合，推翻是纯重写零新能力"。否则下个会话看到"保留 WS"会以为是不小心留下的，"好心"迁移成 HTMX。
 5. **会话粒度=文件/测试内聚，非原子性**。共享同一批文件+同一测试模块的子任务**并成一个会话**（如 T11/T12/T13 三表都动 `models/db.py`+`test_models.py`）。避免反复重读同批文件、上下文浪费。
 6. **代码 vs 规格评审用只读 Explore 并行扇出**。按子系统派 2-3 个 Explore agent 各审一块，比串行读 10k 行高效得多；只取结论不取文件 dump。本会话靠它一次定位 8 处冲突 + 6 处缺口。
-7. **后台轮询/守护任务拆「纯函数 + 异步循环壳」**。心跳看门狗这类长跑逻辑拆成：纯函数（传 `session`/`now`，只做判断+局部副作用）+ 异步循环壳（只管 sleep→调纯函数→broadcast）。纯函数可直接单测，不必起真实 loop 或靠 `asyncio.sleep` 竞速——否则这类逻辑要么测不到、要么 flaky。S2 心跳看门狗即此式：`reap_stale_running_task(session, now)` 可单测，`run_heartbeat_watchdog()` 只调度。
-8. **依赖时间/节拍的代码必须暴露注入点**。任何 `time.time()`/固定间隔（10s 心跳、30s 阈值）要么作参数（`now=`）传入、要么作模块常量（`HEARTBEAT_INTERVAL`），测试用 `monkeypatch`/传参注入小值；绝不在被测逻辑里写死墙钟，否则测试只能真实等待，又慢又脆。反例：心跳写入逻辑若内联 `time.time()` 且无 `now=` 参数，只能 sleep 10s 才测到，且与时序竞态。
-9. **禁用模式 linter 要为合法常驻用法留显式白名单**。禁 `while True`/`while is_captcha:` 时，合法常驻 poll/receive 循环（IPC server 主循环、WS receive、看门狗）会被同一正则误伤。用**文件 allowlist** 豁免这些明确长驻循环，而非宽正则一杆打翻——否则要么误伤现有代码、要么逼后来者用递归/state-machine 绕过。S2 把 `core/ipc/server.py`/`watchdog.py`/`app.py` 列入 `WHILE_TRUE_ALLOWLIST`。
-10. **并发锁先分清锁的是「创建」还是「晋升到 running」**。需求里「单任务锁/拒绝排队」措辞含混，但验收场景（§8.2 场景2.2：A running 时 B、C 应创建为 pending 排队）常要求**创建恒允许、只锁 running 转换**。实现前按验收场景反推锁粒度，别按字面「拒绝」把创建也拒掉。与经验#3 同源：措辞 vs 验收场景冲突时，以验收场景为准。S2 原代码把 pending 也拒（409），违背 2.2，改为创建恒 pending、仅无 running 时晋升。
+7. **依赖时间/节拍的逻辑必须暴露注入点，测试不靠墙钟**。全项目节奏/睡眠密集（节律 NOTE_DELAY/夜间 sleep/心跳 10s/看门狗阈值 30s）。任何 `time.time()`/固定间隔要么作参数（`now=`）传入、要么作模块常量（`HEARTBEAT_INTERVAL`），测试用 `monkeypatch`/传参注入小值；绝不在被测逻辑里写死墙钟，否则节律类测试只能真实等待几十秒、且与时序竞态 flaky。S1 rhythm 已循此式（`is_quiet_hours`/`sleep_until_wakeup` 显式传时间），S4 接入主循环时须保持。
 
 ---
 
