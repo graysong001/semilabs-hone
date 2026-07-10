@@ -201,3 +201,71 @@ def test_manifest_empty_routes_no_error(app):
     # Verified by the app fixture creation above
     from semilabs_hone.core.ui.app import _module_registry
     assert "collection" in _module_registry
+
+
+# ---------------------------------------------------------------------------
+# Single-running concurrency lock (PRD §8.2 场景 2.2)
+# ---------------------------------------------------------------------------
+
+def _create_task_form(keywords: str) -> dict:
+    return {
+        "account_id": 0,
+        "platform": "xiaohongshu",
+        "keywords": keywords,
+        "sort": "general",
+        "max_posts": 10,
+        "download_images": "false",
+        "collect_comments": "false",
+    }
+
+
+def _get_task_statuses() -> dict:
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import ScrapeTask
+
+    sess = get_session()
+    try:
+        tasks = sess.query(ScrapeTask).order_by(ScrapeTask.id.asc()).all()
+        return {t.id: t.status for t in tasks}
+    finally:
+        sess.close()
+
+
+def test_create_first_task_promoted_to_running(client: TestClient):
+    """When no task is running, a new task is promoted to running (submitted)."""
+    resp = client.post("/api/tasks", data=_create_task_form("alpha"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["status"] == "submitted"
+    statuses = _get_task_statuses()
+    assert list(statuses.values()) == ["running"]
+
+
+def test_create_second_task_while_running_is_queued_pending(client: TestClient):
+    """PRD §8.2 场景 2.2: while A is running, B is created as pending (queued)."""
+    # Task A → running
+    client.post("/api/tasks", data=_create_task_form("alpha"))
+    # Task B while A running → pending, queued
+    resp = client.post("/api/tasks", data=_create_task_form("beta"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["status"] == "queued"
+    statuses = list(_get_task_statuses().values())
+    # Exactly one running, one pending — never two running.
+    assert statuses.count("running") == 1
+    assert statuses.count("pending") == 1
+
+
+def test_create_third_task_still_only_one_running(client: TestClient):
+    """A running + B pending: creating C keeps a single running (C queued too)."""
+    client.post("/api/tasks", data=_create_task_form("alpha"))
+    client.post("/api/tasks", data=_create_task_form("beta"))
+    resp = client.post("/api/tasks", data=_create_task_form("gamma"))
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    statuses = list(_get_task_statuses().values())
+    assert statuses.count("running") == 1
+    assert statuses.count("pending") == 2
+

@@ -19,6 +19,7 @@ import sys
 from loguru import logger
 
 from semilabs_hone.modules.collection.browser.cdp import (
+    CDPAttachError,
     attach,
     find_free_port,
     launch_real_chrome,
@@ -54,6 +55,12 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(_run_worker(port))
     except KeyboardInterrupt:
         logger.info("Worker interrupted, shutting down")
+    except CDPAttachError as exc:
+        # PRD §8.1 场景 1.2: port busy / CDP connect refused. Surface the
+        # exact user-facing hint. The worker exits; the web-side heartbeat
+        # watchdog will reap the zombie `running` task → paused + WS within 30s.
+        logger.error(f"CDP attach failed: {exc.fix_hint}")
+        return 1
     except Exception as exc:
         logger.error(f"Worker failed: {exc}")
         return 1

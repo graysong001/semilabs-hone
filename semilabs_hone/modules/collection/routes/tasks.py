@@ -98,28 +98,30 @@ async def api_create_task(
     download_images: bool = Form(default=True),
     collect_comments: bool = Form(default=True),
 ) -> JSONResponse:
-    """POST /api/tasks — create scrape task and start via IPC.
+    """POST /api/tasks — create scrape task and enqueue via IPC.
 
-    Checks: only 1 running task at a time.
+    Single-running lock (PRD §8.2 场景 2.2): at most one task is `running` at a
+    time. New tasks are always created as `pending`. When no task is currently
+    `running`, this one is promoted to `running` and its IPC request is
+    submitted ("submitted"). When another task is already `running`, the new
+    task stays `pending` and its IPC request is still submitted so the worker
+    picks it up in mtime order after the current one finishes ("queued").
+
     Returns {request_id, status, task_id}.
     """
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.task import ScrapeTask, TaskKeyword
     from semilabs_hone.core.models.keyword import Keyword
 
-    # Check no running task
     sess = get_session()
     try:
-        running = sess.query(ScrapeTask).filter(
-            ScrapeTask.status.in_(["pending", "running"])
-        ).first()
-        if running:
-            return JSONResponse(
-                {"ok": False, "error": "A task is already running"},
-                status_code=409,
-            )
+        # Single-running lock: is a task already running?
+        already_running = sess.query(ScrapeTask).filter(
+            ScrapeTask.status == "running"
+        ).first() is not None
 
-        # Create task
+        # Create task as pending (queueable — PRD §8.2 场景 2.2 allows B/C pending
+        # while A runs).
         task = ScrapeTask(
             account_id=account_id,
             platform=platform,
@@ -147,6 +149,10 @@ async def api_create_task(
             link = TaskKeyword(task_id=task_id, keyword_id=kw.id)
             sess.add(link)
 
+        # Promote to running only when the single-running slot is free.
+        if not already_running:
+            task.status = "running"
+
         sess.commit()
     except Exception as exc:
         sess.rollback()
@@ -154,17 +160,8 @@ async def api_create_task(
     finally:
         sess.close()
 
-    # Update task to running
-    sess = get_session()
-    try:
-        task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
-        if task:
-            task.status = "running"
-            sess.commit()
-    finally:
-        sess.close()
-
-    # Submit IPC request
+    # Submit IPC request regardless (worker picks up in mtime order; queued
+    # tasks wait in requests/ until the current one finishes).
     IPCClient, IPCRequest = _ipc_client()
     request_id = uuid.uuid4().hex[:12]
 
@@ -193,7 +190,7 @@ async def api_create_task(
         "ok": True,
         "request_id": request_id,
         "task_id": task_id,
-        "status": "submitted",
+        "status": "queued" if already_running else "submitted",
     })
 
 
@@ -236,10 +233,11 @@ async def api_resume_task(task_id: int) -> JSONResponse:
         if not task:
             return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
 
-        # Check no other running task
+        # Single-running lock: only reject if ANOTHER task is already running
+        # (a pending task does not block resuming this one — PRD §8.2 场景 2.2).
         other_running = sess.query(ScrapeTask).filter(
             ScrapeTask.id != task_id,
-            ScrapeTask.status.in_(["pending", "running"]),
+            ScrapeTask.status == "running",
         ).first()
         if other_running:
             return JSONResponse(

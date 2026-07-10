@@ -13,6 +13,24 @@ from subprocess import DEVNULL
 
 import config
 
+# PRD §8.1 场景 1.2 — surfaced to the UI (via the heartbeat watchdog reaping
+# the zombie running task → paused + WS「引擎异常中断」) when the worker
+# cannot attach to Chrome because the debugging port is taken or connection
+# is refused. Distinct, message-carrying exception so worker_main can log the
+# exact user-facing hint.
+CDP_PORT_BUSY_HINT = "Chrome 调试端口被占用，请关闭所有 Chrome 窗口后重试"
+
+
+class CDPAttachError(Exception):
+    """Raised when connect_over_cdp fails (port busy / Chrome unreachable).
+
+    Carries the PRD §8.1 场景 1.2 user-facing hint so worker_main can surface it.
+    """
+
+    def __init__(self, message: str = CDP_PORT_BUSY_HINT) -> None:
+        super().__init__(message)
+        self.fix_hint = message
+
 
 def launch_real_chrome(profile_dir: str, port: int) -> subprocess.Popen:
     """Launch system Chrome with ONLY remote-debugging-port + user-data-dir."""
@@ -29,11 +47,19 @@ async def attach(port: int) -> "tuple":
     """Connect over CDP and return (Browser, BrowserContext).
 
     Lazy import playwright so this module is importable without it installed.
+    Raises CDPAttachError (PRD §8.1 场景 1.2) when connect_over_cdp fails — e.g.
+    the debugging port is occupied by another Chrome instance or Chrome did
+    not come up in time — so worker_main can surface the user-facing hint.
     """
     from playwright.async_api import async_playwright
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+    try:
+        browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+    except Exception as exc:
+        # Connection refused / port busy / bad endpoint — classify as a
+        # user-actionable CDP attach failure (PRD §8.1 场景 1.2).
+        raise CDPAttachError(f"{CDP_PORT_BUSY_HINT} ({exc})") from exc
     ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
     return browser, ctx
 

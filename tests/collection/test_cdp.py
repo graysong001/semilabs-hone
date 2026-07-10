@@ -114,6 +114,68 @@ class TestFindFreePort:
         assert result == 9346
 
 
+# ─── CDPAttachError tests (PRD §8.1 场景 1.2) ──────────────────────────────
+
+
+class TestCDPAttachError:
+    """attach() must classify connect_over_cdp failures as CDPAttachError."""
+
+    def test_cdpattach_error_carries_hint(self):
+        """CDPAttachError carries the PRD §8.1 user-facing hint."""
+        err = cdp.CDPAttachError()
+        assert cdp.CDP_PORT_BUSY_HINT in str(err)
+        assert err.fix_hint == cdp.CDP_PORT_BUSY_HINT
+
+    @pytest.mark.asyncio
+    async def test_attach_wraps_connection_failure(self):
+        """connect_over_cdp failure → CDPAttachError with the busy-port hint."""
+        import asyncio
+
+        class _FakePW:
+            class chromium:
+                @staticmethod
+                async def connect_over_cdp(endpoint):
+                    raise ConnectionError("connect ECONNREFUSED")
+
+            async def start(self):
+                return self
+
+        # Stub async_playwright so attach does not need real playwright.
+        import sys
+        fake_pw_mod = type(sys)("playwright.async_api")
+        fake_pw_mod.async_playwright = lambda: _FakePW()
+        with patch.dict(sys.modules, {"playwright.async_api": fake_pw_mod}):
+            with pytest.raises(cdp.CDPAttachError) as exc_info:
+                await cdp.attach(9333)
+        assert cdp.CDP_PORT_BUSY_HINT in str(exc_info.value)
+
+
+class TestWorkerMainCDPAttachFailure:
+    """worker_main must exit 1 on CDPAttachError (PRD §8.1 场景 1.2)."""
+
+    def test_main_exits_on_cdp_attach_error(self, tmp_data_dir, monkeypatch):
+        """A CDPAttachError from attach surfaces as exit code 1."""
+        from semilabs_hone.modules.collection.browser import worker_main
+
+        async def fake_attach(port):
+            raise cdp.CDPAttachError()
+
+        monkeypatch.setattr(worker_main, "find_free_port", lambda: 9333)
+        monkeypatch.setattr(
+            worker_main, "launch_real_chrome",
+            lambda pd, p: MagicMock(pid=1),
+        )
+        monkeypatch.setattr(
+            worker_main, "ensure_profile",
+            lambda aid: tmp_data_dir / "collection" / "profiles" / str(aid),
+        )
+        monkeypatch.setattr(worker_main, "attach", fake_attach)
+
+        rc = worker_main.main(["--account", "1"])
+        assert rc == 1
+
+
+
 # ─── profile tests ──────────────────────────────────────────────────────────
 
 
