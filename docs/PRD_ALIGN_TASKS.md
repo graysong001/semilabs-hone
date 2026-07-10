@@ -104,7 +104,7 @@
 | 会话 | 状态 | 可自动 | 依赖 | 主题 | 范围 | 会话门（pytest） |
 |---|:-:|:-:|---|---|---|---|
 | S1 | ✅ | ✅ | — | P0 反检测+节律+IPC 原语 | T01-T04 | test_human_behavior/test_rhythm/test_fingerprint/test_ipc |
-| S2 | ⬜ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
+| S2 | ✅ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
 | S3 | ⬜ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
 | S4 | ⬜ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
 | S5 | ⬜ | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🟡 知乎录制 platform.yaml | 新 test_solver + 人验 zhihu |
@@ -128,11 +128,11 @@
 | T02 拟人滚动/点击/等待 | ✅ | ✅ | T01 | human_behavior.py mouse.wheel + smart_wait | test_human_behavior |
 | T03 夜间长 sleep | ✅ | ✅ | — | rhythm.py is_quiet_hours+sleep_until_wakeup | test_rhythm |
 | T04 IPC 原语 | ✅ | ✅ | — | paths.py control_dir/burn/heartbeat/bad-JSON | test_ipc |
-| T05 IPC server 读后即焚+坏文件+心跳 | ⬜ | ✅ | T04 | server.py: 请求加载后立即 burn；坏 JSON catch+burn；serve 循环每 10s write_heartbeat；control 文件读后即焚分发 pause/resume/stop | test_ipc(新增 server 读后即焚+坏文件+心跳用例) |
-| T06 心跳看门狗 | ⬜ | ✅ | T04,T05 | client.py poll_heartbeat；web 侧 30s 过期→DB task running→paused + WS 广播「引擎异常中断」 | test_ipc(看门狗) + test_routes |
-| T07 单任务并发锁 | ⬜ | ✅ | — | routes/tasks.py 建/启动前查 status=running 计数>0 拒绝排队（PRD 8.2 场景2.2） | test_routes |
-| T08 cdp 端口冲突 | ⬜ | ✅ | — | browser/cdp.py 9333-9340 探测递增；CDP 连接失败→paused+UI 提示关 Chrome（PRD 8.1 场景1.2） | test_cdp |
-| T09 约束 linter 扩展 | ⬜ | ✅ | T01 | check_constraints.py 禁 while True/is_captcha 死循环；禁 account 站点 captcha_policy=auto_then_manual | check_constraints.py |
+| T05 IPC server 读后即焚+坏文件+心跳 | ✅ | ✅ | T04 | server.py: 请求加载后立即 burn；坏 JSON catch+burn；serve 循环每 10s write_heartbeat；control 文件读后即焚分发 pause/resume/stop | test_ipc(新增 server 读后即焚+坏文件+心跳用例) |
+| T06 心跳看门狗 | ✅ | ✅ | T04,T05 | client.py poll_heartbeat；web 侧 30s 过期→DB task running→paused + WS 广播「引擎异常中断」 | test_ipc(看门狗) + test_routes |
+| T07 单任务并发锁 | ✅ | ✅ | — | routes/tasks.py 建/启动前查 status=running 计数>0 拒绝排队（PRD 8.2 场景2.2） | test_routes |
+| T08 cdp 端口冲突 | ✅ | ✅ | — | browser/cdp.py 9333-9340 探测递增；CDP 连接失败→paused+UI 提示关 Chrome（PRD 8.1 场景1.2） | test_cdp |
+| T09 约束 linter 扩展 | ✅ | ✅ | T01 | check_constraints.py 禁 while True/is_captcha 死循环；禁 account 站点 captcha_policy=auto_then_manual | check_constraints.py |
 
 ## P1 — 数据模型对齐（PRD §6）
 
@@ -228,4 +228,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
 ## 当前进度快照（2026-07-10）
 
 - ✅ **S1 完成**（T01-T04：stealth 零注入 / mouse.wheel+smart_wait / 夜间长 sleep / IPC 原语），commit `5de4d26`/`3dba7c3`，分支 `feat/skim-prd-align` 已 push。
-- ⬜ **下一会话 = S2**（P0 IPC/安全 wiring：T05 server 读后即焚+坏文件+心跳+control 分发 / T06 心跳看门狗 / T07 单任务并发锁 / T08 cdp 端口冲突 / T09 约束 linter 扩展）。依赖 S1 已✅，可自动✅。范围聚焦 `core/ipc/server.py`+`client.py`+`browser/cdp.py`+`routes/tasks.py`+`scripts/check_constraints.py`，门禁 test_ipc/test_routes/test_cdp/check_constraints。
+- ✅ **S2 完成**（T05 server 读后即焚+坏文件+心跳+control 分发 / T06 心跳看门狗 30s→paused+WS / T07 单任务并发锁(PRD 2.2 pending 排队) / T08 CDPAttachError+worker 优雅退出 / T09 linter 禁 while True/is_captcha/account+auto_then_manual）。新增 `core/ipc/watchdog.py`，全量回归 291 passed，门禁全绿。
+  - **裁决记 WHY**：T07 PRD §8.2 场景2.2（B、C 创建为 pending 排队）与原 T07 措辞「拒绝排队」表面矛盾——以 PRD 验收场景为准：创建恒为 pending，仅当无 running 时晋升 running，其余 submit IPC 按 mtime 顺序排队；pending→running 的 pick-up 晋升交给 S4 engine/handler 层（避免与 engine 双重晋升冲突）。
+  - T08 task→paused 的「立即性」由 T06 看门狗（≤30s）兜底；精确文案端到端验证属 S9 人工（T70）。
+- ⬜ **下一会话 = S3**（P1 数据模型对齐：T10 WAL · T11-T13 collection_* 三表原地改名 · T14 repository upsert · T15 schemas 校验）。依赖 S2 已✅，可自动✅。范围聚焦 `models/db.py`+`task.py`+`post.py`+`comment.py`+`repository.py`+`schemas.py`，门禁 test_models/test_routes。
