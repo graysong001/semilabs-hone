@@ -1,6 +1,6 @@
 # semilabs-hone — 详细设计文档 (DESIGN.md)
 
-> 项目名 **semilabs-hone**（内容工厂）。本文档对 `skim.spec` 做架构级 review，并把整套设计定位为**多平台可扩展的内容工厂单体仓库**：信息采集（`modules/collection/`，UI 展示名 "Skim"）是第一个模块，后续扩展 `modules/analysis/`（AI 分析）、`modules/production/`（制作）、`modules/operations/`（运营）。本文档只到设计，不含实现代码。
+> 项目名 **semilabs-hone**（内容工厂）。本文档对 `skim.spec` 做架构级 review，并把整套设计定位为**多平台可扩展的内容工厂单体仓库**：信息采集（`modules/collection/`，UI 展示名 "Skim"）是第一个模块，后续扩展 `modules/analysis/`（AI 分析）、`modules/production/`（制作）、`modules/operations/`（运营）。本文档只到设计，不含实现代码。hone是一个本地桌面应用，信息采集负责从小红书、微信公众号、知乎等内容平台抓取内容素材（比如笔记+评论），存入 SQLite，支持 CSV 导出供 AI 分析和 Excel 筛选。AI分析负责将抓取的内容做意图挖掘、识别、热度评估、聚合等工作，根据我的选题方向以及内容平台上人们的关注度、关注点等形成内容话题提案，内容制作负责把确定的内容提案制作成图文、视频内容，内容运营负责内容分发、内容后续跟踪和数据分析，整套hone是面向内容创作者，解决手工刷平台搜索素材效率低下、目标不清晰、观点不显著等的问题。
 
 > **实施已切分为 12 个独立开发模块**，便于单会话按模块细化开发、控制上下文。跨会话先读 [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)，查 [DEV_PLAN.md](DEV_PLAN.md) 选模块，读 `modules/NN-*.md` 看 spec。
 
