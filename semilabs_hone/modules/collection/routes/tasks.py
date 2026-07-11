@@ -38,6 +38,37 @@ def _ipc_client():
 # Pages
 # ---------------------------------------------------------------------------
 
+@router.get("/tasks", response_class=HTMLResponse)
+async def page_tasks_list(request: Request) -> HTMLResponse:
+    """GET /tasks — task console list page (PRD §5.2).
+
+    Lists all tasks (newest first) with a polled status badge cell and a polled
+    actions cell. Empty state card when there are no tasks. Row click → detail.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        tasks = (
+            sess.query(CollectionTask)
+            .order_by(CollectionTask.created_at.desc())
+            .all()
+        )
+        rows = [_row_context(t) for t in tasks]
+    except Exception:
+        rows = []
+    finally:
+        sess.close()
+
+    t = _templates()
+    assert t is not None, "Templates not initialized"
+    return t.TemplateResponse(
+        request, "tasks_list.html",
+        {"rows": rows, "has_tasks": bool(rows)},
+    )
+
+
 @router.get("/tasks/new", response_class=HTMLResponse)
 async def page_new_task(request: Request) -> HTMLResponse:
     """GET /tasks/new — create task page with platform/keyword form."""
@@ -157,6 +188,51 @@ def _badge_html(task) -> str:
     )
 
 
+def _actions_html(task) -> str:
+    """Render the action-buttons fragment for a task (PRD §5.2.3).
+
+    Single source for both the task-detail page and the list-row `actions-<id>`
+    cell. Buttons use hx-disabled-elt (optimistic lock during the in-flight
+    request) + onclick lockBtn for immediate aria-busy; the list cell polls
+    GET /api/tasks/{id}/actions every 5s so it refreshes to the new status's
+    buttons once the backend state changes.
+    """
+    tid = task.id
+    parts: list[str] = []
+    if task.status == "running":
+        parts.append(
+            f'<button hx-post="/api/tasks/{tid}/cancel" hx-swap="none" '
+            f'hx-disabled-elt="this" class="secondary outline" '
+            f'onclick="lockBtn(this)">取消</button>'
+        )
+    if task.status == "need_human":
+        parts.append(
+            f'<a href="/tasks/{tid}" class="button primary" role="button" '
+            f'title="请切换到 worker Chrome 完成扫码 / 验证">唤起浏览器</a>'
+        )
+        parts.append(
+            f'<button hx-post="/api/tasks/{tid}/resume" hx-swap="none" '
+            f'hx-disabled-elt="this" class="primary" '
+            f'onclick="lockBtn(this)">已处理，继续</button>'
+        )
+    if task.status in ("failed", "error", "paused"):
+        parts.append(
+            f'<button hx-post="/api/tasks/{tid}/resume" hx-swap="none" '
+            f'hx-disabled-elt="this" class="primary" '
+            f'onclick="lockBtn(this)">继续</button>'
+        )
+    if task.status == "completed":
+        parts.append(
+            f'<a href="/api/export?task_id={tid}&format=ai" class="button">导出 CSV</a>'
+        )
+    return " ".join(parts) if parts else '<span style="color:var(--pico-muted-color)">—</span>'
+
+
+def _row_context(task) -> dict:
+    """Context for the _task_row.html partial (shared by list render & /row endpoint)."""
+    return {"task": task, "badge": _badge_html(task), "actions": _actions_html(task)}
+
+
 @router.get("/api/tasks/{task_id}/status")
 async def api_task_status(task_id: str) -> HTMLResponse:
     """GET /api/tasks/{id}/status — status badge HTML fragment (PRD §5.2.2).
@@ -173,6 +249,51 @@ async def api_task_status(task_id: str) -> HTMLResponse:
         if task is None:
             return HTMLResponse('<span class="badge error">未找到</span>', status_code=404)
         return HTMLResponse(_badge_html(task))
+    finally:
+        sess.close()
+
+
+@router.get("/api/tasks/{task_id}/row")
+async def api_task_row(task_id: str) -> HTMLResponse:
+    """GET /api/tasks/{id}/row — full <tr> fragment for the list (PRD §5.3.2).
+
+    Used for afterbegin-insert on create (htmx.ajax swap=afterbegin into
+    #tasks-tbody). Renders the shared _task_row.html partial so the markup is
+    identical to the server-rendered list rows.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if task is None:
+            return HTMLResponse("<!-- task not found -->", status_code=404)
+    finally:
+        sess.close()
+
+    t = _templates()
+    assert t is not None, "Templates not initialized"
+    html = t.env.get_template("_task_row.html").render(**_row_context(task))
+    return HTMLResponse(html)
+
+
+@router.get("/api/tasks/{task_id}/actions")
+async def api_task_actions(task_id: str) -> HTMLResponse:
+    """GET /api/tasks/{id}/actions — action-buttons fragment (PRD §5.2.3).
+
+    Polled by the list-row `actions-<id>` cell every 5s; refreshes the buttons
+    to match the current status after an optimistic-lock POST lands.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if task is None:
+            return HTMLResponse("<!-- task not found -->", status_code=404)
+        return HTMLResponse(_actions_html(task))
     finally:
         sess.close()
 
