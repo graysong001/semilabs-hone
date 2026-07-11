@@ -1,0 +1,15 @@
+{# Shared <tr> for the task console list (PRD §5.2 / §5.3.2).
+   Rendered server-side by tasks_list.html AND by GET /api/tasks/{id}/row
+   (for afterbegin insert on create) — single source of the row markup.
+   Context: task, badge, actions (strings, pre-rendered HTML). #}
+<tr id="row-{{ task.id }}" onclick="location.href='/tasks/{{ task.id }}'" style="cursor: pointer;" title="点击查看详情">
+  <td><abbr title="{{ task.id }}">{{ task.id[:8] }}</abbr></td>
+  <td>{{ task.platform }}</td>
+  <td>{{ task.task_type }}</td>
+  <td>{{ task.target_value }}</td>
+  <td>{{ task.actual_count }}/{{ task.expected_count }}</td>
+  <td id="status-{{ task.id }}">{{ badge|safe }}</td>
+  <td id="actions-{{ task.id }}"
+      hx-get="/api/tasks/{{ task.id }}/actions" hx-trigger="every 5s"
+      hx-target="this" hx-swap="innerHTML">{{ actions|safe }}</td>
+</tr>

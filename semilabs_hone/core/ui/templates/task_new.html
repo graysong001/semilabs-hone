@@ -4,211 +4,25 @@
 {% block content %}
 <h2>新建采集任务</h2>
 
-<!--
-  PRD §5.3 / §4.1.1 (S6/T32): 创建任务走 <dialog> + 失焦校验(http/count≤200)
-  + 耗时预估二次确认 modal + aria-busy。表单参数已迁 PRD 模型
-  (task_type/target_value/expected_count)，旧 keywords/max_posts form 已弃用。
--->
-<button id="open-new" class="primary" onclick="document.getElementById('dlg-new').showModal()">
-  + 新建采集任务
-</button>
-
-<dialog id="dlg-new">
-  <article style="max-width: 640px;">
-    <header><h3>新建采集任务</h3></header>
-    <form id="task-form">
-      <div class="grid">
-        <label>
-          平台
-          <select name="platform" id="platform-select">
-            {% for p in platforms %}
-            <option value="{{ p }}">{{ p }}</option>
-            {% endfor %}
-            {% if not platforms %}
-            <option value="xiaohongshu">xiaohongshu</option>
-            {% endif %}
-          </select>
-        </label>
-
-        <label>
-          账号
-          <select name="account_id">
-            {% for acct in accounts %}
-            <option value="{{ acct.id }}">{{ acct.nickname or "账号#" ~ acct.id }} ({{ acct.platform }}, {{ acct.status }})</option>
-            {% endfor %}
-            {% if not accounts %}
-            <option value="0">— 请先添加账号 —</option>
-            {% endif %}
-          </select>
-        </label>
-      </div>
-
-      <label>
-        采集类型
-        <select name="task_type" id="task-type-select">
-          <option value="keyword_search">关键词搜索</option>
-          <option value="author_homepage">定向主页（URL）</option>
-        </select>
-      </label>
-
-      <label>
-        目标值<span id="target-hint">（关键词，逗号或换行分隔，最多 10 个）</span>
-        <textarea name="target_value" id="target-value" rows="3"
-          placeholder="关键词搜索: 旅行, 美食 / 定向主页: 每行一个 http(s) 链接" required></textarea>
-        <small id="target-err" style="color: var(--pico-del-color);"></small>
-      </label>
-
-      <div class="grid">
-        <label>
-          采集数量（1-200）
-          <input type="number" name="expected_count" id="expected-count" value="20" min="1" max="200">
-          <small id="count-err" style="color: var(--pico-del-color);"></small>
-        </label>
-        <label>
-          排序
-          <select name="sort">
-            <option value="general">综合</option>
-            <option value="time_descending">最新</option>
-            <option value="popularity_descending">最热</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="grid">
-        <label>
-          <input type="checkbox" name="download_images" checked>
-          下载图片
-        </label>
-        <label>
-          <input type="checkbox" name="collect_comments" checked>
-          采集评论
-        </label>
-      </div>
-    </form>
-
-    <footer>
-      <button type="button" class="secondary" onclick="document.getElementById('dlg-new').close()">取消</button>
-      <button type="button" class="primary" id="btn-next" onclick="openConfirm()">下一步</button>
-    </footer>
-  </article>
-</dialog>
-
-<!-- 耗时预估二次确认 modal (PRD §4.1.2 / §5.3.2) -->
-<dialog id="dlg-confirm">
-  <article style="max-width: 480px;">
-    <header><h3>确认挂机</h3></header>
-    <p>系统已开启防封号拟人机制。本次采集 <strong id="confirm-count">0</strong> 条素材约需
-      <strong id="confirm-time">0</strong> 分钟，任务将在后台缓慢运行…</p>
-    <footer>
-      <button type="button" class="secondary" onclick="document.getElementById('dlg-confirm').close()">返回修改</button>
-      <button type="button" class="primary" id="btn-submit"
-        hx-post="/api/tasks" hx-include="#task-form" hx-target="#task-result" hx-swap="innerHTML"
-        hx-disabled-elt="this" onclick="this.setAttribute('aria-busy','true')"
-        >确认挂机</button>
-    </footer>
-  </article>
-</dialog>
+{# 共享创建任务 dialog (T39): 局部 _task_new_dialog.html 含表单/校验/二次确认/提交逻辑 #}
+{% include "_task_new_dialog.html" %}
 
 <div id="task-result" class="task-result"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+// 独立 /tasks/new 页: 自动展开 dialog; 局部的校验/提交脚本已随 include 加载.
 (function () {
-  var typeSel = document.getElementById('task-type-select');
-  var tgt = document.getElementById('target-value');
-  var tgtErr = document.getElementById('target-err');
-  var tgtHint = document.getElementById('target-hint');
-  var countEl = document.getElementById('expected-count');
-  var countErr = document.getElementById('count-err');
-  var btnNext = document.getElementById('btn-next');
-
-  function isAuthorHomepage() { return typeSel.value === 'author_homepage'; }
-
-  // 失焦校验 (PRD §8.2 场景 2.1): author_homepage 每行须 http 开头
-  function validateTarget() {
-    var lines = tgt.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
-    var ok = true;
-    if (isAuthorHomepage()) {
-      var bad = lines.filter(function (l) { return !/^https?:\/\//i.test(l); });
-      if (bad.length) {
-        ok = false;
-        tgt.setAttribute('aria-invalid', 'true');
-        tgtErr.textContent = '必须包含 http:// 前缀';
-      } else {
-        tgt.removeAttribute('aria-invalid');
-        tgtErr.textContent = '';
-      }
-    } else {
-      tgt.removeAttribute('aria-invalid');
-      tgtErr.textContent = '';
-    }
-    if (!lines.length) ok = false;  // 必填
-    btnNext.disabled = !ok;
-    return ok;
+  function open() {
+    var d = document.getElementById('dlg-new');
+    if (d && typeof d.showModal === 'function') d.showModal();
   }
-
-  // 数量越界强制截 200 (PRD §4.1.1)
-  function clampCount() {
-    var v = parseInt(countEl.value, 10);
-    if (isNaN(v) || v < 1) { countEl.value = 1; }
-    if (v > 200) {
-      countEl.value = 200;
-      countErr.textContent = '单任务日安全上限为 200 条';
-    } else {
-      countErr.textContent = '';
-    }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', open);
+  } else {
+    open();
   }
-
-  tgt.addEventListener('blur', validateTarget);
-  countEl.addEventListener('blur', clampCount);
-  countEl.addEventListener('input', clampCount);
-  typeSel.addEventListener('change', function () {
-    tgtHint.textContent = isAuthorHomepage()
-      ? '（每行一个 http(s) 链接，最多 10 个）'
-      : '（关键词，逗号或换行分隔，最多 10 个）';
-    validateTarget();
-  });
-  validateTarget();  // 初始禁用下一步直到填值
-
-  // 预估耗时(分钟) = 数量 * 1 + (数量 / 5) * 1 (PRD §4.1.2)
-  window.openConfirm = function () {
-    if (!validateTarget()) return;
-    clampCount();
-    var n = parseInt(countEl.value, 10) || 0;
-    var minutes = n + Math.floor(n / 5);
-    document.getElementById('confirm-count').textContent = n;
-    document.getElementById('confirm-time').textContent = minutes;
-    document.getElementById('dlg-confirm').showModal();
-  };
-
-  // 提交反馈 (PRD §5.3.2): 成功→关 dialog + 绿 Toast; 失败→留 dialog + 红字
-  document.addEventListener('htmx:afterRequest', function (evt) {
-    var btn = document.getElementById('btn-submit');
-    if (btn) btn.removeAttribute('aria-busy');
-    if (evt.detail.target && evt.detail.target.id !== 'task-result') return;
-    var result = document.getElementById('task-result');
-    if (evt.detail.successful) {
-      var data;
-      try { data = JSON.parse(evt.detail.xhr.responseText); } catch (e) { return; }
-      if (data.ok && data.task_id) {
-        document.getElementById('dlg-confirm').close();
-        document.getElementById('dlg-new').close();
-        if (window.showToast) {
-          window.showToast({ severity: 'info', message: '任务已就绪 #' + data.task_id });
-        }
-        result.innerHTML = '<article><p>任务已创建 (#' + data.task_id + ')，正在启动…</p>' +
-          '<a href="/tasks/' + data.task_id + '" class="button">查看任务详情</a></article>';
-      } else {
-        result.innerHTML = '<article><p style="color:var(--pico-del-color)">创建失败：' +
-          (data.error || '数据库锁定或系统异常') + '</p></article>';
-        document.getElementById('dlg-confirm').close();  // 回到主表单
-      }
-    } else if (evt.detail.failed) {
-      result.innerHTML = '<article><p style="color:var(--pico-del-color)">请求失败</p></article>';
-      document.getElementById('dlg-confirm').close();
-    }
-  });
 })();
 </script>
 {% endblock %}

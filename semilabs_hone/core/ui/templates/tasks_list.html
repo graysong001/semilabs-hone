@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Skim - 任务控制台{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1em;">
+  <h2 style="margin:0;">任务控制台</h2>
+  {# 创建任务 dialog 由 _task_new_dialog.html 局部提供 (T39), 它含【新建任务】按钮 #}
+  {% include "_task_new_dialog.html" %}
+</div>
+
+{% if has_tasks %}
+<p>共 {{ rows|length }} 个任务（最新优先）</p>
+<table>
+  <thead>
+    <tr>
+      <th>任务 ID</th>
+      <th>平台</th>
+      <th>类型</th>
+      <th>目标值</th>
+      <th>进度 (实际/预期)</th>
+      <th>状态</th>
+      <th>操作</th>
+    </tr>
+  </thead>
+  <tbody id="tasks-tbody">
+    {% for row in rows %}
+      {# _task_row.html 从循环上下文取 row.task/row.badge/row.actions #}
+      {% set task = row["task"] %}
+      {% set badge = row["badge"] %}
+      {% set actions = row["actions"] %}
+      {% include "_task_row.html" %}
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+{# 空状态兜底 (PRD §5.2.1) #}
+<div style="text-align:center; padding:3rem;">
+  <h3>暂无采集任务</h3>
+  <p>点击右上角开始你的第一个数字分身任务吧。</p>
+  <a href="/tasks/new" class="button primary">+ 新建任务</a>
+</div>
+{% endif %}
+
+<div id="task-result" class="task-result"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 乐观锁: action 按钮点击立即 aria-busy (htmx hx-disabled-elt 处理 disabled)
+function lockBtn(b) { b.setAttribute('aria-busy', 'true'); }
+</script>
+{% endblock %}
