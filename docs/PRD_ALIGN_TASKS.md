@@ -117,7 +117,7 @@
 | S2 | ✅ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
 | S3 | ✅ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
 | S4 | ✅ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
-| S5 | ⬜ | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🟡 知乎录制 platform.yaml | 新 test_solver + 人验 zhihu |
+| S5 | 🔄 | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 ✅ solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🔄 🟡 知乎 platform.yaml 骨架(待人录制) | 新 test_solver + 人验 zhihu |
 | S6 | ⬜ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
 | S7 | ⬜ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
 | S8 | ⬜ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
@@ -170,7 +170,7 @@
 | T23 评论 Top20 | ⬜ | ✅ | T14,T22 | handlers/engine 按 likes 降序截前20，不足全收；评论区最多3次滚动加载 | test_engine |
 | T24 风控探针 | ⬜ | ✅ | T05 | 新 risk_probes.py：goto/scroll/click 后探测(XHS captcha class/知乎signin重定向/扫码QR)；命中→break+need_human+IPC广播+2s 轮询 control/resume 先重跑探针 | test_risk_probes(新) |
 | T25 节律暖场接入 | ⬜ | ✅ | T02,T03 | engine/handlers goto 后 random.uniform(30,90)暖场；微操1.5-3.5；列表滑动5-10；主循环 is_quiet_hours→sleep_until_wakeup | test_engine+test_rhythm |
-| T26 可选验证码能力 | ⬜ | ✅ | T24 | captcha/solver.py detect_and_solve 加 risk_tier/captcha_policy 参数，默认 manual→立即 need_human；anonymous+auto_then_manual 才走 slide/ocr 失败1次转人工；platform.yaml 新增 risk_tier/captcha_policy 字段 | test_solver(新) |
+| T26 可选验证码能力 | ✅ | ✅ | T24 | captcha/solver.py detect_and_solve 加 risk_tier/captcha_policy 参数，默认 manual→立即 need_human；anonymous+auto_then_manual 才走 slide/ocr 失败1次转人工；platform.yaml 新增 risk_tier/captcha_policy 字段 | test_solver(新) |
 | T27 知乎适配器 | 🔄 | 🟡 | T22-T25 | 录制 search/detail/comments 三 flow 生成 platforms/zhihu/platform.yaml（人工录制） | registry 加载+人验 |
 
 ## P3 — UI 行为对齐（PRD §5，保留 WS）
@@ -255,4 +255,9 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
     - **评论 3 次滚动加载**：T23「最多 3 次滚动」语义落在 comments flow 的 `scroll_collect`(max_scrolls=3)；engine 已支持，XHS comments flow yaml 未加 scroll_collect 步骤（录制侧，🟡 S5/T27 知乎录制时统一补）。
     - **model 旧列/NOT NULL 不动**（契约 §2：列删除+url/platform_comment_id NOT NULL 归 S7 csv_exporter 切换时）。
     - **scroll_collect 真增量 XHR**：当前对静态 saved 快照重抽 dedup（测边界 20/5）；真实浏览器「滚动触发新 XHR→累积」需 flow 在每次 scroll 后再 wait_xhr，属录制侧真实化（🟡 S5/S9）。
-- ⬜ **下一会话 = S5**（P2 可选验证码 + 知乎录制：T26 solver `detect_and_solve` 加 `risk_tier`/`captcha_policy` 参数默认 manual→立即 need_human；anonymous+auto_then_manual 才走 slide/ocr 失败 1 次转人工 · T27 🟡 知乎录制 search/detail/comments 三 flow 生成 `platforms/zhihu/platform.yaml`）。依赖 S4 已✅。门禁 新 test_solver + 人验 zhihu。
+- 🔄 **S5 进行中**（P2 可选验证码 + 知乎录制）：
+  - ✅ **T26 完成**（solver `detect_and_solve(page, ctx, risk_tier, captcha_policy)`：默认 account/manual 命中即 `paused`(=立即 need_human) 不动 slide/ocr；仅 anonymous+auto_then_manual 走 slide/ocr **恰好一次**，失败转 paused 不死循环；click/sms 永远人工。`config.CAPTCHA_DEFAULT_POLICY="manual"`+`CAPTCHA_AUTO_SOLVE_PLATFORMS=[]`；`spec.PlatformSpec` 加 `risk_tier`/`captcha_policy` 字段；XHS yaml 显式 `risk_tier:account`/`captcha_policy:manual`。新 `tests/collection/test_solver.py` 15 用例。全量回归 353 passed，linter 全绿）。
+    - **裁决记 WHY（不 wire 进 handler）**：`detect_and_solve` 当前未被 handler 调用（本就是"可选能力沉淀默认关"，契约§5）；S5 仅做 solver+schema+config+yaml，**不**动 `_handle_need_human` 路径，零 S4 回归风险。wiring（captcha 命中→先 detect_and_solve 再 need_human）留 T71 端到验/S9。
+  - 🔄 **T27 🟡 代码完成待人录制**（`platforms/zhihu/{__init__.py,platform.yaml}`：search `/api/v4/search_v4`+ItemRef、detail `/api/v4/answers/{id}`+Post.body/interactions、comments `/api/v4/answers/{id}/root_comments`+Comments；`risk_tier:account`/`captcha_policy:manual`）。新 `tests/collection/test_registry_zhihu.py` 只验 yaml 解析+默认值，**不**验 JSON path 正确性。
+    - **遗留（T27 人验/S9）**：知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list 未支持），真实录制后需补 engine 兜底或 map 改 `[*]`；maps 当前为骨架待 LLM mapper 录制替换。评论 3 次滚动 `scroll_collect` 待录制侧补。
+- ⬜ **下一会话 = S6**（P3 UI 行为：T30 HTMX+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast）。依赖 S3✅+S2✅。门禁 test_routes。
