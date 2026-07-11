@@ -142,10 +142,11 @@
 | S6b | ✅ | ✅ | S6 | P3.5 任务控制台列表页 | T37 GET /tasks 列表页+空状态 · T38 行/操作片段端点(乐观刷新) · T39 创建→afterbegin 插行接入 | test_routes |
 | S7 | ✅ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
 | S8 | ✅ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
-| S9 | ⬜ | 🟡/❌ | S2-S8 | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
+| S9a | ⬜ | 🟡 | S2-S8 | P7.5 端到端 wiring 修复（T70 前置） | L13 web→worker Popen · L14 ctx 注入 engine · L15 login QR 真实化 · L16 WS progress relay · L01 resume→control · L10 solver wiring · L12 resume post-close | 全量回归 + 人验启 Chrome |
+| S9 | ⬜ | 🟡/❌ | S9a | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
 | Sz | ⏸ | 🟡/❌ | S4,S9 | 知乎专项定制（暂 hold） | 真实录制知乎 search/detail/comments 三 flow + LLM 生成 maps · 补 `_find_list_root` data[] 兜底 · comments scroll_collect · solver wiring 专项 | 人验 + 文档自洽 |
 
-**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9。Sz 知乎专项暂 hold（不在主线 loop，等专项启动再排期）。
+**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9a(wiring 修复) → S9(文档+人验)。Sz 知乎专项暂 hold（不在主线 loop，等专项启动再排期）。
 **跨会话并发安全**：同一时刻只推进一个 S（共享同一批文件+DB+IPC 契约，并行会冲突）。
 
 ---
@@ -281,7 +282,11 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 | L09 | S5/T27 | 知乎 maps 当前为骨架，待 LLM mapper 录制替换。**知乎专项**。 | Sz（知乎专项, hold） | ⏸ |
 | L10 | S5/T26 | captcha solver wiring：`detect_and_solve` 已实现但未被 handler 调用（契约§5「可选能力默认关」）。wiring（captcha 命中→先 detect_and_solve 再 need_human）未接。 | S9/T71 | ⬜ |
 | L11 | S7 | `collection_items.url` NOT NULL 受阻未恢复（L03 的一部分）。根因：`ScrapedPost` schema 无 `url` 字段、engine 不采集 url、`handlers._upsert_post` 硬编码 `url=None`。恢复 NOT NULL 会让每次 upsert_item 触发 IntegrityError。需先给 engine/schema 补 url 采集（S4/S5/Sz 录制侧）后恢复。 | Sz/S9（engine 补 url 采集后） | ⬜ |
-| L12 | S8 | `routes/tasks.py api_resume_task` 在 `finally: sess.close()` 后构造 IPC payload 仍访问 `task.account_id/platform/max_posts_per_keyword/download_images/collect_comments`——commit 触发 expire_on_commit 使属性 expired，close 后访问触发 DetachedInstanceError。BDD 7.1 happy-path resume 测试因此跳过（仅留 409 冲突 + 404 缺失分支）。修法：把 payload 字段捕获到局部变量（close 前）或把 IPCRequest 构造移入 try 块。 | S9/T70 或后续 UI/路由会话 | ⬜ |
+| L12 | S8 | `routes/tasks.py api_resume_task` 在 `finally: sess.close()` 后构造 IPC payload 仍访问 `task.account_id/platform/max_posts_per_keyword/download_images/collect_comments`——commit 触发 expire_on_commit 使属性 expired，close 后访问触发 DetachedInstanceError。BDD 7.1 happy-path resume 测试因此跳过（仅留 409 冲突 + 404 缺失分支）。修法：把 payload 字段捕获到局部变量（close 前）或把 IPCRequest 构造移入 try 块。 | S9a | ⬜ |
+| L13 | S8探查 | web 侧**无任何 `subprocess.Popen(worker_main)`**——`manifest.WORKER_ENTRY` 只登记不拉起，`app.startup` 只起 watchdog。建任务→`IPCClient.submit` 写 request 文件**无人消费**→任务永远 pending。CLAUDE.local.md 声明「web 按需 Popen」但从未实现。**T70 最大前置**。 | S9a | ⬜ |
+| L14 | S8探查 | `worker_main._run_worker` 的 `browser, ctx = await attach(port)` 是局部变量，attach 完丢弃；`serve_worker` 不接收 browser；`handlers._get_engine` 只 `GenericEngine(spec=spec)` 不注入 ctx/page → `engine.page=None` → `_ensure_page` 抛 `RuntimeError("No page available")` → `scrape_task` 立即失败。需 worker 级 ctx 单例 + `_get_engine` 注入 `engine.ctx`/`engine.page`。 | S9a | ⬜ |
+| L15 | S8探查 | `handlers._do_qr_login` 只返回路径字符串，不 `page.goto(login_url)`、不 `screenshot` → UI 拿不到真实二维码。登录是全流程起点，stub 则后续全假。需真导航 + 截图存盘。 | S9a | ⬜ |
+| L16 | S8探查 | `core/ui/ws.py` 只有 `broadcast(msg)`，**无后台 poll `progress/`+`results/`(ws_events)→WS 推送** 的 relay 循环。worker 写 progress 文件无人读回广播；UI 只能靠 5s 轮询徽章端点拿瞬态，WS 流式进度不工作。需 web 后台 relay loop。 | S9a | ⬜ |
 
 > **收口规则**：某会话收掉一项 → 本表该行状态 ⬜→✅ + 在「当前进度快照」对应会话段记一句「收 L0X（commit `<hash>`）」。**禁止**只改快照不改本表——本表是唯一索引。
 
@@ -322,7 +327,8 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
   - **裁决记 WHY（覆盖口径全包 85%）**：用户裁决全包 85%（含 hold/可选模块）。recorder 只测纯逻辑/可 mock 部分（`_build_recording_result`/`_make_save_as_name`/`_guess_flow_name`/`record_*`/`_on_response` mock response/`capture_element_selectors` mock element）；`start`/`stop`/`_launch_chrome_and_attach` 真浏览器路径不测（接受残留 67%）。slide_solver 用 sys.modules 注入 fake cv2/numpy/playwright 覆盖 ImportError + elements-missing 分支 + `_execute_slide` track；真 cv2 gap 检测路径不测（cv2 未装）。
   - **遗留 L12**：`api_resume_task` post-close 访问 task 属性 → DetachedInstanceError（S8 测试发现的真 bug，超出 7.1 wiring 范围，登记 L12 归 S9/后续）。BDD 7.1 resume happy-path 跳过，留 409/404 分支。
 
-- ⬜ **下一会话 = S9**（P6 文档同步 + P7 端到验：T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证）。依赖 S2-S8✅。门禁 文档自洽 + 人工。**收 L12/L01/L02/L05/L10/L11** 等遗留项的时机。
+- ⬜ **下一会话 = S9a**（P7.5 端到端 wiring 修复，T70 前置）。探查发现 4 个 P0/P1 硬阻塞（L13-L16）使「登录跑全流程」根本启动不了，必须先于 T70 人工验修复。范围：L13 web→worker Popen · L14 ctx 注入 engine · L15 login QR 真实化 · L16 WS progress relay · 收 L01/L10/L12。依赖 S2-S8✅，🟡 半自动（代码可自动、需真 Chrome 人验启）。门禁 全量回归 + 启 Chrome 烟测。
+- ⬜ S9（P6 文档 + P7 人验）后置到 S9a✅ 之后。
 
 - ✅ **S7 完成**（P4 CSV 宽表 + L03 旧列收口）。T40 `csv_exporter.py` 整体重写：删 AI/Excel 双模式，改为单一左连接宽表导出，10 列中文表头（`平台/笔记ID/笔记标题/笔记正文/笔记点赞数/笔记发布时间/笔记链接/评论者昵称/评论内容/评论点赞数`，PRD §4.6.3），读 PRD 列 `content_text`/`metrics_json`(解出 likes)/`publish_time`/`url` + 评论按 `item_id` join 读 `author_name`/`content_text`/`like_count`(desc)；左连接 N 评论→N 行、0 评论→1 行评论列空（PRD §4.6.2）；`utf-8-sig` BOM + `csv.DictWriter` 转义 emoji/逗号/引号（PRD §8.6）；0 条→`EmptyExportError`。T41 `routes/export.py` 去 `format` 参数，0 条→`400 JSON {ok:false,error}` 供前端 Toast；导出按钮由 `<a>` 改 `<button onclick="exportCsv(tid,this)">`，`app.js` 新增全局 `exportCsv`（fetch→200 blob 下载 / 400 `showToast` 复用 S6）；`tasks._actions_html` + `task_detail.html` 两按钮合一「导出 CSV」。L03 收口：`models/post.py`+`comment.py` 删全部旧列（content/likes/collects/comments_count/shares/tags/post_type/image_count/image_urls/local_images/published_at/raw_json/keyword_id/created_at + comment 的 post_id/platform_id/content/likes/sub_comment_count/is_author_liked/rank/published_at/raw_json/created_at）+ 删旧 `UNIQUE(post_id,platform_id)`；`platform_comment_id` 改回 NOT NULL（handler 总填 `c_pid or synth_{rank}`）；连带迁 `routes/posts.py`（`page_posts` 去 keyword 过滤、按 likes desc；`page_post_detail` 改 `item_id`/`like_count` desc）+ `posts.html`/`post_detail.html` 到 PRD 列；重写 `test_csv_export.py`（10 表头+左连接+转义+空 400+路由）+ `test_contract_core.test_dm02` 改断言旧列已删/NOT NULL 恢复。全量回归 385 passed，门禁全绿。
   - **裁决记 WHY**：
