@@ -133,7 +133,7 @@
 | S5 | 🔄 | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 ✅ solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 ⏸ 知乎 platform.yaml 骨架(hold，转 Sz 专项) | 新 test_solver + 人验 zhihu |
 | S6 | ✅ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
 | S6b | ✅ | ✅ | S6 | P3.5 任务控制台列表页 | T37 GET /tasks 列表页+空状态 · T38 行/操作片段端点(乐观刷新) · T39 创建→afterbegin 插行接入 | test_routes |
-| S7 | ⬜ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
+| S7 | ✅ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
 | S8 | ⬜ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
 | S9 | ⬜ | 🟡/❌ | S2-S8 | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
 | Sz | ⏸ | 🟡/❌ | S4,S9 | 知乎专项定制（暂 hold） | 真实录制知乎 search/detail/comments 三 flow + LLM 生成 maps · 补 `_find_list_root` data[] 兜底 · comments scroll_collect · solver wiring 专项 | 人验 + 文档自洽 |
@@ -218,8 +218,8 @@
 
 | 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
 |---|:-:|:-:|---|---|---|
-| T40 CSV 宽表重写 | ⬜ | ✅ | T12,T13 | csv_exporter.py 左连接宽表(一行一评论/0评论1行)+10中文表头+utf-8-sig+csv转义emoji/逗号/引号 | test_csv_export |
-| T41 导出路由+空数据防御 | ⬜ | ✅ | T40 | routes/export.py 0条→特定码+前端 Toast；按钮禁用 | test_routes+test_csv_export |
+| T40 CSV 宽表重写 | ✅ | ✅ | T12,T13 | csv_exporter.py 左连接宽表(一行一评论/0评论1行)+10中文表头+utf-8-sig+csv转义emoji/逗号/引号 | test_csv_export |
+| T41 导出路由+空数据防御 | ✅ | ✅ | T40 | routes/export.py 0条→400 JSON+前端 Toast；按钮改 fetch 下载 | test_routes+test_csv_export |
 
 ## P5 — 测试与约束门禁
 
@@ -265,7 +265,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 |---|---|---|---|:-:|
 | L01 | S4/S6 | `routes/tasks.py /api/tasks/{id}/resume` 仍发新 IPC request（op scrape_task, resume=True），**未**按 PRD §4.4.3 step4 写 `control/ctrl_<rid>.json {action:resume}`。handler `_await_resume` 轮询 control/ 行为正确但真实 /resume 路径未对接。`task.request_id` 已存（S6 加列），S9 接 `control/ctrl_<rid>.json` 即可。 | S9/T70 | ⬜ |
 | L02 | S6/S6b | JS 运行时行为端到验：dialog 失焦校验 / 耗时预估 modal / 乐观锁（hx-disabled-elt+lockBtn）/ master-detail toggle / Toast 触发（htmx:responseError/sendError）/ 创建后 afterbegin 插行 / 列表 actions 5s 轮询刷新。pytest 只断言静态接入（渲染含 `<dialog>`/`hx-*`/app.js 含监听串），真实浏览器行为未驱动。 | S9/T70 | ⬜ |
-| L03 | S4/S6 | model 旧列 + NOT NULL 清理（契约 §2）：`collection_items.url`、`collection_comments.platform_comment_id` 改回 NOT NULL；删旧列（likes/content/post_id/rank/sub_comment_count/...）+ 旧 UNIQUE。create_all 重建即生效。 | S7（csv_exporter 切换时） | ⬜ |
+| L03 | S4/S6 | model 旧列 + NOT NULL 清理（契约 §2）：`collection_items.url`、`collection_comments.platform_comment_id` 改回 NOT NULL；删旧列（likes/content/post_id/rank/sub_comment_count/...）+ 旧 UNIQUE。create_all 重建即生效。 | S7（csv_exporter 切换时） | ✅ |
 | L04 | S6b | 列表页创建 dialog（`tasks_list.html` 内嵌 `_task_new_dialog.html`）的平台/账号下拉用默认值（未查 DB 传 `platforms`/`accounts`），新建任务只能走默认 platform/account。 | S9 或 UI 增强会话 | ⬜ |
 | L05 | S6b | 操作按钮「锁到状态改变」精确语义未达：当前是请求期 disabled（hx-disabled-elt）+ actions 单元格 5s 轮询刷新，≤5s 滞后才换按钮集合；PRD §5.2.3 要「按钮持续 disabled 直到后端状态真实改变再替换」。 | S9/T70 | ⬜ |
 | L06 | S4 | 评论 3 次滚动加载（`scroll_collect` max_scrolls=3）语义落在 comments flow，engine 已支持，但 XHS/知乎 comments flow yaml 未加 `scroll_collect` 步骤。 | S5（录制）/S9 | ⬜ |
@@ -273,6 +273,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 | L08 | S5/T27 | 知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list），真实录制后需补 engine 兜底或 map 改 `[*]`。**知乎专项**——用通用 extension 点落地，不 special-case 分支。 | Sz（知乎专项, hold） | ⏸ |
 | L09 | S5/T27 | 知乎 maps 当前为骨架，待 LLM mapper 录制替换。**知乎专项**。 | Sz（知乎专项, hold） | ⏸ |
 | L10 | S5/T26 | captcha solver wiring：`detect_and_solve` 已实现但未被 handler 调用（契约§5「可选能力默认关」）。wiring（captcha 命中→先 detect_and_solve 再 need_human）未接。 | S9/T71 | ⬜ |
+| L11 | S7 | `collection_items.url` NOT NULL 受阻未恢复（L03 的一部分）。根因：`ScrapedPost` schema 无 `url` 字段、engine 不采集 url、`handlers._upsert_post` 硬编码 `url=None`。恢复 NOT NULL 会让每次 upsert_item 触发 IntegrityError。需先给 engine/schema 补 url 采集（S4/S5/Sz 录制侧）后恢复。 | Sz/S9（engine 补 url 采集后） | ⬜ |
 
 > **收口规则**：某会话收掉一项 → 本表该行状态 ⬜→✅ + 在「当前进度快照」对应会话段记一句「收 L0X（commit `<hash>`）」。**禁止**只改快照不改本表——本表是唯一索引。
 
@@ -308,7 +309,15 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
     - **裁决记 WHY（不 wire 进 handler）**：`detect_and_solve` 当前未被 handler 调用（本就是"可选能力沉淀默认关"，契约§5）；S5 仅做 solver+schema+config+yaml，**不**动 `_handle_need_human` 路径，零 S4 回归风险。wiring（captcha 命中→先 detect_and_solve 再 need_human）留 T71 端到验/S9。
   - ⏸ **T27 hold（转 Sz 知乎专项）**（`platforms/zhihu/{__init__.py,platform.yaml}`：search `/api/v4/search_v4`+ItemRef、detail `/api/v4/answers/{id}`+Post.body/interactions、comments `/api/v4/answers/{id}/root_comments`+Comments；`risk_tier:account`/`captcha_policy:manual`）。新 `tests/collection/test_registry_zhihu.py` 只验 yaml 解析+默认值，**不**验 JSON path 正确性。**知乎相关工作暂 hold，等 Sz 专项会话统一排期（用户裁决）**。
     - **遗留（T27 → Sz 知乎专项）**：知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list 未支持），真实录制后需补 engine 兜底或 map 改 `[*]`；maps 当前为骨架待 LLM mapper 录制替换。评论 3 次滚动 `scroll_collect` 待录制侧补。→ 见遗留表 L08/L09/L06（知乎部分）。
-- ⬜ **下一会话 = S7**（P4 CSV 宽表：T40 宽表重写 10 中文表头+utf-8-sig+转义 · T41 导出路由+空数据防御）。依赖 S3✅。门禁 test_csv_export+test_routes。
+- ⬜ **下一会话 = S8**（P5 测试门禁：T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85%）。依赖 S4-S7✅。门禁 tests/prd_bdd/ + cov 门。
+
+- ✅ **S7 完成**（P4 CSV 宽表 + L03 旧列收口）。T40 `csv_exporter.py` 整体重写：删 AI/Excel 双模式，改为单一左连接宽表导出，10 列中文表头（`平台/笔记ID/笔记标题/笔记正文/笔记点赞数/笔记发布时间/笔记链接/评论者昵称/评论内容/评论点赞数`，PRD §4.6.3），读 PRD 列 `content_text`/`metrics_json`(解出 likes)/`publish_time`/`url` + 评论按 `item_id` join 读 `author_name`/`content_text`/`like_count`(desc)；左连接 N 评论→N 行、0 评论→1 行评论列空（PRD §4.6.2）；`utf-8-sig` BOM + `csv.DictWriter` 转义 emoji/逗号/引号（PRD §8.6）；0 条→`EmptyExportError`。T41 `routes/export.py` 去 `format` 参数，0 条→`400 JSON {ok:false,error}` 供前端 Toast；导出按钮由 `<a>` 改 `<button onclick="exportCsv(tid,this)">`，`app.js` 新增全局 `exportCsv`（fetch→200 blob 下载 / 400 `showToast` 复用 S6）；`tasks._actions_html` + `task_detail.html` 两按钮合一「导出 CSV」。L03 收口：`models/post.py`+`comment.py` 删全部旧列（content/likes/collects/comments_count/shares/tags/post_type/image_count/image_urls/local_images/published_at/raw_json/keyword_id/created_at + comment 的 post_id/platform_id/content/likes/sub_comment_count/is_author_liked/rank/published_at/raw_json/created_at）+ 删旧 `UNIQUE(post_id,platform_id)`；`platform_comment_id` 改回 NOT NULL（handler 总填 `c_pid or synth_{rank}`）；连带迁 `routes/posts.py`（`page_posts` 去 keyword 过滤、按 likes desc；`page_post_detail` 改 `item_id`/`like_count` desc）+ `posts.html`/`post_detail.html` 到 PRD 列；重写 `test_csv_export.py`（10 表头+左连接+转义+空 400+路由）+ `test_contract_core.test_dm02` 改断言旧列已删/NOT NULL 恢复。全量回归 385 passed，门禁全绿。
+  - **裁决记 WHY**：
+    - **单一宽表替代 AI/Excel 双模式**。PRD §4.6 只规定左连接宽表一种交付格式（§4.6.3 表头表是唯一规格）；AI 模式（pipe-joined top_comments）与 Excel ZIP 是 PRD 前的存量，PRD 未保留。按契约「新增→按设计文档」裁决**重写而非保留**，删双模式+`export_empty_db`，`export/__init__.py` 同步收口导出面。
+    - **0 条→400 JSON + fetch 下载，非 `<a>` 直链**。PRD §4.6「0 条→拦截+Toast」要求空数据时前端弹 Toast；`<a href>` 直链点开 400 JSON 是裸 JSON 页，无法 Toast。故导出按钮改 `<button>` + `exportCsv` JS fetch：200 触发 blob 下载（保留文件下载语义），400 复用 S6 `showToast` 弹「暂无可导出的采集数据」。
+    - **`url` NOT NULL 受阻，保留 nullable + 新增 L11**。L03 字面要 `url` NOT NULL，但实测 `ScrapedPost` schema 无 `url` 字段、engine 不采集、`_upsert_post` 硬编码 `url=None`——恢复 NOT NULL 会让每次 `upsert_item` IntegrityError，崩 handlers + 全部 handler 测试。属 engine/录制侧能力缺口（非 CSV 层），按会话经验 #3 显式裁决：**不默默选**，保留 nullable、登记 L11 归 Sz/S9（engine 补 url 采集后恢复），而非硬上 NOT NULL 制造回归。`platform_comment_id` NOT NULL 安全（handler 总填），已恢复。
+    - **连带迁 posts 路由/模板非 scope 蔓延**。删模型旧列会让 `routes/posts.py`（`page_posts` keyword 过滤读 `keyword_id`、`page_post_detail` 读 `post_id`/`rank`）+ `posts.html`/`post_detail.html` 崩。这些消费者与 L03 同源（旧列），不迁则旧列不能删——属 L03 收口的必要前置，非新功能。PRD §4.6.1 数据预览本就「按 likes desc、列标题/作者/正文摘要/点赞/评论数」，故 `page_posts` 顺势去 keyword 过滤、改 likes desc（metrics 在路由侧解一次传模板），与 PRD 对齐。
+  - **遗留**：`collection_items.url` NOT NULL 未恢复 → L11（归 Sz/S9 engine 补 url 采集后）；导出按钮「禁用」语义当前是 fetch 400 后 Toast（非按钮 preemptive disabled），精确「无数据时按钮灰」归 S9/T70 UI 增强或后续。
 
 - ✅ **S6b 完成**（P3.5 任务控制台列表页，复用 S6 徽章端点）。T37 新 `GET /tasks` + `tasks_list.html`（任务ID/平台/类型/目标值/进度 actual/expected/状态徽章/操作 七列表，行点击→详情，空状态卡片「暂无采集任务…」+【新建任务】）；`<td id="status-<id>">` 内嵌 S6 自轮询徽章 span，`<td id="actions-<id}">` 5s 轮询 `/api/tasks/{id}/actions` 局部刷新。T38 新 `GET /api/tasks/{id}/row`（整 `<tr>` 片段，单一来源 `_task_row.html` 局部，`env.get_template().render()` 同时供列表初始渲染与创建后 afterbegin 插入）+ `GET /api/tasks/{id}/actions`（操作按钮片，按 status：running→取消/need_human→唤起+已处理/failed·error·paused→继续/completed→导出，`hx-disabled-elt`+`lockBtn` 乐观锁）。T39 抽 `_task_new_dialog.html` 局部（从 task_new.html 提取 dialog+校验+二次确认+提交 JS），task_new.html 与 tasks_list.html 都 include；成功后若 `#tasks-tbody` 存在→`htmx.ajax` afterbegin 插 `/api/tasks/{id}/row` + 绿 Toast「任务已就绪」（PRD §5.3.2），否则维持「查看详情」链接。新增 `_actions_html`/`_row_context` helper。test_routes 43 用例（+10），全量回归 382 passed，门禁全绿。
   - **裁决记 WHY**：
