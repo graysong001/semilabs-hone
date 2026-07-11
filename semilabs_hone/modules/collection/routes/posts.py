@@ -23,6 +23,62 @@ def _templates():
     return dash_mod._templates
 
 
+def _comments_fragment(item_id: str) -> str:
+    """Render the master-detail child row (PRD §5.4.2).
+
+    Returns `<tr id="detail-<id>"><td colspan="7">…评论子表…</td></tr>` inserted
+    after the clicked main row (hx-swap=afterend). 0 评论 → 置灰文案。
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.comment import CollectionComment
+
+    sess = get_session()
+    try:
+        comments = (
+            sess.query(CollectionComment)
+            .filter(CollectionComment.item_id == item_id)
+            .order_by(CollectionComment.like_count.desc())
+            .all()
+        )
+    except Exception:
+        comments = []
+    finally:
+        sess.close()
+
+    if not comments:
+        return (
+            f'<tr id="detail-{item_id}"><td colspan="7" '
+            f'style="color: var(--pico-muted-color); text-align: center;">'
+            f'该笔记暂无评论数据</td></tr>'
+        )
+
+    rows = []
+    for c in comments:
+        author = (c.author_name or "匿名")[:30]
+        text = (c.content_text or c.content or "")[:200]
+        rows.append(
+            f'<tr><td colspan="7"><small>'
+            f'<strong>{author}</strong> · ❤ {c.like_count or 0}<br>'
+            f'{text}</small></td></tr>'
+        )
+    body = "".join(rows)
+    return (
+        f'<tr id="detail-{item_id}"><td colspan="7">'
+        f'<table><tbody>{body}</tbody></table>'
+        f'</td></tr>'
+    )
+
+
+@router.get("/api/items/{item_id}/comments")
+async def api_item_comments(item_id: str) -> HTMLResponse:
+    """GET /api/items/{id}/comments — master-detail child-row fragment (PRD §5.4.2).
+
+    Clicked from posts.html main row (hx-get, hx-swap=afterend). Returns the
+    `<tr>` to insert below the row, or a 置灰 row when no comments exist.
+    """
+    return HTMLResponse(_comments_fragment(item_id))
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------

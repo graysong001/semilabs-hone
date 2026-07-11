@@ -43,6 +43,11 @@ class CollectionTask(Base):
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
+    # --- S6 addition: latest IPC request_id (for badge↔progress correlation &
+    #     future resume→control/ctrl_<rid>.json wiring, PRD §4.4.3). Nullable so
+    #     legacy seedings / pre-S6 rows stay valid. ---
+    request_id = Column(String(12), nullable=True)
+
     # --- Legacy columns retained for S4/S6/S7 consumers (to be dropped later) ---
     account_id = Column(Integer, nullable=True)  # FK dropped (PRD has no account_id)
     max_posts_per_keyword = Column(Integer, nullable=False, default=20)
