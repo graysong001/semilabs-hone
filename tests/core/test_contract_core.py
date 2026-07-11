@@ -56,8 +56,14 @@ def test_dm02_models_contract():
         assert prd_col in pcols, f"collection_items 缺 PRD 列 {prd_col}"
     uq_names = {c.name for c in post.CollectionItem.__table__.constraints}
     assert "uix_platform_item" in uq_names, "collection_items 缺 UNIQUE uix_platform_item"
-    # D6 legacy 列保留
-    assert "raw_json" in pcols and "platform_id" in pcols, "CollectionItem 缺 raw_json/platform_id (过渡保留)"
+    # [契约变更 2026-07-11 S7/L03] 旧列已删 (raw_json/likes/content/keyword_id/...)
+    for legacy in ["raw_json", "likes", "content", "collects", "comments_count",
+                   "shares", "tags", "post_type", "image_count", "keyword_id",
+                   "published_at"]:
+        assert legacy not in pcols, f"collection_items 旧列 {legacy} 应已删除 (L03 收口)"
+    # url 仍 nullable (L11: 待 engine 补 url 采集后恢复 NOT NULL)
+    assert post.CollectionItem.__table__.columns["url"].nullable, "url 应 nullable (L11)"
+
     cmt = pytest.importorskip("semilabs_hone.core.models.comment")
     assert hasattr(cmt, "CollectionComment")
     ccols = {c.name for c in cmt.CollectionComment.__table__.columns}
@@ -67,6 +73,14 @@ def test_dm02_models_contract():
         assert prd_col in ccols, f"collection_comments 缺 PRD 列 {prd_col}"
     cuq_names = {c.name for c in cmt.CollectionComment.__table__.constraints}
     assert "uix_item_comment" in cuq_names, "collection_comments 缺 UNIQUE uix_item_comment"
+    # [契约变更 2026-07-11 S7/L03] 旧列 + 旧 UNIQUE(post_id,platform_id) 已删;
+    # platform_comment_id 恢复 NOT NULL (handler 总填)。
+    for legacy in ["post_id", "platform_id", "content", "likes", "sub_comment_count",
+                   "is_author_liked", "rank", "published_at", "raw_json", "created_at"]:
+        assert legacy not in ccols, f"collection_comments 旧列 {legacy} 应已删除 (L03 收口)"
+    assert "uq_comment_post_platform_id" not in cuq_names, "旧 UNIQUE(post_id,platform_id) 应已删除 (L03)"
+    assert not cmt.CollectionComment.__table__.columns["platform_comment_id"].nullable, \
+        "platform_comment_id 应 NOT NULL (L03 收口)"
     # repository (PRD §6.4): upsert 入口
     repo = pytest.importorskip("semilabs_hone.core.models.repository")
     for fn in ["upsert_item", "upsert_comment", "pack_metrics", "unpack_metrics"]:
