@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from semilabs_hone.core.utils.retry import DailyLimitError
+
 # Lazy imports for optional dependencies
 # fmt: off
 
@@ -271,8 +273,25 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     # when the worker picks up its IPC request. Resume counters preserved.
     _promote_to_running(task_id, progress_cb)
 
-    # Daily-cap guard (quiet hours handled above via long-sleep).
-    _check_rhythm(account_id, progress_cb)
+    # Daily-cap guard (quiet hours handled above via long-sleep). If the global
+    # today-count is already at the limit, park as paused before any scraping
+    # (PRD §7.1). The per-note loop re-checks as the count grows mid-task.
+    try:
+        _check_rhythm(account_id, progress_cb)
+    except DailyLimitError:
+        progress_cb("daily_limit", {
+            "task_id": task_id,
+            "msg": "全局日配额已达上限，保护机制生效，请明日恢复",
+        })
+        _set_task_paused(task_id, progress_cb)
+        return {
+            "status": "paused",
+            "reason": "daily_limit",
+            "posts_scraped": 0,
+            "comments_count": 0,
+            "images_count": 0,
+            "last_note_index": 0,
+        }
 
     # Get page/engine (lazy)
     engine = _get_engine(platform, account_id, progress_cb)
@@ -367,6 +386,28 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
 
             # Night-sleep gate per item (PRD §4.5.1).
             await _night_sleep_if_quiet(progress_cb)
+
+            # Daily-cap gate per item (PRD §7.1): cross-task today-count; raises
+            # DailyLimitError when the global total hits the limit. Park as
+            # `paused` (PRD §7.1 mandates paused, not need_human) and return —
+            # bypassing _complete_task (a quota-paused task is not completed).
+            try:
+                _check_rhythm(account_id, progress_cb)
+            except DailyLimitError:
+                progress_cb("daily_limit", {
+                    "task_id": task_id,
+                    "msg": "全局日配额已达上限，保护机制生效，请明日恢复",
+                    "posts_scraped": total_posts,
+                })
+                _set_task_paused(task_id, progress_cb)
+                return {
+                    "status": "paused",
+                    "reason": "daily_limit",
+                    "posts_scraped": total_posts,
+                    "comments_count": total_comments,
+                    "images_count": total_images,
+                    "last_note_index": last_note_index,
+                }
 
             # Retry-after-resume loop: a RiskProbeHit suspends → await human
             # resume → re-run the same ref (engine re-probes on its next goto).
@@ -468,30 +509,42 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     }
 
 
-def _check_rhythm(account_id: int | None, progress_cb: Callable) -> None:
-    """Check daily scrape limit.
+def _check_rhythm(account_id: int | None, progress_cb: Callable, now: datetime | None = None) -> None:
+    """Check the global daily scrape cap (PRD §7.1 当天总入库量).
 
-    Quiet-hours handling moved to _night_sleep_if_quiet (long-sleep per PRD
-    §4.5.1, not a throw — a task started in the quiet window must long-sleep
-    until 08:00, not error out). This guard keeps only the daily-cap check.
+    Counts today's collection_items across ALL tasks (cross-task accumulation,
+    matching PRD §7.1 「全局日限额跨任务累加 / 当天总入库量达到 200」) and raises
+    DailyLimitError when count >= config.DAILY_LIMIT_PER_ACCOUNT (200).
+
+    Quiet hours are handled separately by _night_sleep_if_quiet (long-sleep,
+    not a throw). Unlike the pre-S8 version, DailyLimitError is NOT swallowed
+    here — it propagates so the caller parks the task as `paused` (PRD §7.1
+    mandates paused, not need_human). DB lookup failures still pass (don't
+    block scraping on infra hiccups). ``now`` is injectable (会话经验 #7).
     """
     from semilabs_hone.modules.collection.scheduler.rhythm import check_daily_limit
 
-    if account_id is not None:
-        # Get account for daily limit check
+    try:
+        from sqlalchemy import func
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.post import CollectionItem
+        sess = get_session()
         try:
-            from semilabs_hone.core.models.db import get_session
-            from semilabs_hone.core.models.account import Account
-            sess = get_session()
-            try:
-                acct = sess.query(Account).filter(Account.id == account_id).first()
-                if acct:
-                    check_daily_limit(acct)
-            finally:
-                sess.close()
-        except Exception:
-            # If account lookup fails, pass rhythm check
-            pass
+            today = (now or datetime.now()).date().isoformat()
+            today_count = (
+                sess.query(CollectionItem)
+                .filter(func.date(CollectionItem.scraped_at) == today)
+                .count()
+            )
+        finally:
+            sess.close()
+    except Exception:
+        # DB unavailable → skip cap check (don't block scraping on infra).
+        return
+
+    # check_daily_limit raises DailyLimitError when count >= 200 — let it
+    # propagate (pre-S8 it was swallowed by the bare except above).
+    check_daily_limit({"daily_scrape_count": today_count})
 
 
 async def _night_sleep_if_quiet(progress_cb: Callable, now=None) -> None:
@@ -553,6 +606,30 @@ def _set_task_need_human(task_id: str | None, progress_cb: Callable) -> None:
             sess.close()
     except Exception as exc:
         logger.warning(f"Failed to set need_human for {task_id}: {exc}")
+
+
+def _set_task_paused(task_id: str | None, progress_cb: Callable) -> None:
+    """Park a task's DB status as paused (PRD §7.1 daily-quota exhaustion).
+
+    Distinct from _set_task_need_human: a quota hit is `paused` (await
+    tomorrow), not a captcha/login `need_human` relay. Mirrors the
+    need_human setter shape.
+    """
+    if task_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+            if task:
+                task.status = "paused"
+                sess.commit()
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to set paused for {task_id}: {exc}")
 
 
 async def _await_resume(request_id: str, poll_interval: float = 2.0) -> str | None:
