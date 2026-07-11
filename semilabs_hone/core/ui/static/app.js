@@ -45,6 +45,40 @@
   // Expose for inline scripts (e.g. task_new.html success toast).
   window.showToast = showToast;
 
+  // CSV export via fetch (PRD §4.6): 200 → download blob; 400 (0 条) → Toast.
+  window.exportCsv = function (taskId, btn) {
+    var url = "/api/export" + (taskId ? "?task_id=" + encodeURIComponent(taskId) : "");
+    if (btn) { btn.setAttribute("aria-busy", "true"); btn.disabled = true; }
+    fetch(url)
+      .then(function (resp) {
+        if (!resp.ok) {
+          // 0 条 / 5xx → 拦截 + Toast (PRD §4.6)
+          return resp.json().catch(function () { return { error: "导出失败" }; })
+            .then(function (body) {
+              showToast({ severity: "warn", message: body.error || "暂无可导出的采集数据", duration: 3000 });
+              throw new Error("export-empty");
+            });
+        }
+        var disp = resp.headers.get("content-disposition") || "";
+        var m = disp.match(/filename="?([^"]+)"?/i);
+        var filename = m ? m[1] : "export.csv";
+        return resp.blob().then(function (blob) {
+          var a = document.createElement("a");
+          var objUrl = URL.createObjectURL(blob);
+          a.href = objUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(objUrl);
+        });
+      })
+      .catch(function (e) { /* empty/error already toasted */ })
+      .finally(function () {
+        if (btn) { btn.removeAttribute("aria-busy"); btn.disabled = false; }
+      });
+  };
+
   // Global HTMX error Toast (PRD §5.1.2): responseError/sendError → 右上红 Toast 3s.
   document.addEventListener("htmx:responseError", function () {
     showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });

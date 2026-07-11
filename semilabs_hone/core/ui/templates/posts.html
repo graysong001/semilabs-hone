@@ -14,10 +14,6 @@
         <option value="xiaohongshu" {% if filter_platform == 'xiaohongshu' %}selected{% endif %}>xiaohongshu</option>
       </select>
     </label>
-    <label>
-      关键词
-      <input type="text" name="keyword" value="{{ filter_keyword or '' }}" placeholder="搜索关键词">
-    </label>
     <div>
       <button type="submit" class="secondary">筛选</button>
       <a href="/posts" class="button outline">重置</a>
@@ -31,19 +27,18 @@
 <table>
   <thead>
     <tr>
-      <th>ID</th>
       <th>平台</th>
       <th>标题</th>
       <th>作者</th>
-      <th>关键词</th>
-      <th>互动</th>
-      <th>时间</th>
+      <th>正文摘要</th>
+      <th>点赞</th>
+      <th>评论数</th>
+      <th>发布时间</th>
     </tr>
   </thead>
   <tbody>
     {% for post in posts %}
     <tr id="row-{{ post.id }}" onclick="toggleComments('{{ post.id }}')" style="cursor: pointer;" title="点击展开评论">
-      <td>{{ post.id }}</td>
       <td>{{ post.platform }}</td>
       <td>
         <a href="/posts/{{ post.id }}">
@@ -51,13 +46,10 @@
         </a>
       </td>
       <td>{{ post.author_name or "—" }}</td>
-      <td>{{ keyword_map.get(post.keyword_id, "—") if post.keyword_id else "—" }}</td>
-      <td>
-        {{ post.likes or 0 }} ❤
-        {{ post.collects or 0 }} ⭐
-        {{ post.comments_count or 0 }} 💬
-      </td>
-      <td>{{ post.published_at.strftime("%Y-%m-%d") if post.published_at else "—" }}</td>
+      <td>{{ (post.content_text or "")[:40] }}</td>
+      <td>{{ metrics_map.get(post.id, {}).get('likes', 0) }}</td>
+      <td>{{ metrics_map.get(post.id, {}).get('comments_count', 0) }}</td>
+      <td>{{ post.publish_time[:10] if post.publish_time else "—" }}</td>
     </tr>
     {% else %}
     <tr>
@@ -74,19 +66,19 @@
 <nav aria-label="分页">
   <ul class="pagination">
     {% if page > 1 %}
-    <li><a href="/posts?page={{ page - 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}{% if filter_keyword %}&keyword={{ filter_keyword }}{% endif %}">上一页</a></li>
+    <li><a href="/posts?page={{ page - 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}">上一页</a></li>
     {% endif %}
     {% for p in range(1, total_pages + 1) %}
       {% if p == page %}
       <li><a href="#" class="secondary" aria-current="page">{{ p }}</a></li>
       {% elif p <= 3 or p > total_pages - 3 or (p >= page - 1 and p <= page + 1) %}
-      <li><a href="/posts?page={{ p }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}{% if filter_keyword %}&keyword={{ filter_keyword }}{% endif %}">{{ p }}</a></li>
+      <li><a href="/posts?page={{ p }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}">{{ p }}</a></li>
       {% elif p == 4 or p == total_pages - 3 %}
       <li><span>...</span></li>
       {% endif %}
     {% endfor %}
     {% if page < total_pages %}
-    <li><a href="/posts?page={{ page + 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}{% if filter_keyword %}&keyword={{ filter_keyword }}{% endif %}">下一页</a></li>
+    <li><a href="/posts?page={{ page + 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}">下一页</a></li>
     {% endif %}
   </ul>
 </nav>

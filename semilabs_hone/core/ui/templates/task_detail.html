@@ -75,8 +75,7 @@
   {% endif %}
 
   {% if task.status == 'completed' %}
-    <a href="/api/export?task_id={{ task.id }}&format=ai" class="button">导出 AI CSV</a>
-    <a href="/api/export?task_id={{ task.id }}&format=excel" class="button secondary">导出 Excel ZIP</a>
+    <button onclick="exportCsv('{{ task.id }}', this)" class="button">导出 CSV</button>
   {% endif %}
 </div>
 {% endblock %}
