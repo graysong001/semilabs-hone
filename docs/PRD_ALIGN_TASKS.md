@@ -114,7 +114,7 @@
 
 ---
 
-## 会话级编排（S1-S9 = 9 个有界会话）
+## 会话级编排（S1-S9 + S6b = 有界会话）
 
 > 每个 S = 一个会话上下文。内含 T 子任务作为会话内 checklist（勾完即 done）。下一会话只接一个 S。
 
@@ -126,11 +126,12 @@
 | S4 | ✅ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
 | S5 | 🔄 | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 ✅ solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🔄 🟡 知乎 platform.yaml 骨架(待人录制) | 新 test_solver + 人验 zhihu |
 | S6 | ✅ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
+| S6b | ⬜ | ✅ | S6 | P3.5 任务控制台列表页 | T37 GET /tasks 列表页+空状态 · T38 行/操作片段端点(乐观刷新) · T39 创建→afterbegin 插行接入 | test_routes |
 | S7 | ⬜ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
 | S8 | ⬜ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
 | S9 | ⬜ | 🟡/❌ | S2-S8 | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
 
-**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S7 → S8 → S9。  
+**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9。  
 **跨会话并发安全**：同一时刻只推进一个 S（共享同一批文件+DB+IPC 契约，并行会冲突）。
 
 ---
@@ -194,6 +195,18 @@
 | T35 全局心跳指示灯 | ✅ | ✅ | T06,T30 | base.html 导航栏底部轮询 heartbeat 绿/红灰+「引擎离线」 | test_routes |
 | T36 全局错误 Toast | ✅ | ✅ | T30 | app.js/inline 监听 htmx:responseError/sendError→右上红 Toast 3s | test_routes |
 
+## P3.5 — 任务控制台列表页（PRD §5.2，S6 遗留补全）
+
+> S6 裁决「不顺带补 /tasks 列表页」；本段把该缺口正式立项。复用 S6 已建的
+> `GET /api/tasks/{id}/status` 徽章端点（列表行 `<td id="status-<id>>` 直接轮询它），
+> 故依赖 S6✅。全程 HTMX 局部替换，无整页 reload。
+
+| 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
+|---|:-:|:-:|---|---|---|
+| T37 任务控制台列表页 | ⬜ | ✅ | S6 | 新 `GET /tasks` 路由 + `tasks_list.html`（表头: 任务ID/平台/类型/目标值/进度 actual/expected/状态徽章/操作）；`<td id="status-<id}">` HTMX 5s 轮询 `/api/tasks/{id}/status`；行点击→`/tasks/{id}`；空状态居中卡片「暂无采集任务，点击右上角开始你的第一个数字分身任务吧」+【新建任务】按钮 | test_routes |
+| T38 行/操作片段端点 | ⬜ | ✅ | T37,S6 | 新 `GET /api/tasks/{id}/row` 返回整 `<tr>` 片段（含 status-/actions- id，供创建后 afterbegin 插入）；新 `GET /api/tasks/{id}/actions` 返回操作 `<td>` 内片（cancel/resume/唤起/已处理 按 status，供乐观锁请求后局部刷新 actions 单元格） | test_routes |
+| T39 创建→列表接入 | ⬜ | ✅ | T38,T32 | `task_new.html` 成功后：若在 /tasks 页→`hx-swap="afterbegin"` 插新行（GET /api/tasks/{id}/row）+ 绿 Toast「任务已就绪」(PRD §5.3.2)；不在列表页则维持现有「查看详情」链接行为 | test_routes |
+
 ## P4 — CSV 宽表交付（PRD §4.6）
 
 | 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
@@ -229,8 +242,8 @@
 ## 依赖 DAG（会话级，主链顺序）
 
 ```
-S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
-        \____ S3 → S6（UI 依赖表）; S3 → S7（CSV 依赖表）; S2 → S6（心跳指示灯）
+S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 → S9(🟡/❌)
+        \____ S3 → S6（UI 依赖表）; S6 → S6b（复用徽章端点）; S3 → S7（CSV 依赖表）; S2 → S6（心跳指示灯）
 ```
 
 > **不并行**：MVP 单浏览器 + 共享同一批文件/DB/IPC 契约，同一时刻只推进一个 S。  
@@ -267,7 +280,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
     - **裁决记 WHY（不 wire 进 handler）**：`detect_and_solve` 当前未被 handler 调用（本就是"可选能力沉淀默认关"，契约§5）；S5 仅做 solver+schema+config+yaml，**不**动 `_handle_need_human` 路径，零 S4 回归风险。wiring（captcha 命中→先 detect_and_solve 再 need_human）留 T71 端到验/S9。
   - 🔄 **T27 🟡 代码完成待人录制**（`platforms/zhihu/{__init__.py,platform.yaml}`：search `/api/v4/search_v4`+ItemRef、detail `/api/v4/answers/{id}`+Post.body/interactions、comments `/api/v4/answers/{id}/root_comments`+Comments；`risk_tier:account`/`captcha_policy:manual`）。新 `tests/collection/test_registry_zhihu.py` 只验 yaml 解析+默认值，**不**验 JSON path 正确性。
     - **遗留（T27 人验/S9）**：知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list 未支持），真实录制后需补 engine 兜底或 map 改 `[*]`；maps 当前为骨架待 LLM mapper 录制替换。评论 3 次滚动 `scroll_collect` 待录制侧补。
-- ⬜ **下一会话 = S7**（P4 CSV 宽表：T40 宽表重写 10 中文表头+utf-8-sig+转义 · T41 导出路由+空数据防御）。依赖 S3✅。门禁 test_csv_export+test_routes。
+- ⬜ **下一会话 = S6b**（P3.5 任务控制台列表页：T37 GET /tasks 列表页+空状态 · T38 `/api/tasks/{id}/row`+`/api/tasks/{id}/actions` 片段端点 · T39 创建→afterbegin 插行）。复用 S6 徽章端点，依赖 S6✅。门禁 test_routes。S7（CSV）随后——loop 顺序 S6→S6b→S7。
 
 - ✅ **S6 完成**（P3 UI 行为，保留 WS + 补 HTMX 局部交互）。T30 base.html 引 htmx.org@2.0.4 CDN（之前 hx- 属性因无 htmx.js 而失效）；T31 status badge：新 `GET /api/tasks/{id}/status` 返回可轮询 `<span>` 片段（pending/running/need_human 红blink/paused/completed/error），running 时读 `progress/<rid>.json` 取 night_sleep 深色+07:00 / resting 文案；style.css 补 `.badge` 全套 + `@keyframes badge-blink`；T32 `task_new.html` 改 `<dialog>` + 失焦 http 校验 + count≤200 截断 + 耗时预估二次确认 modal + aria-busy，`api_create_task` form 迁 PRD §4.1.1（task_type/target_value/expected_count）删 TaskKeyword 建链、IPC 派生 keywords 兼容 S4；T33 task_detail 操作按钮 `hx-disabled-elt` 乐观锁 + need_human 高亮【唤起浏览器】/【已处理，继续】；T34 `posts.html` 行点击 `htmx.ajax` master-detail + 新 `GET /api/items/{id}/comments` 返回 colspan=7 `<tr>` 片段（0 评论置灰）；T35 base.html 导航底部心跳灯 `hx-get=/api/heartbeat every 10s` + 新端点读 `heartbeat_age()` <30s 绿/≥30s红灰；T36 app.js 监听 `htmx:responseError/sendError`→右上红 Toast 3s，`showToast` 挂 window + 支持 duration。新增 `collection_tasks.request_id` 列（[契约变更 2026-07-11 S6]）。test_routes 33 用例（+19），全量回归 372 passed，门禁全绿。
   - **裁决记 WHY**：
@@ -280,4 +293,4 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S7 → S8 → S9(🟡/❌)
     - **resume→control 文件 wiring**：`/api/tasks/{id}/resume` 仍发新 IPC request（非 PRD §4.4.3 的 `control/ctrl_<rid>.json {action:resume}`）。归 S9/T70。
     - **JS 行为端到验**：dialog 校验/耗时 modal/乐观锁/master-detail toggle/Toast 触发等 JS 运行时行为，pytest 只断言静态接入（渲染含 `<dialog>`/`hx-*`/app.js 含监听串），真实浏览器行为归 S9/T70。
     - **model 旧列 + NOT NULL**（契约 §2：url/platform_comment_id NOT NULL、旧列删除）仍 open，归 S7 csv_exporter 切换时。
-    - **/tasks 列表页**：PRD §5.2「任务控制台」列表页（`<td id=status-<id>>` 徽章轮询）当前无该页，S6 未顺带补（用户裁决：只改既有点名文件）。归后续会话。
+    - **/tasks 列表页 → 已立项 S6b**：PRD §5.2「任务控制台」列表页（`<td id=status-<id>>` 徽章轮询）当前无该页，S6 未顺带补。**已正式立项为 S6b（P3.5，T37-T39）**，复用 S6 徽章端点，loop 顺序紧接 S6。
