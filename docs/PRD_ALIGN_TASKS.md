@@ -249,10 +249,29 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 > **不并行**：MVP 单浏览器 + 共享同一批文件/DB/IPC 契约，同一时刻只推进一个 S。  
 > 任务级细 DAG（T 子任务内部依赖）见各 P 段表格的「依赖」列，仅作会话内排序参考。
 
+## 🧯 遗留事项跟踪（跨会话 open 项，单一收口表）
+
+> 凡某会话裁决「暂不做 / 留后续」的项，**必须登记到本表**（勿只在会话快照里提一句，快照会沉底）。每项给 ID、来源、描述、收口会话/任务、状态。收口时把状态改 ✅ 并附 commit/证据。新会话开工先扫本表，看自己是否要顺手收一项。
+
+| ID | 来源 | 描述 | 收口 | 状态 |
+|---|---|---|---|:-:|
+| L01 | S4/S6 | `routes/tasks.py /api/tasks/{id}/resume` 仍发新 IPC request（op scrape_task, resume=True），**未**按 PRD §4.4.3 step4 写 `control/ctrl_<rid>.json {action:resume}`。handler `_await_resume` 轮询 control/ 行为正确但真实 /resume 路径未对接。`task.request_id` 已存（S6 加列），S9 接 `control/ctrl_<rid>.json` 即可。 | S9/T70 | ⬜ |
+| L02 | S6/S6b | JS 运行时行为端到验：dialog 失焦校验 / 耗时预估 modal / 乐观锁（hx-disabled-elt+lockBtn）/ master-detail toggle / Toast 触发（htmx:responseError/sendError）/ 创建后 afterbegin 插行 / 列表 actions 5s 轮询刷新。pytest 只断言静态接入（渲染含 `<dialog>`/`hx-*`/app.js 含监听串），真实浏览器行为未驱动。 | S9/T70 | ⬜ |
+| L03 | S4/S6 | model 旧列 + NOT NULL 清理（契约 §2）：`collection_items.url`、`collection_comments.platform_comment_id` 改回 NOT NULL；删旧列（likes/content/post_id/rank/sub_comment_count/...）+ 旧 UNIQUE。create_all 重建即生效。 | S7（csv_exporter 切换时） | ⬜ |
+| L04 | S6b | 列表页创建 dialog（`tasks_list.html` 内嵌 `_task_new_dialog.html`）的平台/账号下拉用默认值（未查 DB 传 `platforms`/`accounts`），新建任务只能走默认 platform/account。 | S9 或 UI 增强会话 | ⬜ |
+| L05 | S6b | 操作按钮「锁到状态改变」精确语义未达：当前是请求期 disabled（hx-disabled-elt）+ actions 单元格 5s 轮询刷新，≤5s 滞后才换按钮集合；PRD §5.2.3 要「按钮持续 disabled 直到后端状态真实改变再替换」。 | S9/T70 | ⬜ |
+| L06 | S4 | 评论 3 次滚动加载（`scroll_collect` max_scrolls=3）语义落在 comments flow，engine 已支持，但 XHS/知乎 comments flow yaml 未加 `scroll_collect` 步骤。 | S5（录制）/S9 | ⬜ |
+| L07 | S4 | `scroll_collect` 真增量 XHR：当前对静态 saved 快照重抽 dedup（测边界 20/5）；真实浏览器「滚动触发新 XHR→累积」需 flow 在每次 scroll 后再 `wait_xhr`。 | S5/S9（录制侧真实化） | ⬜ |
+| L08 | S5/T27 | 知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list），真实录制后需补 engine 兜底或 map 改 `[*]`。 | S9/T71 | ⬜ |
+| L09 | S5/T27 | 知乎 maps 当前为骨架，待 LLM mapper 录制替换。 | S5（录制）/S9 | ⬜ |
+| L10 | S5/T26 | captcha solver wiring：`detect_and_solve` 已实现但未被 handler 调用（契约§5「可选能力默认关」）。wiring（captcha 命中→先 detect_and_solve 再 need_human）未接。 | S9/T71 | ⬜ |
+
+> **收口规则**：某会话收掉一项 → 本表该行状态 ⬜→✅ + 在「当前进度快照」对应会话段记一句「收 L0X（commit `<hash>`）」。**禁止**只改快照不改本表——本表是唯一索引。
+
 ## 续接协议（新会话怎么接，3 步开干）
 
-1. **读三件套**（控制上下文量，不重读全部）：① 本文件「⛓️ 共享上下文契约」节（不可漂移）+「🧭 会话经验」扫一眼防错 ② 当前会话 S 段（范围+门禁+T 子任务）③ 目标文件 + 对应 PRD 章节。
-2. **干完**：勾 S 段 T checklist → 跑 `bash scripts/loop_gate.sh` → 退出 0 才标该 S ✅ → 原子化 commit（`[session SNN] <desc>`）+ push。
+1. **读三件套**（控制上下文量，不重读全部）：① 本文件「⛓️ 共享上下文契约」节（不可漂移）+「🧭 会话经验」扫一眼防错 ② 当前会话 S 段（范围+门禁+T 子任务）③ 目标文件 + 对应 PRD 章节。**+扫「🧯 遗留事项跟踪」表**——看本会话是否要顺手收一项（L0X）。
+2. **干完**：勾 S 段 T checklist → 跑 `bash scripts/loop_gate.sh` → 退出 0 才标该 S ✅ → 原子化 commit（`[session SNN] <desc>`）+ push。若收掉某 L0X → 遗留表该行 ⬜→✅ + 快标注「收 L0X（commit `<hash>`）」。
 3. **交接**：更新本表该 S 状态行 + 「当前进度快照」；🟡 标 🔄 不标 ✅；❌ 跳过。契约若被改 → 回写「共享上下文契约」节并标 `[契约变更]`。
 
 ## 当前进度快照（2026-07-11）
