@@ -42,7 +42,7 @@
   </thead>
   <tbody>
     {% for post in posts %}
-    <tr>
+    <tr id="row-{{ post.id }}" onclick="toggleComments('{{ post.id }}')" style="cursor: pointer;" title="点击展开评论">
       <td>{{ post.id }}</td>
       <td>{{ post.platform }}</td>
       <td>
@@ -91,4 +91,16 @@
   </ul>
 </nav>
 {% endif %}
+{% endblock %}{# content #}
+
+{% block scripts %}
+<script>
+// Master-detail 评论展开/收起 (PRD §5.4.2): 点行→插入子行; 再点→收起.
+function toggleComments(itemId) {
+  var existing = document.getElementById('detail-' + itemId);
+  if (existing) { existing.remove(); return; }
+  htmx.ajax('GET', '/api/items/' + itemId + '/comments',
+    { target: '#row-' + itemId, swap: 'afterend' });
+}
+</script>
 {% endblock %}

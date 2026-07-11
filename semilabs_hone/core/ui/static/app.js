@@ -39,8 +39,19 @@
     container.appendChild(el);
     setTimeout(function () {
       if (el.parentNode) el.parentNode.removeChild(el);
-    }, 5000);
+    }, msg.duration || 5000);
   }
+
+  // Expose for inline scripts (e.g. task_new.html success toast).
+  window.showToast = showToast;
+
+  // Global HTMX error Toast (PRD §5.1.2): responseError/sendError → 右上红 Toast 3s.
+  document.addEventListener("htmx:responseError", function () {
+    showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
+  });
+  document.addEventListener("htmx:sendError", function () {
+    showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
+  });
 
   function dispatch(msg) {
     var type = msg.type;

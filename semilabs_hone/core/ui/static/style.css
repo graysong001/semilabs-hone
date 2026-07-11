@@ -78,10 +78,10 @@
   transition: width 0.3s;
 }
 
-/* Toast notifications */
+/* Toast notifications (PRD §5.1.2: 右上角, 3s) */
 .toast-container {
   position: fixed;
-  bottom: 1rem;
+  top: 1rem;
   right: 1rem;
   z-index: 1000;
   display: flex;
@@ -108,4 +108,88 @@
 
 .toast.info {
   border-left: 3px solid var(--pico-primary);
+}
+
+/* Status badges (PRD §5.2.2: 拟人化状态徽章) */
+.badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+  background-color: var(--pico-secondary-background);
+  color: var(--pico-muted-color);
+}
+
+.badge.active {          /* running */
+  background-color: var(--pico-ins-color);
+  color: var(--pico-ins-contrast, #fff);
+}
+
+.badge.success {         /* completed */
+  background-color: var(--pico-ins-color);
+  color: var(--pico-ins-contrast, #fff);
+  opacity: 0.85;
+}
+
+.badge.warning {         /* paused */
+  background-color: var(--pico-warning-color, #f0a500);
+  color: var(--pico-warning-contrast, #fff);
+}
+
+.badge.muted {           /* pending */
+  background-color: var(--pico-secondary-background);
+  color: var(--pico-muted-color);
+}
+
+.badge.error {           /* error: 红色实心 */
+  background-color: var(--pico-del-color);
+  color: var(--pico-del-contrast, #fff);
+}
+
+.badge.blink {           /* need_human: 红色闪烁 */
+  background-color: var(--pico-del-color);
+  color: var(--pico-del-contrast, #fff);
+  animation: badge-blink 1s steps(2, start) infinite;
+}
+
+.badge.night-sleep {     /* night_sleep: 深色徽章 */
+  background-color: #2b2b3b;
+  color: #c9c9e0;
+}
+
+@keyframes badge-blink {
+  50% { opacity: 0.25; }
+}
+
+/* Heartbeat indicator (PRD §5.1.1: 导航栏底部, 10s 轮询) */
+.heartbeat-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--pico-muted-color);
+}
+
+.heartbeat-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--pico-muted-color);
+}
+
+.heartbeat-dot.green {
+  background-color: var(--pico-ins-color);
+  animation: heartbeat-pulse 2s ease-in-out infinite;
+}
+
+.heartbeat-dot.red {
+  background-color: var(--pico-del-color);
+}
+
+@keyframes heartbeat-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
