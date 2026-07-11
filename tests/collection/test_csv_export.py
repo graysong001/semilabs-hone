@@ -1,7 +1,8 @@
-"""CSV export + image downloader tests (DM-10).
+"""CSV flat-table export tests (DM-10 / PRD §4.6).
 
 Naming: test_<method>_<scenario>_<expected>.
-Uses the db_session fixture from tests/conftest.py for data seeding.
+Uses the db_session fixture from tests/conftest.py for data seeding via the
+PRD repository upserts (content_text / metrics_json / like_count).
 Image downloader tests mock httpx + shutil.disk_usage.
 """
 from __future__ import annotations
@@ -10,244 +11,222 @@ import asyncio
 import csv
 import shutil
 import unittest.mock
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from semilabs_hone.modules.collection.export.csv_exporter import (
+    HEADERS,
+    EmptyExportError,
     export_csv,
-    export_empty_db,
 )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _seed_basic(db_session):
-    """Insert one post + two comments."""
-    from semilabs_hone.core.models.post import CollectionItem
-    from semilabs_hone.core.models.comment import CollectionComment
-    from semilabs_hone.core.models.keyword import Keyword
-    from semilabs_hone.core.models.task import CollectionTask
+def _seed_item(db_session, *, platform_id, title="Test Post", content="Hello world",
+               likes=100, comments_count=2, url=None, publish_time="2026-07-08 14:00:00",
+               task_id=None):
+    """Upsert one item via the PRD repository; returns the ORM row."""
+    from semilabs_hone.core.models import repository as repo
 
-    task = CollectionTask(id=1, account_id=1, platform="xiaohongshu", status="completed")
-    kw = Keyword(id=1, text="test_kw", platform="xiaohongshu")
-    post = CollectionItem(
-        id=1, platform="xiaohongshu", platform_id="note_001",
-        task_id=1, keyword_id=1, url="https://xhs.link/note_001",
-        title="Test Post", author_name="AuthorA", content="Hello world",
-        tags="tag1|tag2", post_type="video", likes=100, collects=20,
-        comments_count=2, shares=5, published_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
-        image_count=3, scraped_at=datetime(2025, 7, 1, tzinfo=timezone.utc),
+    return repo.upsert_item(
+        db_session,
+        task_id=task_id,
+        platform="xiaohongshu",
+        platform_id=platform_id,
+        url=url,
+        title=title,
+        content_text=content,
+        author_name="AuthorA",
+        metrics={"likes": likes, "comments_count": comments_count, "collects": 20, "shares": 5},
+        publish_time=publish_time,
     )
-    c1 = CollectionComment(id=1, post_id=1, author_name="UserX", content="Great!", likes=50,
-                 sub_comment_count=2, is_author_liked=True, rank=1)
-    c2 = CollectionComment(id=2, post_id=1, author_name="UserY", content="Nice", likes=30,
-                 sub_comment_count=0, is_author_liked=False, rank=2)
-    for obj in [task, kw, post, c1, c2]:
-        db_session.add(obj)
-    db_session.commit()
 
 
-def _read_csv(path: Path) -> list[dict[str, str]]:
-    with open(path, encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+def _seed_comment(db_session, *, item_id, platform_comment_id, author="UserX",
+                  content="Great!", likes=50):
+    from semilabs_hone.core.models import repository as repo
+
+    return repo.upsert_comment(
+        db_session,
+        item_id=item_id,
+        platform_comment_id=platform_comment_id,
+        author_name=author,
+        content_text=content,
+        like_count=likes,
+    )
 
 
-# ── export_csv: AI mode ──────────────────────────────────────────────────
+def _read_csv(path: Path) -> tuple[str, list[dict[str, str]]]:
+    """Return (raw_text, rows). raw_text keeps the BOM for assertion."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8-sig")
+    rows = list(csv.DictReader(text.splitlines()))
+    return raw.decode("utf-8"), rows
 
-class TestExportCsvAi:
 
-    def test_export_csv_ai_columns_and_data(self, db_session):
-        """AI mode CSV has the expected column headers and row data."""
-        _seed_basic(db_session)
+# ── headers + BOM ────────────────────────────────────────────────────────
 
-        path = export_csv(task_id=None, keyword=None, fmt="ai")
-        assert path.suffix == ".csv"
-        assert path.exists()
+class TestExportHeaders:
 
-        rows = _read_csv(path)
-        assert len(rows) == 1
-        row = rows[0]
-
-        expected_cols = [
-            "note_id", "url", "title", "author", "content", "tags",
-            "post_type", "likes", "collects", "comments_count", "shares",
-            "published_at", "keyword", "image_count", "top_comments", "scraped_at",
+    def test_headers_are_ten_chinese_in_order(self):
+        """PRD §4.6.3: exactly 10 Chinese headers in the mandated order."""
+        assert HEADERS == [
+            "平台", "笔记ID", "笔记标题", "笔记正文", "笔记点赞数",
+            "笔记发布时间", "笔记链接", "评论者昵称", "评论内容", "评论点赞数",
         ]
-        assert list(row.keys()) == expected_cols
-        assert row["note_id"] == "note_001"
-        assert row["url"] == "https://xhs.link/note_001"
-        assert row["title"] == "Test Post"
-        assert row["author"] == "AuthorA"
-        assert row["content"] == "Hello world"
-        assert row["tags"] == "tag1｜tag2"  # fullwidth pipe: | is replaced to avoid CSV collision
-        assert row["post_type"] == "video"
-        assert row["likes"] == "100"
-        assert row["collects"] == "20"
-        assert row["comments_count"] == "2"
-        assert row["shares"] == "5"
-        assert row["keyword"] == "test_kw"
-        assert row["image_count"] == "3"
 
-    def test_export_csv_ai_top_comments_pipe_format(self, db_session):
-        """top_comments = 'Author:Content(N likes)' pipe-separated, sorted by likes desc."""
-        _seed_basic(db_session)
-
-        path = export_csv(fmt="ai")
-        rows = _read_csv(path)
-        tc = rows[0]["top_comments"]
-
-        # Should be sorted by likes desc: UserX (50) first, then UserY (30)
-        parts = tc.split("|")
-        assert len(parts) == 2
-        assert parts[0] == "UserX:Great!(50 likes)"
-        assert parts[1] == "UserY:Nice(30 likes)"
-
-    def test_export_csv_ai_no_comments(self, db_session):
-        """AI mode with post but no comments has empty top_comments."""
-        from semilabs_hone.core.models.post import CollectionItem
-        from semilabs_hone.core.models.keyword import Keyword
-        from semilabs_hone.core.models.task import CollectionTask
-
-        task = CollectionTask(id=2, account_id=1, platform="xiaohongshu", status="completed")
-        kw = Keyword(id=2, text="no_comments", platform="xiaohongshu")
-        post = CollectionItem(
-            id=2, platform="xiaohongshu", platform_id="note_002",
-            task_id=2, keyword_id=2, title="No comments post",
-            author_name="AuthorB",
-        )
-        for obj in [task, kw, post]:
-            db_session.add(obj)
-        db_session.commit()
-
-        path = export_csv(fmt="ai")
-        rows = _read_csv(path)
-        assert len(rows) == 1
-        assert rows[0]["top_comments"] == ""
+    def test_export_csv_has_bom_and_chinese_header(self, db_session):
+        """File is utf-8-sig (BOM) with the 10 Chinese headers (PRD §4.6.2)."""
+        _seed_item(db_session, platform_id="note_001")
+        path = export_csv()
+        raw, _ = _read_csv(path)
+        assert raw.startswith("﻿")  # BOM present (utf-8-sig)
+        assert ",".join(HEADERS) in raw
 
 
-# ── export_csv: Excel mode ───────────────────────────────────────────────
+# ── left-join flat logic (PRD §4.6.2) ────────────────────────────────────
 
-class TestExportCsvExcel:
+class TestExportLeftJoin:
 
-    def test_export_csv_excel_zip_has_two_csvs(self, db_session):
-        """Excel mode returns a ZIP containing posts.csv + comments.csv."""
-        _seed_basic(db_session)
+    def test_one_note_two_comments_two_rows_note_cols_repeat(self, db_session):
+        """1 note × 2 comments → 2 rows; note columns identical across rows."""
+        item = _seed_item(db_session, platform_id="note_001", content="正文A", likes=10)
+        _seed_comment(db_session, item_id=item.id, platform_comment_id="c1",
+                      author="UserX", content="Great!", likes=50)
+        _seed_comment(db_session, item_id=item.id, platform_comment_id="c2",
+                      author="UserY", content="Nice", likes=30)
 
-        path = export_csv(fmt="excel")
-        assert path.suffix == ".zip"
-        assert path.exists()
-
-        with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
-        assert "posts.csv" in names
-        assert "comments.csv" in names
-
-    def test_export_csv_excel_posts_csv_content(self, db_session):
-        """posts.csv in the ZIP has correct rows."""
-        _seed_basic(db_session)
-
-        path = export_csv(fmt="excel")
-        with zipfile.ZipFile(path) as zf:
-            data = zf.read("posts.csv").decode("utf-8-sig")
-        reader = csv.DictReader(data.splitlines())
-        rows = list(reader)
-        assert len(rows) == 1
-        assert rows[0]["note_id"] == "note_001"
-
-    def test_export_csv_excel_comments_csv_content(self, db_session):
-        """comments.csv in the ZIP is linked by note_id."""
-        _seed_basic(db_session)
-
-        path = export_csv(fmt="excel")
-        with zipfile.ZipFile(path) as zf:
-            data = zf.read("comments.csv").decode("utf-8-sig")
-        reader = csv.DictReader(data.splitlines())
-        rows = list(reader)
+        _, rows = _read_csv(export_csv())
         assert len(rows) == 2
-        assert all(r["note_id"] == "note_001" for r in rows)
+        # note columns repeat
+        assert rows[0]["平台"] == rows[1]["平台"] == "xiaohongshu"
+        assert rows[0]["笔记ID"] == rows[1]["笔记ID"] == "note_001"
+        assert rows[0]["笔记正文"] == rows[1]["笔记正文"] == "正文A"
+        # comments map to distinct rows, ordered by likes desc (c1=50 first)
+        assert rows[0]["评论者昵称"] == "UserX"
+        assert rows[0]["评论内容"] == "Great!"
+        assert rows[0]["评论点赞数"] == "50"
+        assert rows[1]["评论者昵称"] == "UserY"
+        assert rows[1]["评论点赞数"] == "30"
 
-
-# ── export_csv: empty DB ─────────────────────────────────────────────────
-
-class TestExportCsvEmptyDb:
-
-    def test_export_empty_db_ai_no_crash(self, db_session):
-        """AI mode export on empty DB returns a valid CSV with header only."""
-        path = export_empty_db(fmt="ai")
-        assert path.exists()
-        rows = _read_csv(path)
-        assert len(rows) == 0  # no data rows
-
-    def test_export_empty_db_excel_no_crash(self, db_session):
-        """Excel mode export on empty DB returns a valid ZIP with empty CSVs."""
-        path = export_empty_db(fmt="excel")
-        assert path.exists()
-        with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
-            assert "posts.csv" in names
-            assert "comments.csv" in names
-
-            with zf.open("posts.csv") as pf:
-                posts_data = pf.read().decode("utf-8-sig")
-        reader = csv.DictReader(posts_data.splitlines())
-        assert len(list(reader)) == 0
-
-
-# ── export_csv: filtering ────────────────────────────────────────────────
-
-class TestExportCsvFiltering:
-
-    def test_export_csv_filter_by_task_id(self, db_session):
-        """Only posts for the given task_id are exported."""
-        from semilabs_hone.core.models.post import CollectionItem
-        from semilabs_hone.core.models.keyword import Keyword
-        from semilabs_hone.core.models.task import CollectionTask
-
-        t1 = CollectionTask(id=10, account_id=1, platform="xiaohongshu", status="completed")
-        t2 = CollectionTask(id=11, account_id=1, platform="xiaohongshu", status="completed")
-        kw1 = Keyword(id=10, text="kw_a", platform="xiaohongshu")
-        kw2 = Keyword(id=11, text="kw_b", platform="xiaohongshu")
-        p1 = CollectionItem(id=10, platform="xiaohongshu", platform_id="n10",
-                  task_id=10, keyword_id=10, title="Post for task 10",
-                  author_name="A10")
-        p2 = CollectionItem(id=11, platform="xiaohongshu", platform_id="n11",
-                  task_id=11, keyword_id=11, title="Post for task 11",
-                  author_name="A11")
-        for obj in [t1, t2, kw1, kw2, p1, p2]:
-            db_session.add(obj)
-        db_session.commit()
-
-        path = export_csv(task_id="10", fmt="ai")
-        rows = _read_csv(path)
+    def test_zero_comments_one_row_comment_cols_empty(self, db_session):
+        """0 comments → 1 row with comment columns empty (PRD §4.6.2)."""
+        _seed_item(db_session, platform_id="note_002")
+        _, rows = _read_csv(export_csv())
         assert len(rows) == 1
-        assert rows[0]["note_id"] == "n10"
+        assert rows[0]["笔记ID"] == "note_002"
+        assert rows[0]["评论者昵称"] == ""
+        assert rows[0]["评论内容"] == ""
+        assert rows[0]["评论点赞数"] == ""
 
-    def test_export_csv_filter_by_keyword(self, db_session):
-        """Only posts for the given keyword text are exported."""
-        from semilabs_hone.core.models.post import CollectionItem
-        from semilabs_hone.core.models.keyword import Keyword
-        from semilabs_hone.core.models.task import CollectionTask
+    def test_likes_read_from_metrics_json(self, db_session):
+        """笔记点赞数 is parsed from metrics_json (PRD §6.4 TEXT)."""
+        _seed_item(db_session, platform_id="note_003", likes=1500, comments_count=8)
+        _, rows = _read_csv(export_csv())
+        assert rows[0]["笔记点赞数"] == "1500"
 
-        task = CollectionTask(id=20, account_id=1, platform="xiaohongshu", status="completed")
-        kw1 = Keyword(id=20, text="alpha", platform="xiaohongshu")
-        kw2 = Keyword(id=21, text="beta", platform="xiaohongshu")
-        p1 = CollectionItem(id=20, platform="xiaohongshu", platform_id="n20",
-                  task_id=20, keyword_id=20, title="Alpha post", author_name="Alpha")
-        p2 = CollectionItem(id=21, platform="xiaohongshu", platform_id="n21",
-                  task_id=20, keyword_id=21, title="Beta post", author_name="Beta")
-        for obj in [task, kw1, kw2, p1, p2]:
-            db_session.add(obj)
-        db_session.commit()
+    def test_publish_time_and_url_columns(self, db_session):
+        """笔记发布时间 + 笔记链接 come from publish_time / url."""
+        _seed_item(db_session, platform_id="note_004", url="https://xhs.link/note_004",
+                   publish_time="2026-07-08 14:00:00")
+        _, rows = _read_csv(export_csv())
+        assert rows[0]["笔记发布时间"] == "2026-07-08 14:00:00"
+        assert rows[0]["笔记链接"] == "https://xhs.link/note_004"
 
-        path = export_csv(keyword="alpha", fmt="ai")
-        rows = _read_csv(path)
+    def test_ordered_by_likes_desc(self, db_session):
+        """Notes are ordered by 笔记点赞数 descending (PRD §4.6.1)."""
+        _seed_item(db_session, platform_id="lo", likes=5)
+        _seed_item(db_session, platform_id="hi", likes=9999)
+        _seed_item(db_session, platform_id="mid", likes=50)
+        _, rows = _read_csv(export_csv())
+        ids = [r["笔记ID"] for r in rows]
+        assert ids == ["hi", "mid", "lo"]
+
+
+# ── escaping (PRD §8.6 场景6.1) ───────────────────────────────────────────
+
+class TestExportEscaping:
+
+    def test_comma_quote_emoji_escaped_correctly(self, db_session):
+        """csv.DictWriter quotes fields with comma/quote; emoji survives intact."""
+        tricky = '你好,世界｜"冒号"emoji😀'
+        item = _seed_item(db_session, platform_id="note_tricky", content=tricky, likes=1)
+        _seed_comment(db_session, item_id=item.id, platform_comment_id="ct",
+                      content="评论,带逗号", likes=1)
+
+        raw, rows = _read_csv(export_csv())
+        # 1 note × 1 comment → 1 row, no 错行 from the embedded comma/quote
         assert len(rows) == 1
-        assert rows[0]["title"] == "Alpha post"
-        assert rows[0]["keyword"] == "alpha"
+        assert rows[0]["笔记正文"] == tricky  # emoji + comma + quote field survives
+        assert rows[0]["评论内容"] == "评论,带逗号"
+        # verify round-trip via csv reader already proved escaping correctness
+
+
+# ── empty defense (PRD §4.6: 0 条 → 拦截) ────────────────────────────────
+
+class TestExportEmpty:
+
+    def test_zero_notes_raises_empty_export_error(self, db_session):
+        """Exporter raises EmptyExportError when 0 notes match."""
+        with pytest.raises(EmptyExportError):
+            export_csv()
+
+    def test_filter_task_id_no_match_raises(self, db_session):
+        """task_id filter matching nothing also raises."""
+        _seed_item(db_session, platform_id="note_001", task_id="t-1")
+        with pytest.raises(EmptyExportError):
+            export_csv(task_id="t-does-not-exist")
+
+
+# ── task_id filter ────────────────────────────────────────────────────────
+
+class TestExportFiltering:
+
+    def test_filter_by_task_id_keeps_only_matching(self, db_session):
+        """Only notes for the given task_id are exported."""
+        _seed_item(db_session, platform_id="n_a", task_id="t-1")
+        _seed_item(db_session, platform_id="n_b", task_id="t-2")
+        _, rows = _read_csv(export_csv(task_id="t-1"))
+        assert len(rows) == 1
+        assert rows[0]["笔记ID"] == "n_a"
+
+
+# ── route layer (PRD §4.6: 0 条 → 拦截 + Toast) ──────────────────────────
+
+def _make_export_app():
+    app = FastAPI()
+    from semilabs_hone.modules.collection.routes import export as exp_mod
+    app.include_router(exp_mod.router)
+    return app
+
+
+class TestExportRoute:
+
+    def test_get_export_with_data_returns_csv(self, db_session):
+        """GET /api/export with data → 200 text/csv file download."""
+        _seed_item(db_session, platform_id="note_001")
+        client = TestClient(_make_export_app())
+        resp = client.get("/api/export")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        # Chinese headers present in the streamed body
+        assert "笔记ID" in resp.text
+
+    def test_get_export_empty_returns_400_json(self, db_session):
+        """GET /api/export with 0 notes → 400 JSON for frontend Toast."""
+        client = TestClient(_make_export_app())
+        resp = client.get("/api/export")
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["ok"] is False
+        assert body["error"]
 
 
 # ── image_downloader: download_images ────────────────────────────────────

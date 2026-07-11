@@ -223,7 +223,7 @@ def _actions_html(task) -> str:
         )
     if task.status == "completed":
         parts.append(
-            f'<a href="/api/export?task_id={tid}&format=ai" class="button">导出 CSV</a>'
+            f'<button onclick="exportCsv(\'{tid}\', this)" class="button">导出 CSV</button>'
         )
     return " ".join(parts) if parts else '<span style="color:var(--pico-muted-color)">—</span>'
 

@@ -1,16 +1,21 @@
-"""CSV / Excel export of scraped posts + comments.
+"""CSV flat-table export of scraped notes + comments (PRD §4.6).
 
-Reads directly from shared SQLite (no worker dependency).
+Left-join wide table: one note × N comments → N rows; a note with 0 comments
+yields 1 row with the comment columns empty. Reads directly from the shared
+SQLite (no worker dependency) off the canonical PRD §6.2/§6.3 columns:
+``content_text`` / ``metrics_json`` (parsed for likes) / ``publish_time`` /
+``url`` for items; ``author_name`` / ``content_text`` / ``like_count`` for
+comments joined by ``item_id``.
 
-- AI mode: single CSV with top_comments as "Author:Content(N likes)" pipe-joined.
-- Excel mode: ZIP containing posts.csv + comments.csv linked by note_id.
+- 10 Chinese headers (PRD §4.6.3): 平台/笔记ID/笔记标题/笔记正文/笔记点赞数/
+  笔记发布时间/笔记链接/评论者昵称/评论内容/评论点赞数
+- ``utf-8-sig`` BOM so Windows Excel opens without mojibake (PRD §4.6.2)
+- ``csv.DictWriter`` handles emoji / comma / quote escaping (PRD §8.6 场景6.1)
+- 0 records → ``EmptyExportError``; the route layer turns it into a Toast
 """
 from __future__ import annotations
 
 import csv
-import io
-import os
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,244 +23,128 @@ from typing import Any
 from semilabs_hone.core.models.db import get_session
 from semilabs_hone.core.models.post import CollectionItem
 from semilabs_hone.core.models.comment import CollectionComment
-from semilabs_hone.core.models.keyword import Keyword
-from semilabs_hone.core.models.task import CollectionTask, TaskKeyword
+from semilabs_hone.core.models.repository import unpack_metrics
 
 
-# ---------------------------------------------------------------------------
-# AI mode: single CSV
-# ---------------------------------------------------------------------------
+class EmptyExportError(Exception):
+    """Raised when there are 0 notes to export (PRD §4.6: 0 条 → 拦截 + Toast)."""
 
-_AI_FIELDS = [
-    "note_id", "url", "title", "author", "content", "tags",
-    "post_type", "likes", "collects", "comments_count", "shares",
-    "published_at", "keyword", "image_count", "top_comments", "scraped_at",
+
+# PRD §4.6.3 — 10 列中文表头
+HEADERS: list[str] = [
+    "平台", "笔记ID", "笔记标题", "笔记正文", "笔记点赞数",
+    "笔记发布时间", "笔记链接", "评论者昵称", "评论内容", "评论点赞数",
 ]
 
 
-def _fmt_dt(val: Any) -> str:
-    if val is None:
-        return ""
-    if isinstance(val, datetime):
-        return val.strftime("%Y-%m-%d %H:%M:%S")
-    return str(val)
+def _likes_of(item: CollectionItem) -> int:
+    """笔记点赞数 ← metrics_json.likes (PRD §6.4 TEXT)."""
+    try:
+        return int(unpack_metrics(item.metrics_json).get("likes", 0) or 0)
+    except Exception:
+        return 0
 
 
-def _build_top_comments(comments: list[CollectionComment]) -> str:
-    """Return pipe-separated "Author:Content(N likes)" for top comments."""
-    parts: list[str] = []
-    for c in sorted(comments, key=lambda x: x.likes or 0, reverse=True):
-        name = c.author_name or ""
-        body = (c.content or "").replace("|", "｜")
-        likes = c.likes or 0
-        parts.append(f"{name}:{body}({likes} likes)")
-    return "|".join(parts)
-
-
-def _query_posts(
-    task_id: str | None,
-    keyword: str | None,
-) -> list[tuple[CollectionItem, str, list[CollectionComment]]]:
-    """Return list of (post, keyword_text, [comments]) matching filters."""
+def _query_items(task_id: str | None) -> list[CollectionItem]:
+    """Return items (notes) matching the task filter, ordered by likes desc."""
     sess = get_session()
     try:
         q = sess.query(CollectionItem)
-
         if task_id is not None:
             q = q.filter(CollectionItem.task_id == task_id)
-
-        if keyword is not None:
-            # Find keyword_id(s) matching the text
-            kw_sub = sess.query(Keyword.id).filter(Keyword.text == keyword)
-            q = q.filter(CollectionItem.keyword_id.in_(kw_sub))
-
-        posts = q.order_by(CollectionItem.id).all()
-
-        # Fetch comments for these posts in one query
-        post_ids = [p.id for p in posts]
-        comments_map: dict[int, list[CollectionComment]] = {}
-        if post_ids:
-            comments_list = sess.query(CollectionComment).filter(CollectionComment.post_id.in_(post_ids)).all()
-            for c in comments_list:
-                comments_map.setdefault(c.post_id, []).append(c)
-
-        # Resolve keyword text per post
-        keyword_map: dict[int, str] = {}
-        if posts:
-            # Build mapping: keyword_id -> text
-            kw_ids = {p.keyword_id for p in posts if p.keyword_id is not None}
-            if kw_ids:
-                kws = sess.query(Keyword).filter(Keyword.id.in_(kw_ids)).all()
-                keyword_map = {kw.id: kw.text for kw in kws}
-
-        result: list[tuple[CollectionItem, str, list[CollectionComment]]] = []
-        for p in posts:
-            kw_text = keyword_map.get(p.keyword_id, "") if p.keyword_id is not None else ""
-            result.append((p, kw_text, comments_map.get(p.id, [])))
-
-        return result
+        items = q.all()
+        # PRD §4.6.1: 默认按点赞数降序
+        items.sort(key=lambda it: _likes_of(it), reverse=True)
+        return items
     finally:
         sess.close()
 
 
-def _ai_csv_rows(
-    posts_data: list[tuple[CollectionItem, str, list[CollectionComment]]],
-) -> list[dict[str, str]]:
+def _query_comments_by_item(item_ids: list[str]) -> dict[str, list[CollectionComment]]:
+    """Return {item_id: [comments]} for the given items, comments by like_count desc."""
+    if not item_ids:
+        return {}
+    sess = get_session()
+    try:
+        rows = (
+            sess.query(CollectionComment)
+            .filter(CollectionComment.item_id.in_(item_ids))
+            .order_by(CollectionComment.like_count.desc())
+            .all()
+        )
+    finally:
+        sess.close()
+    mapping: dict[str, list[CollectionComment]] = {}
+    for c in rows:
+        mapping.setdefault(c.item_id, []).append(c)
+    return mapping
+
+
+def _build_rows(items: list[CollectionItem]) -> list[dict[str, str]]:
+    """Left-join wide-table rows (PRD §4.6.2): 1 note × N comments → N rows;
+    0 comments → 1 row with empty comment columns."""
+    comments_map = _query_comments_by_item([it.id for it in items])
     rows: list[dict[str, str]] = []
-    for post, kw_text, comments in posts_data:
-        tags_val = (post.tags or "").replace("|", "｜")
-        rows.append({
-            "note_id": post.platform_id or "",
-            "url": post.url or "",
-            "title": post.title or "",
-            "author": post.author_name or "",
-            "content": (post.content or "").replace("|", "｜"),
-            "tags": tags_val,
-            "post_type": post.post_type or "",
-            "likes": post.likes or 0,
-            "collects": post.collects or 0,
-            "comments_count": post.comments_count or 0,
-            "shares": post.shares or 0,
-            "published_at": _fmt_dt(post.published_at),
-            "keyword": kw_text,
-            "image_count": post.image_count or 0,
-            "top_comments": _build_top_comments(comments),
-            "scraped_at": _fmt_dt(post.scraped_at),
-        })
+    for it in items:
+        likes = _likes_of(it)
+        base = {
+            "平台": it.platform or "",
+            "笔记ID": it.platform_id or "",
+            "笔记标题": it.title or "",
+            "笔记正文": it.content_text or "",
+            "笔记点赞数": str(likes),
+            "笔记发布时间": it.publish_time or "",
+            "笔记链接": it.url or "",
+            "评论者昵称": "",
+            "评论内容": "",
+            "评论点赞数": "",
+        }
+        comments = comments_map.get(it.id, [])
+        if not comments:
+            # 0 评论 → 1 行，评论列留空 (PRD §4.6.2)
+            rows.append(base)
+            continue
+        for c in comments:
+            row = dict(base)
+            row["评论者昵称"] = c.author_name or ""
+            row["评论内容"] = c.content_text or ""
+            row["评论点赞数"] = str(c.like_count or 0)
+            rows.append(row)
     return rows
 
 
-def _write_ai_csv(rows: list[dict[str, str]], path: Path) -> None:
+def _write_csv(rows: list[dict[str, str]], path: Path) -> None:
+    """Write rows to a utf-8-sig CSV with Chinese headers (PRD §4.6.2/§8.6)."""
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=_AI_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=HEADERS)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
 
 
-# ---------------------------------------------------------------------------
-# Excel mode: ZIP with posts.csv + comments.csv
-# ---------------------------------------------------------------------------
-
-_POST_EXCEL_FIELDS = [
-    "note_id", "url", "title", "author", "content", "tags",
-    "post_type", "likes", "collects", "comments_count", "shares",
-    "published_at", "keyword", "image_count", "scraped_at",
-]
-
-_COMMENT_EXCEL_FIELDS = [
-    "note_id", "author", "content", "likes", "sub_comment_count",
-    "is_author_liked", "rank", "published_at",
-]
-
-
-def _write_excel_zip(
-    posts_data: list[tuple[CollectionItem, str, list[CollectionComment]]],
-    path: Path,
-) -> None:
-    posts_rows: list[dict[str, str]] = []
-    comments_rows: list[dict[str, str]] = []
-
-    for post, kw_text, comments in posts_data:
-        note_id = post.platform_id or ""
-        tags_val = (post.tags or "").replace("|", "｜")
-        posts_rows.append({
-            "note_id": note_id,
-            "url": post.url or "",
-            "title": post.title or "",
-            "author": post.author_name or "",
-            "content": (post.content or "").replace("|", "｜"),
-            "tags": tags_val,
-            "post_type": post.post_type or "",
-            "likes": post.likes or 0,
-            "collects": post.collects or 0,
-            "comments_count": post.comments_count or 0,
-            "shares": post.shares or 0,
-            "published_at": _fmt_dt(post.published_at),
-            "keyword": kw_text,
-            "image_count": post.image_count or 0,
-            "scraped_at": _fmt_dt(post.scraped_at),
-        })
-        for c in comments:
-            comments_rows.append({
-                "note_id": note_id,
-                "author": c.author_name or "",
-                "content": (c.content or "").replace("|", "｜"),
-                "likes": c.likes or 0,
-                "sub_comment_count": c.sub_comment_count or 0,
-                "is_author_liked": str(bool(c.is_author_liked)),
-                "rank": c.rank or "",
-                "published_at": _fmt_dt(c.published_at),
-            })
-
-    def _csv_str(fieldnames: list[str], rows: list[dict[str, str]]) -> bytes:
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-        return buf.getvalue().encode("utf-8-sig")
-
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("posts.csv", _csv_str(_POST_EXCEL_FIELDS, posts_rows))
-        zf.writestr("comments.csv", _csv_str(_COMMENT_EXCEL_FIELDS, comments_rows))
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def export_csv(
-    task_id: str | None = None,
-    keyword: str | None = None,
-    fmt: str = "ai",
-) -> Path:
-    """Export scraped data to CSV or Excel ZIP.
+def export_csv(task_id: str | None = None) -> Path:
+    """Export scraped notes + comments as a left-join wide-table CSV (PRD §4.6).
 
     Args:
-        task_id: filter by scrape task ID (None = all).
-        keyword: filter by keyword text (None = all).
-        fmt: "ai" (single CSV) or "excel" (ZIP with posts.csv+comments.csv).
+        task_id: filter by collection task ID (None = all tasks).
 
     Returns:
-        Path to the exported file.
+        Path to the exported ``.csv`` file.
+
+    Raises:
+        EmptyExportError: when 0 notes match the filter (PRD §4.6: 拦截 + Toast).
     """
     from config import DATA_DIR
 
     export_dir = DATA_DIR / "collection" / "exports"
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    posts_data = _query_posts(task_id, keyword)
+    items = _query_items(task_id)
+    if not items:
+        raise EmptyExportError("暂无可导出的采集数据")
+
+    rows = _build_rows(items)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-    if fmt == "excel":
-        out_path = export_dir / f"export_excel_{timestamp}.zip"
-        _write_excel_zip(posts_data, out_path)
-    else:
-        out_path = export_dir / f"export_ai_{timestamp}.csv"
-        rows = _ai_csv_rows(posts_data)
-        _write_ai_csv(rows, out_path)
-
-    return out_path
-
-
-def export_empty_db(fmt: str = "ai") -> Path:
-    """Export from an empty database without raising.
-
-    Returns a valid (empty-data) file.
-    """
-    from config import DATA_DIR
-
-    export_dir = DATA_DIR / "collection" / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-    if fmt == "excel":
-        out_path = export_dir / f"export_excel_{timestamp}.zip"
-        _write_excel_zip([], out_path)
-    else:
-        out_path = export_dir / f"export_ai_{timestamp}.csv"
-        _write_ai_csv([], out_path)
-
+    out_path = export_dir / f"export_{timestamp}.csv"
+    _write_csv(rows, out_path)
     return out_path
