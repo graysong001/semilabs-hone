@@ -105,7 +105,7 @@ async def api_delete_account(account_id: int) -> JSONResponse:
 
 
 @router.post("/api/accounts/{account_id}/login")
-async def api_login_account(account_id: int) -> JSONResponse:
+async def api_login_account(request: Request, account_id: int) -> JSONResponse:
     """POST /api/accounts/{id}/login — start login via IPC.
 
     Returns {request_id, status} — frontend tracks via WS.
@@ -123,6 +123,15 @@ async def api_login_account(account_id: int) -> JSONResponse:
 
     client = IPCClient()
     client.submit(req)
+
+    # L13: ensure a worker is alive to drive the login flow. No-op when
+    # auto-spawn is off (tests).
+    spawner = getattr(request.app.state, "worker_spawner", None)
+    if spawner is not None:
+        try:
+            spawner(account_id)
+        except Exception:
+            pass
 
     return JSONResponse({"request_id": request_id, "status": "submitted"})
 

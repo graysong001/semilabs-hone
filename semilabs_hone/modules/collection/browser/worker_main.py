@@ -74,31 +74,49 @@ async def _run_worker(port: int) -> None:
     browser, ctx = await attach(port)
     logger.info("Attached to Chrome via CDP")
 
-    # --- Hook: stealth noise injection (DM-06, not yet implemented) ---
+    # L14: publish the live BrowserContext to the handlers module so the
+    # handler-built GenericEngine (and _do_qr_login / solver wiring) can resolve
+    # a page instead of raising "No page available".
     try:
-        from semilabs_hone.modules.collection.anti_detect.stealth import inject_noise
-        await inject_noise(ctx)
-        logger.info("Stealth noise injected")
-    except (ImportError, AttributeError):
-        logger.debug("Stealth module not available, skipping noise injection")
+        from semilabs_hone.modules.collection.handlers import set_worker_ctx
+        set_worker_ctx(ctx)
+    except Exception:
+        logger.debug("Could not publish worker ctx to handlers (engine page will be None)")
 
-    # --- Hook: handler registry (DM-11, not yet implemented) ---
     try:
-        from semilabs_hone.modules.collection.handlers import build_registry
-        handler_registry = build_registry()
-    except (ImportError, AttributeError):
-        logger.debug("Handlers module not available, using empty registry")
-        handler_registry = {}
+        # --- Hook: stealth noise injection (DM-06, not yet implemented) ---
+        try:
+            from semilabs_hone.modules.collection.anti_detect.stealth import inject_noise
+            await inject_noise(ctx)
+            logger.info("Stealth noise injected")
+        except (ImportError, AttributeError):
+            logger.debug("Stealth module not available, skipping noise injection")
 
-    # --- Serve IPC loop ---
-    from semilabs_hone.core.ipc.server import serve_worker
+        # --- Hook: handler registry (DM-11, not yet implemented) ---
+        try:
+            from semilabs_hone.modules.collection.handlers import build_registry
+            handler_registry = build_registry()
+        except (ImportError, AttributeError):
+            logger.debug("Handlers module not available, using empty registry")
+            handler_registry = {}
 
-    def on_progress(request_id: str, message: str, data: dict) -> None:
-        logger.info(f"[progress] {request_id}: {message}")
+        # --- Serve IPC loop ---
+        from semilabs_hone.core.ipc.server import serve_worker
 
-    logger.info("Entering IPC serve loop")
-    await serve_worker(
-        module="collection",
-        handler_registry=handler_registry,
-        on_progress=on_progress,
-    )
+        def on_progress(request_id: str, message: str, data: dict) -> None:
+            logger.info(f"[progress] {request_id}: {message}")
+
+        logger.info("Entering IPC serve loop")
+        await serve_worker(
+            module="collection",
+            handler_registry=handler_registry,
+            on_progress=on_progress,
+        )
+    finally:
+        # Tear down the browser we launched so a worker exit does not leak a
+        # Chrome process holding the CDP port (next worker's find_free_port
+        # would otherwise skip past a zombie).
+        try:
+            await browser.close()
+        except Exception:
+            pass

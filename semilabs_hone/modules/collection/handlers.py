@@ -19,6 +19,40 @@ from semilabs_hone.core.utils.retry import DailyLimitError
 # Lazy imports for optional dependencies
 # fmt: off
 
+# Worker-injected browser context singleton (L14): the worker process attaches
+# Chrome via CDP and publishes the BrowserContext here so the handler-created
+# GenericEngine can resolve a page. None in tests / when no worker is attached.
+_WORKER_CTX: Any = None
+
+
+def set_worker_ctx(ctx: Any) -> None:
+    """Publish the worker's live BrowserContext so handlers/engines can reach it.
+
+    Called once from worker_main._run_worker after `attach(port)`. Stays None in
+    the web process and in tests, where _get_engine degrades to ctx=None (the
+    engine's _ensure_page then raises, which tests sidestep by mocking _get_engine
+    or not driving a real page).
+    """
+    global _WORKER_CTX
+    _WORKER_CTX = ctx
+
+
+async def _worker_page() -> Any | None:
+    """Resolve a Playwright page from the worker ctx, or None when no ctx.
+
+    Used by login-QR (L15) and solver wiring (L10) that operate on a page but do
+    not own a GenericEngine. None return lets callers degrade to stub/manual.
+    """
+    if _WORKER_CTX is None:
+        return None
+    try:
+        pages = _WORKER_CTX.pages if hasattr(_WORKER_CTX, "pages") else []
+        if pages:
+            return pages[0]
+        return await _WORKER_CTX.new_page()
+    except Exception:
+        return None
+
 
 def build_registry() -> dict[str, Callable]:
     """Build the handler registry for IPC server dispatch.
@@ -78,7 +112,7 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
     if method == "auto" or method == "qrcode":
         # Tier 2: QR code login
         progress_cb("login_qr_start", {"account_id": account_id})
-        qr_result = _do_qr_login(platform, account_id, progress_cb)
+        qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
             _update_account_status(account_id, "active", progress_cb)
             return {
@@ -104,7 +138,7 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
     # Fall through to QR if auto and recovery failed
     if method == "auto":
         progress_cb("login_qr_start", {"account_id": account_id})
-        qr_result = _do_qr_login(platform, account_id, progress_cb)
+        qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
             _update_account_status(account_id, "active", progress_cb)
             return {
@@ -136,15 +170,56 @@ def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Cal
     return False
 
 
-def _do_qr_login(platform: str, account_id: int | None, progress_cb: Callable) -> dict | None:
-    """Initiate QR code login. Returns QR info dict or None."""
+async def _do_qr_login(platform: str, account_id: int | None, progress_cb: Callable) -> dict | None:
+    """Initiate QR code login. Returns QR info dict or None.
+
+    L15: when the worker has published a live page, navigate to the platform's
+    login URL and screenshot the QR. Without a page (tests / no worker), degrade
+    to returning the qr_path stub so callers/tests that only check the path stay
+    green.
+    """
     from config import DATA_DIR
-    # In a real scenario, this navigates to the platform's login page
-    # and takes a screenshot of the QR code.
-    # For the handler, we return the QR path so the worker can screenshot.
     qr_path = str(DATA_DIR / "collection" / "debug" / f"qr_{account_id}.png")
-    progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
-    return {"qr_path": qr_path}
+    # Ensure the debug dir exists for the real screenshot path.
+    try:
+        from pathlib import Path
+        Path(qr_path).parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    page = await _worker_page()
+    if page is None:
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
+
+    # Resolve login URL from the platform spec (base_url + login.login_url).
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+        spec, _ = reg_get(platform)
+        login_url = (spec.base_url or "") + (spec.login.login_url or "")
+    except Exception:
+        login_url = ""
+
+    if not login_url:
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
+
+    try:
+        await page.goto(login_url)
+        # Give the QR a moment to render, then screenshot. A precise QR-element
+        # selector is platform/recording-specific; a viewport screenshot captures
+        # the QR reliably enough to unblock the human scan. (Crop refinement is Sz.)
+        try:
+            await page.wait_for_selector("img, canvas", timeout=5000)
+        except Exception:
+            pass
+        await page.screenshot(path=qr_path)
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
+    except Exception as exc:
+        logger.warning(f"QR navigation/screenshot failed: {exc}; returning stub path")
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
 
 
 def _import_cookies(account_id: int | None, platform: str, cookies: list, progress_cb: Callable) -> None:
@@ -640,15 +715,25 @@ async def _await_resume(request_id: str, poll_interval: float = 2.0) -> str | No
     stays suspended waiting for a human relay). ``poll_interval`` is injectable
     so tests never sleep the real 2s. Returns "resume" or "stop".
 
+    While suspended the worker is alive (awaiting a human), so it refreshes the
+    heartbeat each poll — otherwise the web-side watchdog (>30s stale) would
+    reap a legitimately-waiting ``need_human`` task to ``paused`` and break the
+    L01 resume→control path for any human relay that takes longer than 30s.
+
     Note: this is a persistent *suspend-until-resume* poll with explicit return
     exits (resume/stop), NOT a captcha-refresh death loop — written without a
     bare ``while True`` per the §7.4 linter.
     """
-    from semilabs_hone.core.ipc.paths import burn, control_path, read_json_if_exists
+    from semilabs_hone.core.ipc.paths import burn, control_path, read_json_if_exists, write_heartbeat
     if not request_id:
         return None
     waiting = True
     while waiting:
+        # Stay "alive" to the watchdog while we wait for a human relay.
+        try:
+            write_heartbeat("need_human_waiting")
+        except Exception:
+            pass
         p = control_path(request_id)
         data = None
         try:
@@ -678,8 +763,39 @@ async def _handle_need_human(
 
     On resume, the caller re-runs the interrupted action (the engine re-probes
     on its next goto/scroll/click). Returns the resume/stop directive.
+
+    L10 solver wiring (契约§5, default-off): when the hit is a captcha AND the
+    platform spec is ``anonymous`` + ``auto_then_manual`` (cargo-class no-login
+    sites), give the solver exactly one shot before sinking to human. Solved →
+    return ``"resume"`` (the caller retries the ref, no human needed). Anything
+    else (account/manual sites like XHS, or a failed/paused auto-solve) sinks to
+    need_human unchanged — so XHS behavior is identical to pre-S9a.
     """
     kind = getattr(hit, "kind", None)
+    platform = getattr(hit, "platform", None) or "xiaohongshu"
+
+    # L10: optional auto-solve for anonymous+auto_then_manual platforms only.
+    if kind == "captcha":
+        try:
+            from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+            spec, _ = reg_get(platform)
+            if (
+                spec.risk_tier == "anonymous"
+                and spec.captcha_policy == "auto_then_manual"
+                and _WORKER_CTX is not None
+            ):
+                page = await _worker_page()
+                if page is not None:
+                    from semilabs_hone.modules.collection.captcha.solver import detect_and_solve
+                    result = await detect_and_solve(
+                        page, _WORKER_CTX, spec.risk_tier, spec.captcha_policy
+                    )
+                    if getattr(result, "status", None) == "solved":
+                        progress_cb("captcha_solved", {"platform": platform})
+                        return "resume"  # retry the ref; no human needed
+        except Exception as exc:
+            logger.warning(f"solver wiring failed (falling back to manual): {exc}")
+
     progress_cb("need_human", {
         "task_id": task_id,
         "stage": "captcha_or_login_blocked",
@@ -886,7 +1002,9 @@ def _get_engine(platform: str, account_id: int | None, progress_cb: Callable) ->
         from semilabs_hone.modules.collection.scrapers.engine import GenericEngine
 
         spec, adapter_cls = get(platform)
-        engine = GenericEngine(spec=spec)
+        # L14: inject the worker's live ctx so _ensure_page can resolve a page
+        # (None in tests → engine.ctx=None, matches pre-S9a behavior).
+        engine = GenericEngine(spec=spec, ctx=_WORKER_CTX)
         return engine
     except KeyError:
         logger.warning(f"Platform '{platform}' not found in registry")

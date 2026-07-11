@@ -23,6 +23,10 @@ IPC_CONTROL = IPC_ROOT / "control" / "cancel"
 WEB_HOST = os.getenv("SEMILABS_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("SEMILABS_PORT", "8530"))
 
+# Worker 自动拉起 (L13): web 进程按需 Popen 采集浏览器 worker (CLAUDE.local.md)。
+# 默认关——走 create_app() 的测试零副作用; cli `serve` 显式置 1 启用。
+WORKER_AUTOSPAWN = os.getenv("SEMILABS_WORKER_AUTOSPAWN", "0") == "1"
+
 # 采集节律 (collection 模块)
 QUIET_HOURS = (2, 8)  # 02:00-08:00 夜间静默 (PRD §2.2 场景; §4.5.1 写 22-07 与之矛盾, 以场景为准)
 DAILY_LIMIT_PER_ACCOUNT = 200

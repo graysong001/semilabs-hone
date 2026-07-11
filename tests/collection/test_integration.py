@@ -635,8 +635,12 @@ class TestHandlerLogin:
         original_qr = h_mod._do_qr_login
         original_update = h_mod._update_account_status
 
+        # _do_qr_login is async post-S9a (L15 real QR); stub returns a dict.
+        async def _qr_stub(platform, account_id, progress_cb):
+            return {"qr_path": "/test/qr.png"}
+
         h_mod._try_cookie_recovery = lambda *a: False
-        h_mod._do_qr_login = lambda *a: {"qr_path": "/test/qr.png"}
+        h_mod._do_qr_login = _qr_stub
         h_mod._update_account_status = lambda *a: None
 
         try:

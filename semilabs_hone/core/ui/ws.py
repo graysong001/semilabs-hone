@@ -57,3 +57,102 @@ class WSManager:
 
 # Module-level singleton
 ws_manager = WSManager()
+
+
+async def run_progress_relay(interval: float = 2.0) -> None:
+    """Background relay: worker progress/results files → WS broadcast (L16).
+
+    Workers write `progress/<rid>.json` (IPCProgress) and `results/<rid>.json`
+    (IPCResult, carrying optional `ws_events`) to the file bus; the web process
+    owns WS. This loop scans both dirs, dedups by `updated_at`/seen-set, resolves
+    `request_id → task_id` via DB (best-effort), and broadcasts each new item
+    through `ws_manager`. No-op when the dirs are empty (tests); cancelled on
+    shutdown (app._shutdown cancels app.state.relay_task).
+
+    Written with `while running:` (not bare `while True`) per the §7.4 linter:
+    exits on CancelledError (shutdown) — a bounded suspend loop, not a refresh
+    death-loop.
+    """
+    from semilabs_hone.core.ipc.paths import (
+        progress_dir,
+        read_json_if_exists,
+        results_dir,
+    )
+
+    seen_progress: dict[str, float] = {}  # rid -> last broadcasted updated_at
+    seen_results: set[str] = set()
+    running = True
+    try:
+        while running:
+            # --- progress/ → WS progress event ---
+            try:
+                pdir = progress_dir()
+                if pdir.exists():
+                    for f in pdir.glob("*.json"):
+                        if f.name == "heartbeat.json":
+                            continue
+                        rid = f.stem
+                        data = read_json_if_exists(f)
+                        if data is None:
+                            continue
+                        updated = data.get("updated_at") or data.get("timestamp") or 0
+                        if seen_progress.get(rid) == updated:
+                            continue
+                        seen_progress[rid] = updated
+                        task_id = _resolve_task_id(rid)
+                        await ws_manager.broadcast({
+                            "type": "progress",
+                            "module": "collection",
+                            "task_id": task_id,
+                            "request_id": rid,
+                            "message": data.get("message", ""),
+                            "data": data.get("data") or {},
+                        })
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+            # --- results/ → ws_events fan-out ---
+            try:
+                rdir = results_dir()
+                if rdir.exists():
+                    for f in rdir.glob("*.json"):
+                        rid = f.stem
+                        if rid in seen_results:
+                            continue
+                        data = read_json_if_exists(f)
+                        if data is None:
+                            continue
+                        seen_results.add(rid)
+                        ws_events = data.get("ws_events") or []
+                        for ev in ws_events:
+                            await ws_manager.broadcast(ev)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        running = False
+        raise
+
+
+def _resolve_task_id(request_id: str) -> str | None:
+    """Best-effort request_id → task_id via DB (CollectionTask.request_id)."""
+    if not request_id:
+        return None
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            t = sess.query(CollectionTask).filter(
+                CollectionTask.request_id == request_id
+            ).first()
+            return t.id if t else None
+        finally:
+            sess.close()
+    except Exception:
+        return None

@@ -297,6 +297,34 @@ async def api_task_actions(task_id: str) -> HTMLResponse:
     finally:
         sess.close()
 
+
+@router.get("/api/tasks/{task_id}/progress")
+async def api_task_progress(task_id: str) -> JSONResponse:
+    """GET /api/tasks/{id}/progress — latest progress snapshot (PRD §5.4).
+
+    Resolves the task's `request_id` → `progress/<rid>.json` and returns the
+    IPCProgress payload (message/data). Polled by task_detail.html as a WS
+    fallback; 404 when the task or progress file is absent (frontend treats
+    both as "waiting").
+    """
+    from semilabs_hone.core.ipc import paths as ipc_paths
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        rid = task.request_id if task is not None else None
+    finally:
+        sess.close()
+
+    if not rid:
+        return JSONResponse({"ok": False, "error": "no request_id"}, status_code=404)
+    prog = ipc_paths.read_json_if_exists(ipc_paths.progress_path(rid))
+    if prog is None:
+        return JSONResponse({"ok": False, "error": "no progress yet"}, status_code=404)
+    return JSONResponse({"ok": True, **prog})
+
 @router.post("/api/tasks")
 async def api_create_task(
     request: Request,
@@ -429,12 +457,31 @@ async def api_create_task(
     client = IPCClient()
     client.submit(req)
 
+    # L13: ensure a worker is alive to consume the request we just wrote. No-op
+    # when auto-spawn is off (tests) — app.state has no spawner then.
+    _ensure_worker(request, account_id)
+
     return JSONResponse({
         "ok": True,
         "request_id": request_id,
         "task_id": task_id,
         "status": "queued" if already_running else "submitted",
     })
+
+
+def _ensure_worker(request: Request, account_id: int | None) -> None:
+    """Best-effort spawn of the collection worker for this account (L13).
+
+    Attached to app.state only when config.WORKER_AUTOSPAWN is on; absent in
+    tests (bare create_app / WORKER_AUTOSPAWN=0) so this is a silent no-op there.
+    """
+    spawner = getattr(request.app.state, "worker_spawner", None)
+    if spawner is None or account_id is None:
+        return
+    try:
+        spawner(account_id)
+    except Exception:
+        pass
 
 
 @router.post("/api/tasks/{task_id}/cancel")
@@ -465,10 +512,29 @@ async def api_cancel_task(task_id: str) -> JSONResponse:
 
 
 @router.post("/api/tasks/{task_id}/resume")
-async def api_resume_task(task_id: str) -> JSONResponse:
-    """POST /api/tasks/{id}/resume — resume failed task from checkpoint."""
+async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
+    """POST /api/tasks/{id}/resume — resume a suspended/failed task.
+
+    Two paths (L01):
+    - ``need_human`` + live ``request_id``: the worker is still alive, suspended
+      in ``_await_resume`` polling ``control/``. Write ``control/ctrl_<rid>.json
+      {action:resume}`` (PRD §4.4.3 step4) — the worker reads-after-burns it and
+      re-runs the interrupted action. No new IPC request (the page state is live).
+    - ``paused`` / ``error`` / ``failed``: the worker likely exited (or was reaped
+      by the heartbeat watchdog). Re-submit a fresh ``scrape_task`` request that
+      the (re-spawned) worker picks up from the persisted ``last_note_index``.
+
+    All task attributes are captured into locals BEFORE ``sess.close()`` to avoid
+    the DetachedInstanceError (L12): commit triggers expire_on_commit, so any ORM
+    attribute access after close raises.
+    """
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.task import CollectionTask
+
+    # Captured-locals holder (populated only inside the session scope below).
+    rid: str | None = None
+    need_human_resume = False
+    new_req_fields: dict = {}
 
     sess = get_session()
     try:
@@ -488,39 +554,70 @@ async def api_resume_task(task_id: str) -> JSONResponse:
                 status_code=409,
             )
 
+        need_human_resume = (
+            task.status == "need_human" and bool(task.request_id)
+        )
+
+        # Flip to running + clear the error markers (both paths).
         task.status = "running"
         task.error_message = None
         task.error_category = None
         sess.commit()
+
+        # Capture everything we need BEFORE close (L12). After commit, attributes
+        # are expired; close() detaches the instance → any attr access raises.
+        if need_human_resume:
+            rid = task.request_id
+        else:
+            new_req_fields = {
+                "account_id": task.account_id,
+                "platform": task.platform,
+                "max_posts_per_keyword": task.max_posts_per_keyword,
+                "download_images": task.download_images,
+                "collect_comments": task.collect_comments,
+            }
     except Exception as exc:
         sess.rollback()
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     finally:
         sess.close()
 
-    # Submit IPC resume request
+    # --- Path A: need_human → control file (PRD §4.4.3 step4) ---
+    if need_human_resume and rid:
+        from semilabs_hone.core.ipc.paths import atomic_write_json, control_path
+        atomic_write_json(control_path(rid), {"action": "resume"})
+        return JSONResponse({
+            "ok": True,
+            "request_id": rid,
+            "task_id": task_id,
+            "status": "resumed",
+        })
+
+    # --- Path B: re-submit a fresh scrape_task request (worker exited/reaped) ---
     IPCClient, IPCRequest = _ipc_client()
     request_id = uuid.uuid4().hex[:12]
+    account_id = new_req_fields.get("account_id")
 
     req = IPCRequest(
         request_id=request_id,
         module="collection",
         op="scrape_task",
-        account_id=task.account_id,
+        account_id=account_id,
         payload={
             "task_id": task_id,
-            "platform": task.platform,
-            "account_id": task.account_id,
+            "platform": new_req_fields.get("platform", "xiaohongshu"),
+            "account_id": account_id,
             "request_id": request_id,
-            "max_posts_per_keyword": task.max_posts_per_keyword,
-            "download_images": task.download_images,
-            "collect_comments": task.collect_comments,
+            "max_posts_per_keyword": new_req_fields.get("max_posts_per_keyword", 20),
+            "download_images": new_req_fields.get("download_images", True),
+            "collect_comments": new_req_fields.get("collect_comments", True),
             "resume": True,
         },
     )
 
     client = IPCClient()
     client.submit(req)
+    _ensure_worker(request, account_id)
 
     return JSONResponse({
         "ok": True,

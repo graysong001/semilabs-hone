@@ -105,6 +105,14 @@ def create_app() -> FastAPI:
         _register_routes(app, modules)
         logger.info(f"Discovered {len(modules)} modules: {[m['name'] for m in modules]}")
 
+        # L13: on-demand worker spawner. Attached only when config.WORKER_AUTOSPAWN
+        # is on (the `serve` CLI command flips it); tests build create_app() with
+        # it off, so route handlers skip spawning (no real Chrome in CI).
+        if getattr(__import__("config"), "WORKER_AUTOSPAWN", False):
+            from semilabs_hone.core.ipc.worker_spawner import make_default_spawner
+            app.state.worker_spawner = make_default_spawner()
+            logger.info("Worker auto-spawn enabled (config.WORKER_AUTOSPAWN=1)")
+
         # Launch the heartbeat watchdog (PRD §3.3): reaps zombie `running`
         # tasks whose worker heartbeat has gone stale (>30s) → paused + WS.
         from semilabs_hone.core.ipc.watchdog import run_heartbeat_watchdog
@@ -112,15 +120,21 @@ def create_app() -> FastAPI:
             run_heartbeat_watchdog()
         )
 
+        # L16: relay worker progress/results files → WS broadcast. No-op when the
+        # progress dir is empty (tests); cancelled on shutdown alongside watchdog.
+        from semilabs_hone.core.ui.ws import run_progress_relay
+        app.state.relay_task = asyncio.create_task(run_progress_relay())
+
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        task = getattr(app.state, "watchdog_task", None)
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        for attr in ("watchdog_task", "relay_task"):
+            task = getattr(app.state, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     # Mount static files
     static_dir = Path(__file__).resolve().parent / "static"
