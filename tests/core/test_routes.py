@@ -531,3 +531,106 @@ def test_heartbeat_absent_red(client: TestClient, tmp_data_dir):
     assert "red" in resp.text
     assert "离线" in resp.text
 
+
+# ---------------------------------------------------------------------------
+# S6b — P3.5 task console list page (T37-T39)
+# ---------------------------------------------------------------------------
+
+# --- T37 list page + empty state -------------------------------------------
+
+def test_tasks_list_page_empty_state(client: TestClient):
+    """T37: GET /tasks with no tasks → 空状态卡片 + 新建任务按钮."""
+    resp = client.get("/tasks")
+    assert resp.status_code == 200
+    assert "暂无采集任务" in resp.text
+    assert "新建任务" in resp.text
+
+
+def test_tasks_list_page_renders_rows(client: TestClient):
+    """T37: GET /tasks lists tasks with status-/actions- cells + tasks-tbody."""
+    tid_a, _ = _make_task(client, target_value="alpha", status="running")
+    tid_b, _ = _make_task(client, target_value="beta", status="pending")
+    resp = client.get("/tasks")
+    assert resp.status_code == 200
+    assert 'id="tasks-tbody"' in resp.text
+    assert "alpha" in resp.text and "beta" in resp.text
+    assert f'id="status-{tid_a}"' in resp.text
+    assert f'id="actions-{tid_b}"' in resp.text
+    assert f'id="row-{tid_a}"' in resp.text
+
+
+def test_list_page_includes_create_dialog(client: TestClient):
+    """T39: the list page embeds the create-task dialog (afterbegin insert target)."""
+    resp = client.get("/tasks")
+    assert 'id="dlg-new"' in resp.text
+    assert 'name="task_type"' in resp.text
+
+
+# --- T38 row / actions fragments -------------------------------------------
+
+def test_task_row_fragment(client: TestClient):
+    """T38: GET /api/tasks/<id>/row returns a <tr> with row-/status-/actions- ids."""
+    task_id, _ = _make_task(client, target_value="rowitem", status="running")
+    resp = client.get(f"/api/tasks/{task_id}/row")
+    assert resp.status_code == 200
+    assert resp.text.lstrip().startswith("<tr")
+    assert f'id="row-{task_id}"' in resp.text
+    assert f'id="status-{task_id}"' in resp.text
+    assert f'id="actions-{task_id}"' in resp.text
+
+
+def test_task_actions_fragment_running(client: TestClient):
+    """T38: running task → actions fragment has 取消 + optimistic lock."""
+    task_id, _ = _make_task(client, status="running")
+    resp = client.get(f"/api/tasks/{task_id}/actions")
+    assert "取消" in resp.text
+    assert "hx-disabled-elt" in resp.text
+
+
+def test_task_actions_fragment_need_human(client: TestClient):
+    """T38: need_human → 唤起浏览器 + 已处理，继续."""
+    task_id, _ = _make_task(client, status="need_human")
+    resp = client.get(f"/api/tasks/{task_id}/actions")
+    assert "唤起浏览器" in resp.text
+    assert "已处理，继续" in resp.text
+
+
+def test_task_actions_fragment_completed(client: TestClient):
+    """T38: completed → 导出 CSV."""
+    task_id, _ = _make_task(client, status="completed")
+    resp = client.get(f"/api/tasks/{task_id}/actions")
+    assert "导出 CSV" in resp.text
+
+
+def test_task_actions_fragment_pending_placeholder(client: TestClient):
+    """T38: pending (no action) → 置灰占位, no action buttons."""
+    task_id, _ = _make_task(client, status="pending")
+    resp = client.get(f"/api/tasks/{task_id}/actions")
+    assert "—" in resp.text
+    assert "取消" not in resp.text
+    assert "继续" not in resp.text
+
+
+# --- T39 create→afterbegin wiring (regression on the dialog partial) -------
+
+def test_new_task_page_still_renders_dialog_after_extract(client: TestClient):
+    """T39 refactor: /tasks/new still renders the dialog + PRD form fields."""
+    resp = client.get("/tasks/new")
+    assert resp.status_code == 200
+    assert 'id="dlg-new"' in resp.text
+    assert 'name="task_type"' in resp.text
+    assert 'name="target_value"' in resp.text
+    assert 'name="expected_count"' in resp.text
+
+
+def test_row_fragment_after_create_matches_list(client: TestClient):
+    """T39: after creating a task, the /row fragment is insertable (afterbegin target)."""
+    resp = client.post("/api/tasks", data=_create_task_form("freshrow"))
+    assert resp.status_code == 200
+    task_id = resp.json()["task_id"]
+    row = client.get(f"/api/tasks/{task_id}/row")
+    assert row.status_code == 200
+    assert row.text.lstrip().startswith("<tr")
+    # The inserted row must carry the poll hooks so it self-refreshes in-list.
+    assert f'/api/tasks/{task_id}/actions' in row.text
+
