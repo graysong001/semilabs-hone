@@ -1,20 +1,31 @@
-"""Captcha detection + dispatcher.
+"""Captcha detection + policy-driven dispatcher (PRD §4.4 / 契约§5 / T26).
 
-Detect captcha type on page -> dispatch to slide/ocr/manual solver.
-Core principle: auto-solve fails once then pauses.
-Design: docs/skim_design.md §10
+Detect captcha type on page -> dispatch per platform risk policy.
+
+契约§5 验证码可选能力:
+- 默认 manual (account 站): 命中即 paused (立即转人工 need_human), 不动 slide/ocr。
+- 仅 risk_tier=anonymous + captcha_policy=auto_then_manual (cargo 类无登录站)
+  才走 slide/ocr 自动解; 失败 1 次转人工、不死循环 (PRD §7.4)。
+- click/sms/unknown 永远人工, 与策略无关。
+
+Design: docs/skim_design.md §10 (风险分层).
 """
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Any
 
+import config
 from loguru import logger
 
 from semilabs_hone.core.utils.retry import CaptchaError
+from semilabs_hone.modules.collection.captcha import manual_handler, ocr_solver, slide_solver
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
+
+
+# captcha 类型中只能走人工的 (与策略无关)。
+_MANUAL_ONLY_TYPES = {"click", "sms"}
 
 
 class SolveResult:
@@ -34,66 +45,90 @@ class SolveResult:
         return f"SolveResult(status={self.status!r}, type={self.captcha_type!r})"
 
 
-async def detect_and_solve(page: Any, ctx: Any = None) -> SolveResult:
-    """Detect captcha on the current page and attempt to solve.
-
-    Detection heuristics:
-    - Slide captcha: presence of slider track element or "slide" keywords.
-    - OCR/text captcha: presence of captcha image with text input field.
-    - Click/SMS: presence of grid click or SMS code input.
+async def detect_and_solve(
+    page: Any,
+    ctx: Any = None,
+    risk_tier: str | None = None,
+    captcha_policy: str | None = None,
+) -> SolveResult:
+    """Detect captcha on the current page and attempt to solve per platform policy.
 
     Args:
         page: Playwright Page object.
         ctx: Optional IPC context for manual fallback.
+        risk_tier: ``account`` | ``anonymous`` (default account / config default).
+        captcha_policy: ``manual`` | ``auto_then_manual`` (default manual /
+            ``config.CAPTCHA_DEFAULT_POLICY``).
 
     Returns:
         SolveResult with status: solved | paused | failed.
+        ``paused`` = 立即转人工 need_human (调用方据此 sink + 等待 resume)。
     """
-    from semilabs_hone.modules.collection.captcha.manual_handler import (
-        request_manual_solve,
-    )
-    from semilabs_hone.modules.collection.captcha.ocr_solver import solve_ocr
-    from semilabs_hone.modules.collection.captcha.slide_solver import solve_slide
-
     captcha_type = await _detect_captcha_type(page)
     if captcha_type is None:
         logger.debug("No captcha detected")
         return SolveResult(status="solved")
 
-    logger.info(f"Captcha detected: {captcha_type}")
+    tier = risk_tier or "account"
+    policy = captcha_policy or config.CAPTCHA_DEFAULT_POLICY
+    # 契约§5: 仅 anonymous + auto_then_manual 才允许自动解。
+    can_auto = (tier == "anonymous" and policy == "auto_then_manual")
 
+    logger.info(
+        f"Captcha detected: {captcha_type} (tier={tier}, policy={policy}, auto={can_auto})"
+    )
+
+    # 默认 manual / account 站 / click-sms / unknown → 立即转人工, 不自动解。
+    if not can_auto or captcha_type in _MANUAL_ONLY_TYPES:
+        await _request_manual(ctx, captcha_type)
+        return SolveResult(status="paused", captcha_type=captcha_type)
+
+    # anonymous + auto_then_manual: 恰好一次尝试, 失败转人工, 绝不重试 (PRD §7.4)。
     try:
-        if captcha_type == "slide":
-            success = await solve_slide(page)
-            if success:
-                logger.info("Slide captcha solved successfully")
-                return SolveResult(status="solved", captcha_type="slide")
-            logger.warning("Slide captcha solve failed")
-            return SolveResult(status="failed", captcha_type="slide")
-
-        elif captcha_type == "ocr":
-            image_bytes = await _extract_captcha_image(page)
-            if image_bytes:
-                text = await solve_ocr(image_bytes)
-                if text:
-                    await _fill_captcha_text(page, text)
-                    logger.info(f"OCR captcha solved: {text}")
-                    return SolveResult(status="solved", captcha_type="ocr")
-            logger.warning("OCR captcha solve failed")
-            return SolveResult(status="failed", captcha_type="ocr")
-
-        else:
-            # click, sms, or unknown -> manual
-            logger.info(f"Manual solve required for: {captcha_type}")
-            account_id = getattr(ctx, "account_id", None) if ctx else None
-            await request_manual_solve(ctx, captcha_type, account_id or 0)
-            return SolveResult(status="paused", captcha_type=captcha_type)
-
+        success = await _attempt_auto(page, captcha_type)
     except CaptchaError:
         raise
     except Exception as e:
-        logger.error(f"Captcha solve error: {e}")
-        return SolveResult(status="failed", captcha_type=captcha_type, error=str(e))
+        logger.error(f"Captcha auto-solve error: {e}")
+        success = False
+
+    if success:
+        logger.info(f"Auto-solved captcha: {captcha_type}")
+        return SolveResult(status="solved", captcha_type=captcha_type)
+
+    logger.warning(f"Auto-solve failed once for {captcha_type} → manual relay")
+    await _request_manual(ctx, captcha_type)
+    return SolveResult(
+        status="paused", captcha_type=captcha_type, error="auto_solve_failed"
+    )
+
+
+async def _attempt_auto(page: Any, captcha_type: str) -> bool:
+    """One-shot auto-solve attempt. Returns True on success, False otherwise."""
+    if captcha_type == "slide":
+        return await slide_solver.solve_slide(page)
+
+    if captcha_type == "ocr":
+        image_bytes = await _extract_captcha_image(page)
+        if not image_bytes:
+            return False
+        text = await ocr_solver.solve_ocr(image_bytes)
+        if not text:
+            return False
+        await _fill_captcha_text(page, text)
+        return True
+
+    # 未知类型不自动解 (走人工分支本已拦截, 此处兜底)。
+    return False
+
+
+async def _request_manual(ctx: Any, captcha_type: str) -> None:
+    """Pause and request manual solve. No-ctx (unit tests) → just log, no IPC IO."""
+    if ctx is None:
+        logger.warning(f"Manual captcha required (no ctx): {captcha_type}")
+        return
+    account_id = getattr(ctx, "account_id", None) if ctx else None
+    await manual_handler.request_manual_solve(ctx, captcha_type, account_id or 0)
 
 
 # ── Internal helpers ──

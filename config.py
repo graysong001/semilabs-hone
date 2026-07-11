@@ -46,3 +46,9 @@ LLM_MODEL = os.getenv("SEMILABS_LLM_MODEL", "claude-haiku-4-5-20251001")
 # Chrome
 CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 CDP_PORT_RANGE = (9333, 9340)
+
+# 验证码可选能力 (契约§5 / PRD §4.4): 默认关——命中即转人工 need_human。
+# 仅 platform.yaml 声明 risk_tier=anonymous + captcha_policy=auto_then_manual 的
+# 无登录(cargo 类)站点才走 slide/ocr 自动解, 失败 1 次转人工、不死循环。
+CAPTCHA_DEFAULT_POLICY = "manual"              # manual | auto_then_manual
+CAPTCHA_AUTO_SOLVE_PLATFORMS: list[str] = []   # 显式允许自动解的平台名白名单

@@ -83,3 +83,7 @@ class PlatformSpec(BaseModel):
     login: LoginSpec = Field(default_factory=LoginSpec)
     flows: dict[str, Flow] = Field(default_factory=dict)
     sort_values: dict[str, str] = Field(default_factory=dict)
+    # 验证码可选能力 (契约§5): account 站默认 manual 命中即转人工;
+    # 仅 anonymous + auto_then_manual (cargo 类无登录站点) 才走 slide/ocr 自动解。
+    risk_tier: Literal["account", "anonymous"] = "account"
+    captcha_policy: Literal["manual", "auto_then_manual"] = "manual"

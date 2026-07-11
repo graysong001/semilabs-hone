@@ -2,6 +2,10 @@ platform: xiaohongshu
 display_name: 小红书
 base_url: https://www.xiaohongshu.com
 
+# 验证码可选能力 (契约§5): XHS 是 account 站, 默认 manual 命中即转人工。
+risk_tier: account
+captcha_policy: manual
+
 login:
   type: qrcode
   login_url: /login
