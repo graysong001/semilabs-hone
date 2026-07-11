@@ -47,6 +47,12 @@
 - resume→control 文件 wiring 仍留 S9/T70（需 worker 当前 request_id 追踪，属端到验 wiring）；S6 只做 UI 乐观锁 + need_human 按钮视觉。`task.request_id` 已存，S9 接 `control/ctrl_<rid>.json {action:resume}` 即可。
 - PRD §5 前言禁 WS，但契约 §7/§8 已裁决保留 WS——S6 循此：WS 留作流式进度（app.js），HTMX 负责徽章/dialog/master-detail/心跳/Toast（新端点 `GET /api/tasks/{id}/status`、`GET /api/items/{id}/comments`、`GET /api/heartbeat`）。
 
+**[契约变更 2026-07-11 Sz] 加站扩展性铁律（知乎暂 hold，但扩展点须保通用）**
+- 知乎相关工作（T27 录制、L08 data[] 兜底、L09 maps、知乎 comments scroll_collect）**暂 hold**，转 Sz 知乎专项会话统一排期，不挤占 S7-S9 主线 loop。
+- **扩展点须保持通用，禁止 XHS / 知乎 special-case 分支**。加站路径只走通用 extension 点：`platform.yaml`（flow + maps + risk_tier/captcha_policy）+ `registry`（yaml 加载发现）+ `field_extract`（通用清洗，含 list-root 兜底须泛化）+ `recorder + LLM mapper`（录制三 flow → 生成 yaml）。任何「知乎特殊」需求必须**先泛化到通用层**再落地（例：L08 的 `{"data":[...]}` 不命中 `_find_list_root`，修法是让 `_find_list_root` 支持任意 list 值的 data key，而非加 `if platform == 'zhihu'` 分支）。
+- engine / handlers / risk_probes / routes 不得出现平台名硬编码；平台差异 100% 收进 yaml。新增 `if platform ==` 类分支视为违例，约束 linter 后续可加守。
+- Sz 启动前置：XHS（首站）端到端走通（S9/T70 验证 XHS 全链路绿），再开知乎录制，避免在未稳态上加第二站引入回退风险。
+
 **3. IPC 契约（PRD §3.4/§7.2）**
 - 目录 `data/ipc/{requests,results,progress,control}`（control 扁平，无 cancel 子层；`control/cancel/` 仅旧哨兵兼容）
 - 命名：`requests/<id>.json` · `results/<id>.json` · `progress/<id>.json` · `progress/heartbeat.json` · `control/ctrl_<id>.json`
@@ -100,7 +106,7 @@
 
 ## 状态图例
 
-⬜ 未开始　🔄 进行中/代码完成待人工验　✅ 完成　⛔ 阻塞
+⬜ 未开始　🔄 进行中/代码完成待人工验　✅ 完成　⛔ 阻塞　⏸ hold（暂缓，等专项排期）
 
 ## 门禁定义（Definition of Done）
 
@@ -124,14 +130,15 @@
 | S2 | ✅ | ✅ | S1 | P0 IPC/安全 wiring | T05 server 读后即焚+坏文件+心跳+control 分发 · T06 心跳看门狗 30s→paused · T07 单任务并发锁 · T08 cdp 端口冲突 · T09 约束 linter 扩展 | test_ipc/test_routes/test_cdp/check_constraints |
 | S3 | ✅ | ✅ | S2 | P1 数据模型对齐 | T10 WAL · T11-T13 collection_* 三表原地改名(UUID+UNIQUE+metrics_json+publish_time VARCHAR) · T14 repository upsert · T15 schemas 校验 | test_models/test_routes |
 | S4 | ✅ | ✅ | S3 | P2 引擎+探针+节律 | T20 单条跳过+计数 · T21 go_back+滚动边界20/5+删 scrollBy · T22 parse_likes/title_fallback · T23 评论 Top20 · T24 风控探针 · T25 节律暖场接入主循环 | test_engine/test_field_extract/test_rhythm + 新 test_risk_probes |
-| S5 | 🔄 | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 ✅ solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 🔄 🟡 知乎 platform.yaml 骨架(待人录制) | 新 test_solver + 人验 zhihu |
+| S5 | 🔄 | 🟡 | S4 | P2 可选验证码 + 知乎录制 | T26 ✅ solver 风险分层(risk_tier/captcha_policy 默认 manual) · T27 ⏸ 知乎 platform.yaml 骨架(hold，转 Sz 专项) | 新 test_solver + 人验 zhihu |
 | S6 | ✅ | ✅ | S3,S2 | P3 UI 行为（保留 WS） | T30 htmx+Pico · T31 状态徽章 · T32 创建任务 dialog+校验+耗时 modal · T33 乐观锁 · T34 master-detail 评论 · T35 心跳指示灯 · T36 错误 Toast | test_routes |
 | S6b | ✅ | ✅ | S6 | P3.5 任务控制台列表页 | T37 GET /tasks 列表页+空状态 · T38 行/操作片段端点(乐观刷新) · T39 创建→afterbegin 插行接入 | test_routes |
 | S7 | ⬜ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
 | S8 | ⬜ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
 | S9 | ⬜ | 🟡/❌ | S2-S8 | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
+| Sz | ⏸ | 🟡/❌ | S4,S9 | 知乎专项定制（暂 hold） | 真实录制知乎 search/detail/comments 三 flow + LLM 生成 maps · 补 `_find_list_root` data[] 兜底 · comments scroll_collect · solver wiring 专项 | 人验 + 文档自洽 |
 
-**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9。  
+**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9。Sz 知乎专项暂 hold（不在主线 loop，等专项启动再排期）。
 **跨会话并发安全**：同一时刻只推进一个 S（共享同一批文件+DB+IPC 契约，并行会冲突）。
 
 ---
@@ -244,6 +251,7 @@
 ```
 S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 → S9(🟡/❌)
         \____ S3 → S6（UI 依赖表）; S6 → S6b（复用徽章端点）; S3 → S7（CSV 依赖表）; S2 → S6（心跳指示灯）
+        \____ S4,S9 → Sz（知乎专项，⏸ hold，不在主线 loop）
 ```
 
 > **不并行**：MVP 单浏览器 + 共享同一批文件/DB/IPC 契约，同一时刻只推进一个 S。  
@@ -262,8 +270,8 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 | L05 | S6b | 操作按钮「锁到状态改变」精确语义未达：当前是请求期 disabled（hx-disabled-elt）+ actions 单元格 5s 轮询刷新，≤5s 滞后才换按钮集合；PRD §5.2.3 要「按钮持续 disabled 直到后端状态真实改变再替换」。 | S9/T70 | ⬜ |
 | L06 | S4 | 评论 3 次滚动加载（`scroll_collect` max_scrolls=3）语义落在 comments flow，engine 已支持，但 XHS/知乎 comments flow yaml 未加 `scroll_collect` 步骤。 | S5（录制）/S9 | ⬜ |
 | L07 | S4 | `scroll_collect` 真增量 XHR：当前对静态 saved 快照重抽 dedup（测边界 20/5）；真实浏览器「滚动触发新 XHR→累积」需 flow 在每次 scroll 后再 `wait_xhr`。 | S5/S9（录制侧真实化） | ⬜ |
-| L08 | S5/T27 | 知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list），真实录制后需补 engine 兜底或 map 改 `[*]`。 | S9/T71 | ⬜ |
-| L09 | S5/T27 | 知乎 maps 当前为骨架，待 LLM mapper 录制替换。 | S5（录制）/S9 | ⬜ |
+| L08 | S5/T27 | 知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list），真实录制后需补 engine 兜底或 map 改 `[*]`。**知乎专项**——用通用 extension 点落地，不 special-case 分支。 | Sz（知乎专项, hold） | ⏸ |
+| L09 | S5/T27 | 知乎 maps 当前为骨架，待 LLM mapper 录制替换。**知乎专项**。 | Sz（知乎专项, hold） | ⏸ |
 | L10 | S5/T26 | captcha solver wiring：`detect_and_solve` 已实现但未被 handler 调用（契约§5「可选能力默认关」）。wiring（captcha 命中→先 detect_and_solve 再 need_human）未接。 | S9/T71 | ⬜ |
 
 > **收口规则**：某会话收掉一项 → 本表该行状态 ⬜→✅ + 在「当前进度快照」对应会话段记一句「收 L0X（commit `<hash>`）」。**禁止**只改快照不改本表——本表是唯一索引。
@@ -276,6 +284,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 
 ## 当前进度快照（2026-07-11）
 
+- ⏸ **知乎相关工作 hold**（用户裁决 2026-07-11）：T27 录制、L08 data[] 兜底、L09 maps、知乎 comments scroll_collect 全转 **Sz 知乎专项会话**，暂不挤占 S7-S9 主线。软件扩展性铁律见「⛓️ 共享上下文契约 §[契约变更 2026-07-11 Sz]」——加站只走通用 extension 点（platform.yaml/registry/field_extract/recorder+LLM mapper），禁止 XHS/知乎 special-case 分支。Sz 启动前置：S9/T70 验证 XHS 全链路绿。
 - ✅ **S1 完成**（T01-T04：stealth 零注入 / mouse.wheel+smart_wait / 夜间长 sleep / IPC 原语），commit `5de4d26`/`3dba7c3`，分支 `feat/skim-prd-align` 已 push。
 - ✅ **S2 完成**（T05 server 读后即焚+坏文件+心跳+control 分发 / T06 心跳看门狗 30s→paused+WS / T07 单任务并发锁(PRD 2.2 pending 排队) / T08 CDPAttachError+worker 优雅退出 / T09 linter 禁 while True/is_captcha/account+auto_then_manual）。新增 `core/ipc/watchdog.py`，全量回归 291 passed，门禁全绿。
   - **裁决记 WHY**：T07 PRD §8.2 场景2.2（B、C 创建为 pending 排队）与原 T07 措辞「拒绝排队」表面矛盾——以 PRD 验收场景为准：创建恒为 pending，仅当无 running 时晋升 running，其余 submit IPC 按 mtime 顺序排队；pending→running 的 pick-up 晋升交给 S4 engine/handler 层（避免与 engine 双重晋升冲突）。
@@ -297,8 +306,8 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 - 🔄 **S5 进行中**（P2 可选验证码 + 知乎录制）：
   - ✅ **T26 完成**（solver `detect_and_solve(page, ctx, risk_tier, captcha_policy)`：默认 account/manual 命中即 `paused`(=立即 need_human) 不动 slide/ocr；仅 anonymous+auto_then_manual 走 slide/ocr **恰好一次**，失败转 paused 不死循环；click/sms 永远人工。`config.CAPTCHA_DEFAULT_POLICY="manual"`+`CAPTCHA_AUTO_SOLVE_PLATFORMS=[]`；`spec.PlatformSpec` 加 `risk_tier`/`captcha_policy` 字段；XHS yaml 显式 `risk_tier:account`/`captcha_policy:manual`。新 `tests/collection/test_solver.py` 15 用例。全量回归 353 passed，linter 全绿）。
     - **裁决记 WHY（不 wire 进 handler）**：`detect_and_solve` 当前未被 handler 调用（本就是"可选能力沉淀默认关"，契约§5）；S5 仅做 solver+schema+config+yaml，**不**动 `_handle_need_human` 路径，零 S4 回归风险。wiring（captcha 命中→先 detect_and_solve 再 need_human）留 T71 端到验/S9。
-  - 🔄 **T27 🟡 代码完成待人录制**（`platforms/zhihu/{__init__.py,platform.yaml}`：search `/api/v4/search_v4`+ItemRef、detail `/api/v4/answers/{id}`+Post.body/interactions、comments `/api/v4/answers/{id}/root_comments`+Comments；`risk_tier:account`/`captcha_policy:manual`）。新 `tests/collection/test_registry_zhihu.py` 只验 yaml 解析+默认值，**不**验 JSON path 正确性。
-    - **遗留（T27 人验/S9）**：知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list 未支持），真实录制后需补 engine 兜底或 map 改 `[*]`；maps 当前为骨架待 LLM mapper 录制替换。评论 3 次滚动 `scroll_collect` 待录制侧补。
+  - ⏸ **T27 hold（转 Sz 知乎专项）**（`platforms/zhihu/{__init__.py,platform.yaml}`：search `/api/v4/search_v4`+ItemRef、detail `/api/v4/answers/{id}`+Post.body/interactions、comments `/api/v4/answers/{id}/root_comments`+Comments；`risk_tier:account`/`captcha_policy:manual`）。新 `tests/collection/test_registry_zhihu.py` 只验 yaml 解析+默认值，**不**验 JSON path 正确性。**知乎相关工作暂 hold，等 Sz 专项会话统一排期（用户裁决）**。
+    - **遗留（T27 → Sz 知乎专项）**：知乎 `{"data":[...]}` 形状不被 `field_extract._find_list_root` 命中（它认 `data.items`/`data` 直接为 list 未支持），真实录制后需补 engine 兜底或 map 改 `[*]`；maps 当前为骨架待 LLM mapper 录制替换。评论 3 次滚动 `scroll_collect` 待录制侧补。→ 见遗留表 L08/L09/L06（知乎部分）。
 - ⬜ **下一会话 = S7**（P4 CSV 宽表：T40 宽表重写 10 中文表头+utf-8-sig+转义 · T41 导出路由+空数据防御）。依赖 S3✅。门禁 test_csv_export+test_routes。
 
 - ✅ **S6b 完成**（P3.5 任务控制台列表页，复用 S6 徽章端点）。T37 新 `GET /tasks` + `tasks_list.html`（任务ID/平台/类型/目标值/进度 actual/expected/状态徽章/操作 七列表，行点击→详情，空状态卡片「暂无采集任务…」+【新建任务】）；`<td id="status-<id>">` 内嵌 S6 自轮询徽章 span，`<td id="actions-<id}">` 5s 轮询 `/api/tasks/{id}/actions` 局部刷新。T38 新 `GET /api/tasks/{id}/row`（整 `<tr>` 片段，单一来源 `_task_row.html` 局部，`env.get_template().render()` 同时供列表初始渲染与创建后 afterbegin 插入）+ `GET /api/tasks/{id}/actions`（操作按钮片，按 status：running→取消/need_human→唤起+已处理/failed·error·paused→继续/completed→导出，`hx-disabled-elt`+`lockBtn` 乐观锁）。T39 抽 `_task_new_dialog.html` 局部（从 task_new.html 提取 dialog+校验+二次确认+提交 JS），task_new.html 与 tasks_list.html 都 include；成功后若 `#tasks-tbody` 存在→`htmx.ajax` afterbegin 插 `/api/tasks/{id}/row` + 绿 Toast「任务已就绪」（PRD §5.3.2），否则维持「查看详情」链接。新增 `_actions_html`/`_row_context` helper。test_routes 43 用例（+10），全量回归 382 passed，门禁全绿。
