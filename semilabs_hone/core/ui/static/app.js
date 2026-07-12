@@ -233,4 +233,48 @@
   } else {
     connect();
   }
+
+  /* ========== Block 5: Risk Control Modal ========== */
+  window.openRiskModal = function(taskId, taskTarget) {
+    var modal = document.getElementById('risk-control-modal');
+    if (!modal) return;
+    document.getElementById('risk-task-id').textContent = taskId.substring(0, 8);
+    document.getElementById('risk-task-target').textContent = taskTarget || '—';
+
+    // Set up button handlers
+    document.getElementById('risk-activate-btn').onclick = function() {
+      fetch('/api/tasks/' + taskId + '/activate-browser', { method: 'POST' })
+        .then(function(resp) { return resp.json(); })
+        .then(function(data) {
+          if (data.ok) {
+            showToast({ severity: 'success', message: 'Chrome 已唤起', duration: 2000 });
+          } else {
+            showToast({ severity: 'error', message: data.error || '唤起失败', duration: 3000 });
+          }
+        })
+        .catch(function() {
+          showToast({ severity: 'error', message: '网络错误', duration: 3000 });
+        });
+    };
+
+    document.getElementById('risk-resume-btn').onclick = function() {
+      fetch('/api/tasks/' + taskId + '/resume', { method: 'POST' })
+        .then(function(resp) { return resp.json(); })
+        .then(function(data) {
+          if (data.ok) {
+            showToast({ severity: 'success', message: '任务已恢复', duration: 2000 });
+            modal.close();
+            // Refresh task row
+            htmx.ajax('GET', '/api/tasks/' + taskId + '/row', '#task-row-' + taskId);
+          } else {
+            showToast({ severity: 'error', message: data.error || '恢复失败', duration: 3000 });
+          }
+        })
+        .catch(function() {
+          showToast({ severity: 'error', message: '网络错误', duration: 3000 });
+        });
+    };
+
+    modal.showModal();
+  };
 })();

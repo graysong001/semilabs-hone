@@ -170,8 +170,12 @@ def _badge_html(task) -> str:
 def _actions_html(task) -> str:
     """Render the action-buttons fragment for a task (Tailwind 暗色, ui_design_spec_v2 §7.3).
 
-    块1: 仅渲染已存在接口的分支 (paused→恢复, completed→查看+导出, error→重试).
-    running 的暂停、need_human 的唤起/删除在后续块加.
+    状态分支：
+    - running → 暂停 (块3)
+    - need_human → 唤起浏览器 + 已处理继续 (块5)
+    - paused/error/failed → 恢复
+    - completed → 查看 + 导出 + 删除 (块4)
+    - error/failed → 删除 (块4)
     """
     tid = task.id
     parts: list[str] = []
@@ -184,7 +188,19 @@ def _actions_html(task) -> str:
             f'<rect x="4" y="3" width="3" height="10"/><rect x="11" y="3" width="3" height="10"/>'
             f'</svg></button>'
         )
-    # 块5 加: need_human → 唤起浏览器 + 已处理继续
+    # 块5: need_human → 唤起浏览器 + 已处理继续
+    if task.status == "need_human":
+        target = (task.target_value or '').replace("'", "\\'")[:30]
+        parts.append(
+            f'<button class="px-3 py-1 bg-red-500/15 text-red-400 border border-red-500/30 rounded text-xs font-medium hover:bg-red-500/25" '
+            f'onclick="openRiskModal(\'{tid}\', \'{target}\')">'
+            f'🖥️ 唤起浏览器</button>'
+        )
+        parts.append(
+            f'<button class="px-3 py-1 bg-green-500/15 text-green-400 border border-green-500/30 rounded text-xs font-medium hover:bg-green-500/25" '
+            f'onclick="openRiskModal(\'{tid}\', \'{target}\')">'
+            f'✅ 已处理</button>'
+        )
     if task.status in ("failed", "error", "paused"):
         # 块1: paused/error/failed → 恢复 (复用 /resume)
         parts.append(
@@ -710,6 +726,69 @@ async def api_delete_task(task_id: str) -> JSONResponse:
         return JSONResponse({"ok": True, "task_id": task_id})
     except Exception as exc:
         sess.rollback()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Block 5: Activate Browser (Risk Control)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/tasks/{task_id}/activate-browser")
+async def api_activate_browser(task_id: str) -> JSONResponse:
+    """POST /api/tasks/{id}/activate-browser — activate Chrome window for manual intervention.
+
+    Only allows for need_human tasks. Uses osascript to bring Chrome to front
+    on macOS. Non-macOS systems return an error.
+    """
+    import subprocess
+    import sys
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if not task:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+        if task.status != "need_human":
+            return JSONResponse(
+                {"ok": False, "error": "Task is not in need_human status"},
+                status_code=409
+            )
+
+        # Check if running on macOS
+        if sys.platform != "darwin":
+            return JSONResponse(
+                {"ok": False, "error": "activate-browser only supported on macOS"},
+                status_code=501
+            )
+
+        # Use osascript to bring Chrome to front
+        try:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Google Chrome" to activate'],
+                timeout=5,
+                check=True
+            )
+            return JSONResponse({
+                "ok": True,
+                "task_id": task_id,
+                "message": "Chrome activated"
+            })
+        except subprocess.TimeoutExpired:
+            return JSONResponse(
+                {"ok": False, "error": "Chrome activation timed out"},
+                status_code=504
+            )
+        except subprocess.CalledProcessError as e:
+            return JSONResponse(
+                {"ok": False, "error": f"Chrome activation failed: {e}"},
+                status_code=500
+            )
+    except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     finally:
         sess.close()
