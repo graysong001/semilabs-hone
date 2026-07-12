@@ -175,7 +175,15 @@ def _actions_html(task) -> str:
     """
     tid = task.id
     parts: list[str] = []
-    # 块3 加: running → 暂停
+    # 块3: running → 暂停
+    if task.status == "running":
+        parts.append(
+            f'<button class="text-yellow-400 hover:text-yellow-300" title="暂停" '
+            f'hx-post="/api/tasks/{tid}/pause" hx-swap="none">'
+            f'<svg width="16" height="16" fill="currentColor">'
+            f'<rect x="4" y="3" width="3" height="10"/><rect x="11" y="3" width="3" height="10"/>'
+            f'</svg></button>'
+        )
     # 块5 加: need_human → 唤起浏览器 + 已处理继续
     if task.status in ("failed", "error", "paused"):
         # 块1: paused/error/failed → 恢复 (复用 /resume)
@@ -599,3 +607,46 @@ async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
         "task_id": task_id,
         "status": "submitted",
     })
+
+
+# ---------------------------------------------------------------------------
+# Block 3: Pause Task
+# ---------------------------------------------------------------------------
+
+@router.post("/api/tasks/{task_id}/pause")
+async def api_pause_task(task_id: str) -> JSONResponse:
+    """POST /api/tasks/{id}/pause — pause a running task.
+
+    Writes IPC control file with {action: pause} to signal worker to stop.
+    Updates task status to 'paused' in DB.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if not task:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+        if task.status != "running":
+            return JSONResponse({"ok": False, "error": "Task is not running"}, status_code=409)
+
+        task.status = "paused"
+        sess.commit()
+
+        # Write IPC control file to signal worker
+        if task.request_id:
+            from semilabs_hone.core.ipc.paths import atomic_write_json, control_path
+            atomic_write_json(control_path(task.request_id), {"action": "pause"})
+
+        return JSONResponse({
+            "ok": True,
+            "task_id": task_id,
+            "status": "paused",
+        })
+    except Exception as exc:
+        sess.rollback()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()
