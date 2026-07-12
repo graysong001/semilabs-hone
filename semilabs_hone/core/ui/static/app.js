@@ -1,58 +1,55 @@
-/* semilabs-hone — WebSocket client + message dispatch.
+/* semilabs-hone — WebSocket client + 全局交互脚本 (ui_design_spec_v2 §11).
  *
- * Manages a single WS connection to /ws with auto-reconnect.
- * Dispatches messages by msg.type: progress / warn / qr_ready /
- * captcha_required / error / disk_warn / task_completed / login_success.
+ * 保留: WS 连接/重连退避 + 消息分发; CSV 导出; HTMX 错误 Toast。
+ * showToast 已统一为规范 §11 的 (msg, type) 内联样式签名, 同时兼容旧的 {severity,message,duration} 对象调用。
+ * 表单交互 JS (radio-card / count-btn / submitWithEstimate 等) 见后续块按需追加。
  */
 (function () {
   "use strict";
 
-  var RECONNECT_DELAY = 2000;
-  var MAX_RECONNECT_DELAY = 30000;
-  var ws = null;
-  var currentDelay = RECONNECT_DELAY;
+  /* ========== Toast (规范 §11, 内联样式, 暗色科技风) ========== */
+  var TOAST_BG = { warning: "#FEB019", warn: "#FEB019", error: "#FF4560", success: "#00E396", info: "#2A303D" };
 
-  var wsStatus = document.getElementById("ws-status");
-  var wsDot = wsStatus ? wsStatus.querySelector(".ws-dot") : null;
-
-  function setWsState(connected) {
-    if (!wsDot) return;
-    if (connected) {
-      wsDot.classList.add("connected");
-      currentDelay = RECONNECT_DELAY;
+  function showToast(msg, type) {
+    var message, severity, duration;
+    if (msg && typeof msg === "object") {
+      severity = msg.severity || "info";
+      message = msg.message || JSON.stringify(msg);
+      duration = msg.duration || 3000;
     } else {
-      wsDot.classList.remove("connected");
+      message = msg;
+      severity = type || "info";
+      duration = 3000;
     }
-  }
-
-  function showToast(msg) {
     var container = document.getElementById("toast-container");
     if (!container) {
       container = document.createElement("div");
       container.id = "toast-container";
-      container.className = "toast-container";
       document.body.appendChild(container);
     }
     var el = document.createElement("div");
-    el.className = "toast " + (msg.severity || "info");
-    el.textContent = msg.message || JSON.stringify(msg);
+    el.style.cssText =
+      "background:" + (TOAST_BG[severity] || TOAST_BG.info) + ";color:#fff;padding:10px 20px;border-radius:8px;" +
+      "font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.3);animation:slideIn 0.3s;" +
+      "border:1px solid rgba(255,255,255,0.1);max-width:320px;";
+    el.textContent = message;
     container.appendChild(el);
     setTimeout(function () {
-      if (el.parentNode) el.parentNode.removeChild(el);
-    }, msg.duration || 5000);
+      el.style.transition = "opacity 0.3s";
+      el.style.opacity = "0";
+      setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 300);
+    }, duration);
   }
-
-  // Expose for inline scripts (e.g. task_new.html success toast).
+  // 兼容两种调用: showToast("文本","error") 与 showToast({severity,message,duration})
   window.showToast = showToast;
 
-  // CSV export via fetch (PRD §4.6): 200 → download blob; 400 (0 条) → Toast.
+  /* ========== CSV 导出 (PRD §4.6) ========== */
   window.exportCsv = function (taskId, btn) {
     var url = "/api/export" + (taskId ? "?task_id=" + encodeURIComponent(taskId) : "");
     if (btn) { btn.setAttribute("aria-busy", "true"); btn.disabled = true; }
     fetch(url)
       .then(function (resp) {
         if (!resp.ok) {
-          // 0 条 / 5xx → 拦截 + Toast (PRD §4.6)
           return resp.json().catch(function () { return { error: "导出失败" }; })
             .then(function (body) {
               showToast({ severity: "warn", message: body.error || "暂无可导出的采集数据", duration: 3000 });
@@ -73,13 +70,13 @@
           URL.revokeObjectURL(objUrl);
         });
       })
-      .catch(function (e) { /* empty/error already toasted */ })
+      .catch(function () { /* empty/error 已 toast */ })
       .finally(function () {
         if (btn) { btn.removeAttribute("aria-busy"); btn.disabled = false; }
       });
   };
 
-  // Global HTMX error Toast (PRD §5.1.2): responseError/sendError → 右上红 Toast 3s.
+  /* ========== 全局 HTMX 错误 Toast ========== */
   document.addEventListener("htmx:responseError", function () {
     showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
   });
@@ -87,77 +84,59 @@
     showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
   });
 
+  /* ========== WebSocket 客户端 (连接/重连退避/消息分发) ========== */
+  var RECONNECT_DELAY = 2000;
+  var MAX_RECONNECT_DELAY = 30000;
+  var ws = null;
+  var currentDelay = RECONNECT_DELAY;
+  var wsStatus = document.getElementById("ws-status");
+  var wsDot = wsStatus ? wsStatus.querySelector(".ws-dot") : null;
+
+  function setWsState(connected) {
+    if (!wsDot) return;
+    if (connected) { wsDot.classList.add("connected"); currentDelay = RECONNECT_DELAY; }
+    else { wsDot.classList.remove("connected"); }
+  }
+
   function dispatch(msg) {
     var type = msg.type;
     switch (type) {
-      case "progress":
-        updateProgress(msg);
-        break;
+      case "progress": updateProgress(msg); break;
       case "warn":
-      case "disk_warn":
-        showToast({ severity: "warn", message: msg.message });
-        break;
-      case "error":
-        showToast({ severity: "error", message: msg.message });
-        break;
-      case "qr_ready":
-        showToast({ severity: "info", message: "扫码已就绪，请在 Chrome 中完成登录" });
-        break;
-      case "captcha_required":
-        showToast({ severity: "warn", message: "需要验证码，请在 Chrome 中完成验证" });
-        break;
-      case "task_completed":
-        showToast({ severity: "info", message: "任务完成: " + (msg.task_id || "") });
-        break;
-      case "login_success":
-        showToast({ severity: "info", message: "登录成功" });
-        break;
-      default:
-        break;
+      case "disk_warn": showToast({ severity: "warn", message: msg.message }); break;
+      case "error": showToast({ severity: "error", message: msg.message }); break;
+      case "qr_ready": showToast({ severity: "info", message: "扫码已就绪，请在 Chrome 中完成登录" }); break;
+      case "captcha_required": showToast({ severity: "warn", message: "需要验证码，请在 Chrome 中完成验证" }); break;
+      case "task_completed": showToast({ severity: "info", message: "任务完成: " + (msg.task_id || "") }); break;
+      case "login_success": showToast({ severity: "info", message: "登录成功" }); break;
+      default: break;
     }
+    // 供页面级监听 (如 task_detail) 的自定义事件
+    document.dispatchEvent(new CustomEvent("ws:message", { detail: msg }));
   }
 
   function updateProgress(msg) {
     var data = msg.data || {};
     var barId = "progress-" + (msg.task_id || msg.request_id || "");
     var bar = document.getElementById(barId);
-    if (bar) {
-      var pct = data.percent || 0;
-      bar.style.width = pct + "%";
-    }
+    if (bar) { var pct = data.percent || 0; bar.style.width = pct + "%"; }
     var log = document.getElementById("task-log");
-    if (log && msg.message) {
-      log.textContent += msg.message + "\n";
-    }
+    if (log && msg.message) { log.textContent += msg.message + "\n"; }
   }
 
   function connect() {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var url = proto + "//" + location.host + "/ws";
     ws = new WebSocket(url);
-
-    ws.onopen = function () {
-      setWsState(true);
-      currentDelay = RECONNECT_DELAY;
-    };
-
+    ws.onopen = function () { setWsState(true); currentDelay = RECONNECT_DELAY; };
     ws.onclose = function () {
       setWsState(false);
       setTimeout(connect, currentDelay);
       currentDelay = Math.min(currentDelay * 1.5, MAX_RECONNECT_DELAY);
     };
-
-    ws.onerror = function () {
-      setWsState(false);
-    };
-
+    ws.onerror = function () { setWsState(false); };
     ws.onmessage = function (event) {
-      try {
-        var msg = JSON.parse(event.data);
-        dispatch(msg);
-      } catch (e) {
-        // ignore non-JSON messages
-      }
+      try { dispatch(JSON.parse(event.data)); } catch (e) { /* ignore non-JSON */ }
     };
   }
 
