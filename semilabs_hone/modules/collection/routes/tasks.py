@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 router = APIRouter()
 
@@ -38,35 +38,12 @@ def _ipc_client():
 # Pages
 # ---------------------------------------------------------------------------
 
-@router.get("/tasks", response_class=HTMLResponse)
-async def page_tasks_list(request: Request) -> HTMLResponse:
-    """GET /tasks — task console list page (PRD §5.2).
-
-    Lists all tasks (newest first) with a polled status badge cell and a polled
-    actions cell. Empty state card when there are no tasks. Row click → detail.
+@router.get("/tasks")
+async def redirect_tasks_to_dashboard() -> RedirectResponse:
+    """GET /tasks -> / — 任务大厅已合并到首页 (ui_design_spec_v2 §6).
+    旧 tasks_list.html 路由保留为 /tasks-original, 块 8 收尾时统一删除.
     """
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import CollectionTask
-
-    sess = get_session()
-    try:
-        tasks = (
-            sess.query(CollectionTask)
-            .order_by(CollectionTask.created_at.desc())
-            .all()
-        )
-        rows = [_row_context(t) for t in tasks]
-    except Exception:
-        rows = []
-    finally:
-        sess.close()
-
-    t = _templates()
-    assert t is not None, "Templates not initialized"
-    return t.TemplateResponse(
-        request, "tasks_list.html",
-        {"rows": rows, "has_tasks": bool(rows)},
-    )
+    return RedirectResponse("/", status_code=302)
 
 
 @router.get("/tasks/new", response_class=HTMLResponse)
@@ -125,107 +102,104 @@ async def page_task_detail(request: Request, task_id: str) -> HTMLResponse:
 # API endpoints
 # ---------------------------------------------------------------------------
 
-# Status -> (badge class, label) for the task status badge (PRD §5.2.2).
+# Status -> (Tailwind class, icon, label) for the task status badge (ui_design_spec_v2 §7.1).
 # `night_sleep` / `resting` are IPC transients (not DB status); when the task is
 # `running` we read the latest progress file (keyed by task.request_id) to surface
 # the transient stage. Falls back to a plain "running" badge when no progress
 # file is correlated (e.g. worker not yet wired to push progress — S4/S5 gap).
 _BADGE_MAP = {
-    "pending": ("muted", "排队中..."),
-    "completed": ("success", "已完成"),
-    "need_human": ("error blink", "需人工处理验证码"),
-    "paused": ("warning", "已暂停"),
-    "error": ("error", "error"),
-    "failed": ("error", "error"),
+    "pending":    ("bg-yellow-500/15 text-yellow-400", "🟡", "排队中"),
+    "completed":  ("bg-green-500/15 text-green-400",   "✅", "已完成"),
+    "need_human": ("bg-red-500/15 text-red-400",       "⚠️", "需人工处理"),
+    "paused":     ("bg-gray-500/15 text-gray-400",     "⏸️", "已暂停"),
+    "error":      ("bg-purple-500/15 text-purple-400", "⛔", "异常中止"),
+    "failed":     ("bg-purple-500/15 text-purple-400", "⛔", "异常中止"),
+    "cancelled":  ("bg-gray-500/15 text-gray-400",     "⛔", "已取消"),
 }
 
 
-def _running_transient_badge(task) -> tuple[str, str]:
+def _running_transient_badge(task) -> tuple[str, str, str]:
     """Read the latest progress file for this task to pick a transient badge.
 
-    Returns (badge_class, label). Defaults to ("active", "运行中") when no
-    progress file is found or the message is unrecognized.
+    Returns (cls, icon, label). Defaults to running badge when no progress
+    file is found or the message is unrecognized.
     """
     from semilabs_hone.core.ipc import paths as ipc_paths
 
     rid = task.request_id
     if not rid:
-        return ("active", "运行中")
+        return ("bg-green-500/15 text-green-400", "🟢", "运行中")
     try:
         prog = ipc_paths.read_json_if_exists(ipc_paths.progress_path(rid))
     except Exception:
         prog = None
     if not prog:
-        return ("active", "运行中")
+        return ("bg-green-500/15 text-green-400", "🟢", "运行中")
     msg = (prog.get("message") or "").lower()
     if msg == "night_sleep":
-        return ("night-sleep", "夜间安全休眠中 (07:00 唤醒)")
+        return ("bg-gray-500/15 text-gray-400", "🌙", "夜间休眠")
     if msg == "resting":
-        return ("active", "休息防封中")
-    return ("active", "运行中")
+        return ("bg-green-500/15 text-green-400", "🟢", "休息防封")
+    return ("bg-green-500/15 text-green-400", "🟢", "运行中")
 
 
 def _badge_html(task) -> str:
-    """Render a pollable <span class="badge ...">label</span> fragment for HTMX.
+    """Render a pollable <span class="...">label</span> fragment for HTMX (Tailwind 暗色).
 
     The span carries its own hx-get/hx-trigger/hx-swap so that after an
     outerHTML swap the polling continues (htmx re-processes the new node).
     """
     status = task.status
     if status == "running":
-        cls, label = _running_transient_badge(task)
+        cls, icon, label = _running_transient_badge(task)
     elif status in _BADGE_MAP:
-        cls, label = _BADGE_MAP[status]
+        cls, icon, label = _BADGE_MAP[status]
         if status in ("error", "failed"):
-            label = task.error_msg or task.error_message or "error"
+            label = task.error_msg or task.error_message or "异常中止"
     else:
-        cls, label = ("muted", status)
+        cls, icon, label = ("bg-yellow-500/15 text-yellow-400", "🟡", status)
     tid = task.id
+    pulse = "animate-pulse" if status == "need_human" else ""
     return (
-        f'<span id="badge-{tid}" class="badge {cls}" '
+        f'<span id="badge-{tid}" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium {cls} {pulse}" '
         f'hx-get="/api/tasks/{tid}/status" hx-trigger="every 5s" hx-swap="outerHTML">'
-        f'{label}</span>'
+        f'<span>{icon}</span><span>{label}</span></span>'
     )
 
 
 def _actions_html(task) -> str:
-    """Render the action-buttons fragment for a task (PRD §5.2.3).
+    """Render the action-buttons fragment for a task (Tailwind 暗色, ui_design_spec_v2 §7.3).
 
-    Single source for both the task-detail page and the list-row `actions-<id>`
-    cell. Buttons use hx-disabled-elt (optimistic lock during the in-flight
-    request) + onclick lockBtn for immediate aria-busy; the list cell polls
-    GET /api/tasks/{id}/actions every 5s so it refreshes to the new status's
-    buttons once the backend state changes.
+    块1: 仅渲染已存在接口的分支 (paused→恢复, completed→查看+导出, error→重试).
+    running 的暂停、need_human 的唤起/删除在后续块加.
     """
     tid = task.id
     parts: list[str] = []
-    if task.status == "running":
-        parts.append(
-            f'<button hx-post="/api/tasks/{tid}/cancel" hx-swap="none" '
-            f'hx-disabled-elt="this" class="secondary outline" '
-            f'onclick="lockBtn(this)">取消</button>'
-        )
-    if task.status == "need_human":
-        parts.append(
-            f'<a href="/tasks/{tid}" class="button primary" role="button" '
-            f'title="请切换到 worker Chrome 完成扫码 / 验证">唤起浏览器</a>'
-        )
-        parts.append(
-            f'<button hx-post="/api/tasks/{tid}/resume" hx-swap="none" '
-            f'hx-disabled-elt="this" class="primary" '
-            f'onclick="lockBtn(this)">已处理，继续</button>'
-        )
+    # 块3 加: running → 暂停
+    # 块5 加: need_human → 唤起浏览器 + 已处理继续
     if task.status in ("failed", "error", "paused"):
+        # 块1: paused/error/failed → 恢复 (复用 /resume)
         parts.append(
-            f'<button hx-post="/api/tasks/{tid}/resume" hx-swap="none" '
-            f'hx-disabled-elt="this" class="primary" '
-            f'onclick="lockBtn(this)">继续</button>'
+            f'<button class="text-green-400 hover:text-green-300" title="恢复" '
+            f'hx-post="/api/tasks/{tid}/resume" hx-swap="none">'
+            f'<svg width="16" height="16" fill="currentColor"><path d="M5 3l9 5-9 5V3z"/></svg></button>'
         )
     if task.status == "completed":
+        # 块1: completed → 查看 (跳 /posts?task_id=X) + 导出 CSV
         parts.append(
-            f'<button onclick="exportCsv(\'{tid}\', this)" class="button">导出 CSV</button>'
+            f'<a href="/posts?task_id={tid}" class="text-gray-400 hover:text-blue-400" title="查看">'
+            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
+            f'</svg></a>'
         )
-    return " ".join(parts) if parts else '<span style="color:var(--pico-muted-color)">—</span>'
+        parts.append(
+            f'<button onclick="exportCsv(\'{tid}\', this)" class="text-gray-400 hover:text-blue-400" title="导出">'
+            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>'
+            f'</svg></button>'
+        )
+    # 块4 加: error → 删除
+    return " ".join(parts) if parts else '<span class="text-gray-500 text-xs">—</span>'
 
 
 def _row_context(task) -> dict:

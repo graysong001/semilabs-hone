@@ -1,0 +1,34 @@
+<!-- 统计卡片 (ui_design_spec_v2 §6.1) -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+  <div class="bg-app-card rounded-lg p-5 border border-gray-700">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm text-gray-400">今日抓取量</span>
+      <div class="w-9 h-9 rounded-lg flex items-center justify-center bg-blue-500/15 text-blue-400 text-lg">📥</div>
+    </div>
+    <div class="text-3xl font-bold text-white">{{ today_count }}</div>
+    <div class="text-xs text-gray-500 mt-1">上限 {{ daily_limit }} / 剩余 {{ daily_limit - today_count if daily_limit > today_count else 0 }}</div>
+  </div>
+  <div class="bg-app-card rounded-lg p-5 border border-gray-700">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm text-gray-400">运行中任务</span>
+      <div class="w-9 h-9 rounded-lg flex items-center justify-center bg-green-500/15 text-green-400 text-lg">🔄</div>
+    </div>
+    <div class="text-3xl font-bold text-white">{{ running_count }}</div>
+    <div class="text-xs {{ 'text-green-400' if running_diff > 0 else 'text-gray-500' if running_diff == 0 else 'text-red-400' }} mt-1">
+      {% if running_diff > 0 %}↑ 较昨日 +{{ running_diff }}
+      {% elif running_diff < 0 %}↓ 较昨日 {{ running_diff }}
+      {% else %}持平{% endif %}
+    </div>
+  </div>
+  <div class="bg-app-card rounded-lg p-5 border border-gray-700">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm text-gray-400">异常风控数</span>
+      <div class="w-9 h-9 rounded-lg flex items-center justify-center bg-red-500/15 text-red-400 text-lg">⚠️</div>
+    </div>
+    <div class="text-3xl font-bold text-white {{ 'text-red-400' if need_human_count > 0 }}">{{ need_human_count }}</div>
+    <div class="text-xs mt-1">
+      {% if need_human_count > 0 %}<span class="text-red-400 animate-pulse">⚡ 需立即处理</span>
+      {% else %}<span class="text-gray-500">一切正常</span>{% endif %}
+    </div>
+  </div>
+</div>
