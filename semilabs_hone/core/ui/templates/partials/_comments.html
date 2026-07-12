@@ -1,0 +1,25 @@
+<div class="bg-black/20 rounded-lg p-4 my-2">
+  {% if empty %}
+    <p class="text-gray-500 text-center text-sm">该笔记暂无评论数据</p>
+  {% else %}
+    <div class="text-xs text-gray-400 mb-3">💬 共 {{ comments|length }} 条评论</div>
+    <table class="w-full">
+      <thead>
+        <tr class="border-b border-gray-700 text-xs text-gray-500">
+          <th class="text-left py-2 w-32">评论者</th>
+          <th class="text-left py-2">评论内容</th>
+          <th class="text-right py-2 w-20">点赞数</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for comment in comments %}
+        <tr class="border-b border-gray-700/50 text-sm">
+          <td class="py-2 text-blue-400 font-medium">{{ comment.author_name or '匿名' }}</td>
+          <td class="py-2 text-gray-300">{{ comment.content_text or '' }}</td>
+          <td class="py-2 text-right text-gray-400">{{ comment.like_count or 0 }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>

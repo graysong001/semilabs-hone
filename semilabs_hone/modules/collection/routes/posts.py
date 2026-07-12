@@ -51,27 +51,16 @@ def _comments_fragment(item_id: str) -> str:
     finally:
         sess.close()
 
+    t = _templates()
+    assert t is not None, "Templates not initialized"
+
     if not comments:
-        return (
-            f'<tr id="detail-{item_id}"><td colspan="7" '
-            f'style="color: var(--pico-muted-color); text-align: center;">'
-            f'该笔记暂无评论数据</td></tr>'
+        return t.env.get_template("partials/_comments.html").render(
+            item_id=item_id, comments=[], empty=True
         )
 
-    rows = []
-    for c in comments:
-        author = (c.author_name or "匿名")[:30]
-        text = (c.content_text or "")[:200]
-        rows.append(
-            f'<tr><td colspan="7"><small>'
-            f'<strong>{author}</strong> · ❤ {c.like_count or 0}<br>'
-            f'{text}</small></td></tr>'
-        )
-    body = "".join(rows)
-    return (
-        f'<tr id="detail-{item_id}"><td colspan="7">'
-        f'<table><tbody>{body}</tbody></table>'
-        f'</td></tr>'
+    return t.env.get_template("partials/_comments.html").render(
+        item_id=item_id, comments=comments, empty=False
     )
 
 
@@ -93,6 +82,7 @@ async def api_item_comments(item_id: str) -> HTMLResponse:
 async def page_posts(
     request: Request,
     platform: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
 ) -> HTMLResponse:
@@ -105,6 +95,8 @@ async def page_posts(
         q = sess.query(CollectionItem)
         if platform:
             q = q.filter(CollectionItem.platform == platform)
+        if task_id:
+            q = q.filter(CollectionItem.task_id == task_id)
         items = q.all()
     except Exception:
         items = []
@@ -137,6 +129,8 @@ async def page_posts(
             "per_page": per_page,
             "total_pages": total_pages,
             "filter_platform": platform,
+            "filter_task_id": task_id,
+            "active_page": "data",
         },
     )
 
