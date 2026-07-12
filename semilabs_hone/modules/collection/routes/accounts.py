@@ -53,7 +53,7 @@ async def page_accounts(request: Request) -> HTMLResponse:
     assert t is not None, "Templates not initialized"
     return t.TemplateResponse(
         request, "accounts.html",
-        {"accounts": accounts, "platforms": platforms},
+        {"accounts": accounts, "platforms": platforms, "active_page": "auth"},
     )
 
 
