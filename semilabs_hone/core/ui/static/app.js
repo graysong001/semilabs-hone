@@ -264,8 +264,8 @@
           if (data.ok) {
             showToast({ severity: 'success', message: '任务已恢复', duration: 2000 });
             modal.close();
-            // Refresh task row
-            htmx.ajax('GET', '/api/tasks/' + taskId + '/row', '#task-row-' + taskId);
+            // Refresh action buttons (status changed need_human → running)
+            htmx.ajax('GET', '/api/tasks/' + taskId + '/actions', '#actions-' + taskId);
           } else {
             showToast({ severity: 'error', message: data.error || '恢复失败', duration: 3000 });
           }
