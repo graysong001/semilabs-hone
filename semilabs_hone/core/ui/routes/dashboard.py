@@ -39,7 +39,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     return _templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"account_count": account_count},
+        {"account_count": account_count, "active_page": "dashboard"},
     )
 
 
@@ -47,16 +47,19 @@ async def dashboard(request: Request) -> HTMLResponse:
 async def api_heartbeat() -> HTMLResponse:
     """GET /api/heartbeat — worker heartbeat indicator fragment (PRD §5.1.1).
 
-    Polled by HTMX every 10s from base.html. <30s since last heartbeat → green
-    dot + "引擎运行中"; ≥30s or absent → red dot + "后台引擎离线，请重启应用".
+    Polled by HTMX every 10s from base.html topbar pill. <30s since last
+    heartbeat → green pulse dot + "Engine Online"; ≥30s or absent → red dot
+    + "Engine Offline". 返回 Tailwind class 片段 (ui_design_spec_v2 §4 顶栏).
     """
     from semilabs_hone.core.ipc import paths as ipc_paths
 
     age = ipc_paths.heartbeat_age()
     if age is not None and age < 30:
         return HTMLResponse(
-            '<span class="heartbeat-dot green"></span> 引擎运行中'
+            '<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>'
+            '<span class="text-xs text-green-400">Engine Online</span>'
         )
     return HTMLResponse(
-        '<span class="heartbeat-dot red"></span> 后台引擎离线，请重启应用'
+        '<span class="w-2 h-2 rounded-full bg-red-500"></span>'
+        '<span class="text-xs text-red-400">Engine Offline</span>'
     )
