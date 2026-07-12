@@ -40,62 +40,8 @@ def _ipc_client():
 
 @router.get("/tasks")
 async def redirect_tasks_to_dashboard() -> RedirectResponse:
-    """GET /tasks -> / — 任务大厅已合并到首页 (ui_design_spec_v2 §6).
-    旧 tasks_list.html 路由保留为 /tasks-original, 块 8 收尾时统一删除.
-    """
+    """GET /tasks -> / — 任务大厅已合并到首页 (ui_design_spec_v2 §6)."""
     return RedirectResponse("/", status_code=302)
-
-
-@router.get("/tasks/new", response_class=HTMLResponse)
-async def page_new_task(request: Request) -> HTMLResponse:
-    """GET /tasks/new — create task page with platform/keyword form."""
-    from semilabs_hone.modules.collection.scrapers.registry import list_platforms
-
-    platforms = list_platforms()
-
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.account import Account
-
-    sess = get_session()
-    try:
-        accounts = sess.query(Account).order_by(Account.id.desc()).all()
-    except Exception:
-        accounts = []
-    finally:
-        sess.close()
-
-    t = _templates()
-    assert t is not None, "Templates not initialized"
-    return t.TemplateResponse(
-        request, "task_new.html",
-        {"platforms": platforms, "accounts": accounts},
-    )
-
-
-@router.get("/tasks/{task_id}", response_class=HTMLResponse)
-async def page_task_detail(request: Request, task_id: str) -> HTMLResponse:
-    """GET /tasks/{id} — task detail page with progress."""
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import CollectionTask
-
-    sess = get_session()
-    try:
-        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
-    except Exception:
-        task = None
-    finally:
-        sess.close()
-
-    if task is None:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    t = _templates()
-    assert t is not None, "Templates not initialized"
-    return t.TemplateResponse(
-        request, "task_detail.html",
-        {"task": task, "badge_html": _badge_html(task)},
-    )
 
 
 # ---------------------------------------------------------------------------
