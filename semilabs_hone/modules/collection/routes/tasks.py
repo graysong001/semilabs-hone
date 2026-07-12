@@ -206,7 +206,23 @@ def _actions_html(task) -> str:
             f'<path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>'
             f'</svg></button>'
         )
-    # 块4 加: error → 删除
+        # 块4: completed → 删除
+        parts.append(
+            f'<button class="text-red-400 hover:text-red-300" title="删除" '
+            f'hx-delete="/api/tasks/{tid}" hx-target="#task-row-{tid}" hx-swap="outerHTML" hx-confirm="确定要删除这个任务吗？">'
+            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/>'
+            f'</svg></button>'
+        )
+    if task.status in ("error", "failed"):
+        # 块4: error/failed → 删除
+        parts.append(
+            f'<button class="text-red-400 hover:text-red-300" title="删除" '
+            f'hx-delete="/api/tasks/{tid}" hx-target="#task-row-{tid}" hx-swap="outerHTML" hx-confirm="确定要删除这个任务吗？">'
+            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/>'
+            f'</svg></button>'
+        )
     return " ".join(parts) if parts else '<span class="text-gray-500 text-xs">—</span>'
 
 
@@ -645,6 +661,53 @@ async def api_pause_task(task_id: str) -> JSONResponse:
             "task_id": task_id,
             "status": "paused",
         })
+    except Exception as exc:
+        sess.rollback()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Block 4: Delete Task
+# ---------------------------------------------------------------------------
+
+@router.delete("/api/tasks/{task_id}")
+async def api_delete_task(task_id: str) -> JSONResponse:
+    """DELETE /api/tasks/{id} — delete a task and its associated data.
+
+    Only allows deleting completed/error/failed tasks. Running/pending tasks
+    cannot be deleted. Cascades to posts and comments via DB foreign key.
+    Also cleans up IPC control files if they exist.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if not task:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+        if task.status in ("running", "pending"):
+            return JSONResponse(
+                {"ok": False, "error": "Cannot delete running or pending tasks"},
+                status_code=409
+            )
+
+        # Clean up IPC control file if exists
+        if task.request_id:
+            try:
+                from semilabs_hone.core.ipc.paths import control_path, burn
+                burn(control_path(task.request_id))
+            except Exception:
+                pass  # Ignore cleanup errors
+
+        # Delete task (cascades to posts and comments via DB foreign key)
+        sess.delete(task)
+        sess.commit()
+
+        return JSONResponse({"ok": True, "task_id": task_id})
     except Exception as exc:
         sess.rollback()
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
