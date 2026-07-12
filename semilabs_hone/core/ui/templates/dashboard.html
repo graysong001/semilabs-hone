@@ -7,9 +7,8 @@
     <span class="text-gray-400">素材抓取</span><span class="text-gray-600">/</span>
     <span class="text-white font-medium">采集任务大厅</span>
   </nav>
-  <button disabled
-          class="flex items-center gap-2 px-4 py-2 bg-gray-600 text-gray-400 rounded-lg text-sm font-medium cursor-not-allowed"
-          title="块2 接通">
+  <button class="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium"
+          onclick="document.getElementById('create-modal').showModal()">
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
     新建采集任务
   </button>
@@ -44,7 +43,7 @@
         <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">操作</th>
       </tr>
     </thead>
-    <tbody>
+    <tbody id="task-table-body">
       {% if not tasks %}
       <tr><td colspan="6" class="px-4 py-8 text-center text-gray-500 text-sm">暂无任务，点击右上角"新建采集任务"开始</td></tr>
       {% endif %}
@@ -87,4 +86,5 @@
   </div>
   {% endif %}
 </div>
+{% include "partials/_create_task_modal.html" %}
 {% endblock %}

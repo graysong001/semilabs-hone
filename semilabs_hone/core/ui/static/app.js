@@ -84,6 +84,94 @@
     showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
   });
 
+  /* ========== 块2: 新建任务弹窗交互 (规范 §11) ========== */
+  // radio-card 点击
+  document.querySelectorAll('.radio-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      card.parentElement.querySelectorAll('.radio-card').forEach(function(c) { c.classList.remove('selected'); });
+      card.classList.add('selected');
+      card.querySelector('input[type="radio"]').checked = true;
+    });
+  });
+
+  // 任务类型切换 (keyword_search / author_homepage)
+  window.toggleTaskTypeFields = function() {
+    var type = document.getElementById('task-type-select').value;
+    var keywordField = document.getElementById('keyword-field');
+    var urlField = document.getElementById('url-field');
+    if (type === 'keyword_search') {
+      keywordField.classList.remove('hidden');
+      urlField.classList.add('hidden');
+    } else {
+      keywordField.classList.add('hidden');
+      urlField.classList.remove('hidden');
+    }
+  };
+
+  // count-btn 点击
+  document.querySelectorAll('.count-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.count-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      document.querySelector('[name="expected_count"]').value = btn.dataset.count;
+    });
+  });
+
+  // 开始采集 → 显示耗时预估弹窗
+  window.submitWithEstimate = function() {
+    var form = document.getElementById('create-task-form');
+    var count = parseInt(form.querySelector('[name="expected_count"]').value);
+    if (count > 200) {
+      form.querySelector('[name="expected_count"]').value = 200;
+      showToast({ severity: 'warn', message: '单任务上限 200 条，已自动调整', duration: 3000 });
+      return;
+    }
+    if (count < 1) {
+      showToast({ severity: 'error', message: '数量不能小于 1', duration: 3000 });
+      return;
+    }
+    // 预估耗时: 每条 1-1.5 分钟, 每 5 条加 1 分钟休息
+    var groups = Math.floor(count / 5);
+    var minMin = Math.round(count * 1.0 + groups * 1.0);
+    var maxMin = Math.round(count * 1.5 + groups * 1.5);
+    document.getElementById('estimate-minutes').textContent = minMin + '-' + maxMin;
+    document.getElementById('create-modal').close();
+    document.getElementById('estimate-modal').showModal();
+  };
+
+  // 确认挂机 → 提交表单
+  window.confirmCreate = function() {
+    document.getElementById('estimate-modal').close();
+    var form = document.getElementById('create-task-form');
+    htmx.trigger(form, 'submit');
+  };
+
+  // HTMX 提交后处理 (解析 JSON, 插入新行到 tbody)
+  window.handleTaskCreateResponse = function(event) {
+    if (event.detail.successful) {
+      var xhr = event.detail.xhr;
+      try {
+        var data = JSON.parse(xhr.responseText);
+        if (data.status === 'ok' || data.task_id) {
+          showToast({ severity: 'success', message: '任务已创建', duration: 2000 });
+          // 如果有 task_id, 用 HTMX 拉新行 HTML 插入到 tbody 顶部
+          if (data.task_id) {
+            var tbody = document.getElementById('task-table-body');
+            if (tbody) {
+              htmx.ajax('GET', '/api/tasks/' + data.task_id + '/row', { target: tbody, swap: 'afterbegin' });
+            }
+          }
+        } else {
+          showToast({ severity: 'error', message: data.error || '创建失败', duration: 3000 });
+        }
+      } catch (e) {
+        showToast({ severity: 'error', message: '响应解析失败', duration: 3000 });
+      }
+    } else {
+      showToast({ severity: 'error', message: '创建失败', duration: 3000 });
+    }
+  };
+
   /* ========== WebSocket 客户端 (连接/重连退避/消息分发) ========== */
   var RECONNECT_DELAY = 2000;
   var MAX_RECONNECT_DELAY = 30000;
