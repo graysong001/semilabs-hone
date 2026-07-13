@@ -60,6 +60,20 @@
 - **覆盖口径**：全包 85%，分母 = `semilabs_hone` 全量（含 hold/可选模块 recorder/slide_solver/ua_pool/ocr/manual_handler，均 mock 驱动）。`loop_gate.sh` 接 `--cov=semilabs_hone --cov-fail-under=85`；`pyproject.toml` 加 `pytest-cov` 到 dev deps + `[tool.coverage.report] fail_under=85`。当前 86%（8511→3511 语句，505 缺失）。
 - **遗留 L12**：`routes/tasks.py api_resume_task` 在 `sess.close()`（finally）后访问 `task.account_id/platform/...`（commit 触发 expire_on_commit）→ DetachedInstanceError。BDD 7.1 happy-path resume 测试因此跳过（保留 409 冲突 + 404 缺失分支测试）。归 S9/T70 或后续修复（payload 构造移入 try 内 close 前）。
 
+**[契约变更 2026-07-13 S10]**（登录账号管理模块——打通"添加账号/导入cookie/扫码登录"端到端）
+- **accounts 表字段重整**：`nickname`→`remark`（改名为"账号备注"+**NOT NULL**，用户裁决）；新增 `platform_user_id String(64) nullable`（平台真实用户ID）+ `platform_nickname String(100) nullable`（平台真实昵称，自动提取不可手改）；删 `phone`（无引用）+ `profile_dir`（用 `profile_dir_for(account_id)` 动态算，不入库）；保留 `color_scheme`/`timezone`/`locale`/`viewport_*` 指纹列（spec §4.1+§7.2 一账号一固定指纹，不删）。
+- **新增 `UNIQUE(platform, platform_user_id)`**（用户裁决"不允许重复"）。`platform_user_id` 为空（未登录空壳）时不参与唯一约束（SQLite 多 NULL 允许并存），导入/登录提取回写后即去重。
+- **`collection_tasks.account_id` 补 `ForeignKey(accounts.id)`**（用户裁决"采集任务明确绑定账号"）。PRD §6 契约曾写"collection_tasks 无 account_id" → 裁决为**规格漂移**：采集必须知道用哪个账号登录态抓的，删了无法关联，故补 FK 对齐现状（routes/tasks.py 创建任务本就传 account_id 入库）。
+- **Cookie 路径统一**：`profile.py` 的 `profile_dir_for(account_id)` 与 `handlers._import_cookies`/`_try_cookie_recovery` 统一用 `data/collection/profiles/{account_id}/cookies.json`，**删 handlers 里的 `acct_{account_id}` 前缀 bug**（两路径不一致导致导入的 cookie 落到与 Chrome profile 不同的目录）。
+- **Cookie 必须注入浏览器**：`_import_cookies` 补 `await context.add_cookies(cookies)`（当前只落盘不注入→导入实际不生效）；导入后立即用注入 cookie 请求平台需登录接口验证 → 成功置 `active`+`last_login_at`+提取 `platform_user_id`/`platform_nickname` 回写，失败 `inactive`+`fail_count+1`。
+- **导入 cookie 命中已存在 `platform_user_id` → 拒绝**（用户裁决选 A）：返回「该平台账号已存在为账号 #N，是否更新它的 cookie」提示，**不静默合并**。更新走单独路径（覆盖目标账号 cookie + 刷新 last_login_at，不动 remark）。
+- **QR 登录补成功检测**：`_do_qr_login` 当前只 `goto+截图`不检测成功 → 补轮询 `success_pattern`（spec yaml `login.success_detect`，≤timeout 120s）→ 成功后 `context.cookies()` 提取落盘+注入+回写 `platform_user_id`/`platform_nickname`+`active`+`last_login_at`。WS 广播 `qr_ready`→`login_success`。
+- **账号状态机 wiring**：验证结果驱动 `status`+`fail_count`（成功清零→active；失败+1，达 5→suspended）；采集中风控探针命中登录失效→账号 `fail_count+1`。无静默续期（PRD 不重试 Login/SessionExpired 红线）。
+- **账号路由去硬编码**：`api_login_account`/`api_validate_account`/`api_import_cookies` 当前写死 `platform="xiaohongshu"` → 改从 `Account.platform` 读。
+- **导入 cookie 表单 `account_id` 改下拉选已有账号**（非手填数字，避免孤儿 cookie；顺手收 L04 账号下拉部分）。
+- **新增路由**：`GET /api/accounts`（JSON 列表，供下拉/任务创建页选账号）、`GET /api/accounts/{id}`（JSON 详情）、`PUT /api/accounts/{id}`（改 remark）。`DELETE` 补清 profile 目录+cookies.json；有 running 任务挂该账号→拒绝删除。
+- **不变**：`platform_id` 是采集到的笔记/评论平台ID（note_id/answer_id），与账号无关，勿与 `platform_user_id` 混淆。
+
 **3. IPC 契约（PRD §3.4/§7.2）**
 - 目录 `data/ipc/{requests,results,progress,control}`（control 扁平，无 cancel 子层；`control/cancel/` 仅旧哨兵兼容）
 - 命名：`requests/<id>.json` · `results/<id>.json` · `progress/<id>.json` · `progress/heartbeat.json` · `control/ctrl_<id>.json`
@@ -143,10 +157,11 @@
 | S7 | ✅ | ✅ | S3 | P4 CSV 宽表 | T40 宽表重写(10 中文表头+utf-8-sig+转义) · T41 导出路由+空数据防御 | test_csv_export/test_routes |
 | S8 | ✅ | ✅ | S4-S7 | P5 测试门禁 | T50 PRD §8 全部 BDD 落 pytest · T51 覆盖率 ≥85% | tests/prd_bdd/ + cov 门 |
 | S9a | 🔄 | 🟡 | S2-S8 | P7.5 端到端 wiring 修复（T70 前置） | L13 web→worker Popen · L14 ctx 注入 engine · L15 login QR 真实化 · L16 WS progress relay · L01 resume→control · L10 solver wiring · L12 resume post-close | 全量回归 + 人验启 Chrome |
-| S9 | ⬜ | 🟡/❌ | S9a | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
+| S10 | ✅ | ✅ | S9a | P3.6 登录账号管理模块 | T80 Account 模型增强(remark+platform_user_id+UNIQUE) · T81 cookie 注入+路径统一 · T82 QR 成功检测+回写 · T83 账号路由补齐(JSON/PUT/去硬编码) · T84 导入表单 account_id 改下拉 · T85 tasks.account_id 补 FK · T86 账号状态机 wiring | test_routes + test_account(新) |
+| S9 | ⬜ | 🟡/❌ | S9a,S10 | P6 文档同步 + P7 端到验 | T60-T63 spec/design/context 自洽 · T70 ❌ 端到端 · T71 ❌ 验证码可选能力验证 | 文档自洽 + 人工 |
 | Sz | ⏸ | 🟡/❌ | S4,S9 | 知乎专项定制（暂 hold） | 真实录制知乎 search/detail/comments 三 flow + LLM 生成 maps · 补 `_find_list_root` data[] 兜底 · comments scroll_collect · solver wiring 专项 | 人验 + 文档自洽 |
 
-**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9a(wiring 修复) → S9(文档+人验)。Sz 知乎专项暂 hold（不在主线 loop，等专项启动再排期）。
+**loop 顺序**：S1 → S2 → S3 → S4 → S5(代码半,录制🟡) → S6 → S6b(列表页) → S7 → S8 → S9a(wiring 修复) → S10(登录账号管理) → S9(文档+人验)。Sz 知乎专项暂 hold（不在主线 loop，等专项启动再排期）。
 **跨会话并发安全**：同一时刻只推进一个 S（共享同一批文件+DB+IPC 契约，并行会冲突）。
 
 ---
@@ -222,6 +237,20 @@
 | T38 行/操作片段端点 | ✅ | ✅ | T37,S6 | 新 `GET /api/tasks/{id}/row` 返回整 `<tr>` 片段（含 status-/actions- id，供创建后 afterbegin 插入）；新 `GET /api/tasks/{id}/actions` 返回操作 `<td>` 内片（cancel/resume/唤起/已处理 按 status，供乐观锁请求后局部刷新 actions 单元格） | test_routes |
 | T39 创建→列表接入 | ✅ | ✅ | T38,T32 | `task_new.html` 成功后：若在 /tasks 页→`hx-swap="afterbegin"` 插新行（GET /api/tasks/{id}/row）+ 绿 Toast「任务已就绪」(PRD §5.3.2)；不在列表页则维持现有「查看详情」链接行为 | test_routes |
 
+## P3.6 — 登录账号管理模块（PRD §8.1 场景1.1，设计见 `docs/ui_design_spec_v2.md §13`）
+
+> 打通"添加账号 / 导入cookie / 扫码登录"端到端。当前服务端两条登录路径都断（cookie 只落盘不注入、QR 只截图不检测成功、无平台真实身份字段）。本段把账号壳、平台真实身份、登录态三者打通。契约见「共享上下文契约 §[契约变更 2026-07-13 S10]」。
+
+| 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
+|---|:-:|:-:|---|---|---|
+| T80 Account 模型增强 | ✅ | ✅ | S3 | `core/models/account.py`：`nickname`→`remark`+NOT NULL；新增 `platform_user_id`/`platform_nickname`；删 `phone`/`profile_dir`；加 `UNIQUE(platform,platform_user_id)`（空值不参与）。schemas `AccountCreate` 同步改 `remark` 必填 | test_account(新)+test_models |
+| T81 cookie 注入+路径统一 | ✅ | ✅ | T80 | `handlers._import_cookies`/`_try_cookie_recovery`/`_check_account_valid`：统一路径 `profiles/{account_id}/cookies.json`（删 `acct_` 前缀 bug）；`_import_cookies` 补 `await context.add_cookies(cookies)` + 用注入 cookie 请求需登录接口验证 + 提取 `platform_user_id`/`platform_nickname` 回写 + 置 active/失败 fail_count+1 | test_handlers |
+| T82 QR 成功检测+回写 | ✅ | ✅ | S9a,L15 | `handlers._do_qr_login`：补轮询 `success_pattern`(spec yaml `login.success_detect`，≤timeout) → `context.cookies()` 提取落盘+注入+回写 `platform_user_id`/`platform_nickname`+active+`last_login_at`；WS 广播 `qr_ready`→`login_success` | test_handlers |
+| T83 账号路由补齐 | ✅ | ✅ | T80 | `routes/accounts.py`：新增 `GET /api/accounts`(JSON)、`GET /api/accounts/{id}`、`PUT /api/accounts/{id}`(改 remark)；`DELETE` 清 profile 目录+cookies.json + 有 running 任务→拒绝；login/validate/import 路由 `platform` 从 `Account.platform` 读去硬编码 | test_routes |
+| T84 导入表单改下拉 | ✅ | ✅ | T83 | `templates/accounts.html`：导入 cookie 表单 `account_id` 改 `<select>` 选已有 inactive 账号（非手填数字，顺手收 L04 账号下拉部分）；列表展示 `备注 (平台昵称)` 双列；补「编辑备注」按钮（收 L04）；按 §13.3 三区块布局 | test_routes |
+| T85 tasks.account_id 补 FK | ✅ | ✅ | T80 | `core/models/task.py` `CollectionTask.account_id` 补 `ForeignKey(accounts.id)`；`routes/tasks.py` 创建任务校验 account_id 存在性 | test_models+test_routes |
+| T86 账号状态机 wiring | ✅ | ✅ | T81,T82 | 验证结果驱动 `status`+`fail_count`（成功清零→active；失败+1，达 5→suspended）；采集中风控探针命中登录失效→账号 `fail_count+1`；导入cookie命中已存在 `platform_user_id`→拒绝提示（选 A 不静默合并） | test_handlers+test_routes |
+
 ## P4 — CSV 宽表交付（PRD §4.6）
 
 | 任务 | 状态 | 可自动 | 依赖 | 范围/文件 | 门禁 |
@@ -257,8 +286,9 @@
 ## 依赖 DAG（会话级，主链顺序）
 
 ```
-S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 → S9(🟡/❌)
+S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 → S9a(wiring) → S10(登录账号) → S9(🟡/❌)
         \____ S3 → S6（UI 依赖表）; S6 → S6b（复用徽章端点）; S3 → S7（CSV 依赖表）; S2 → S6（心跳指示灯）
+        \____ S9a → S10（worker ctx 单例前置）; S10 → S9（人验需登录账号模块绿）
         \____ S4,S9 → Sz（知乎专项，⏸ hold，不在主线 loop）
 ```
 
@@ -274,7 +304,7 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 | L01 | S4/S6 | `routes/tasks.py /api/tasks/{id}/resume` 仍发新 IPC request（op scrape_task, resume=True），**未**按 PRD §4.4.3 step4 写 `control/ctrl_<rid>.json {action:resume}`。handler `_await_resume` 轮询 control/ 行为正确但真实 /resume 路径未对接。`task.request_id` 已存（S6 加列），S9 接 `control/ctrl_<rid>.json` 即可。 | S9a | ✅ |
 | L02 | S6/S6b | JS 运行时行为端到验：dialog 失焦校验 / 耗时预估 modal / 乐观锁（hx-disabled-elt+lockBtn）/ master-detail toggle / Toast 触发（htmx:responseError/sendError）/ 创建后 afterbegin 插行 / 列表 actions 5s 轮询刷新。pytest 只断言静态接入（渲染含 `<dialog>`/`hx-*`/app.js 含监听串），真实浏览器行为未驱动。 | S9/T70 | ⬜ |
 | L03 | S4/S6 | model 旧列 + NOT NULL 清理（契约 §2）：`collection_items.url`、`collection_comments.platform_comment_id` 改回 NOT NULL；删旧列（likes/content/post_id/rank/sub_comment_count/...）+ 旧 UNIQUE。create_all 重建即生效。 | S7（csv_exporter 切换时） | ✅ |
-| L04 | S6b | 列表页创建 dialog（`tasks_list.html` 内嵌 `_task_new_dialog.html`）的平台/账号下拉用默认值（未查 DB 传 `platforms`/`accounts`），新建任务只能走默认 platform/account。 | S9 或 UI 增强会话 | ⬜ |
+| L04 | S6b | 列表页创建 dialog（`tasks_list.html` 内嵌 `_task_new_dialog.html`）的平台/账号下拉用默认值（未查 DB 传 `platforms`/`accounts`），新建任务只能走默认 platform/account。S10 的 `GET /api/accounts`(JSON) 落地后可顺手收（任务创建 dialog + 登录页导入表单 account_id 下拉都依赖它）。 | S10 | ✅ |
 | L05 | S6b | 操作按钮「锁到状态改变」精确语义未达：当前是请求期 disabled（hx-disabled-elt）+ actions 单元格 5s 轮询刷新，≤5s 滞后才换按钮集合；PRD §5.2.3 要「按钮持续 disabled 直到后端状态真实改变再替换」。 | S9/T70 | ⬜ |
 | L06 | S4 | 评论 3 次滚动加载（`scroll_collect` max_scrolls=3）语义落在 comments flow，engine 已支持，但 XHS/知乎 comments flow yaml 未加 `scroll_collect` 步骤。 | S5（录制）/S9 | ⬜ |
 | L07 | S4 | `scroll_collect` 真增量 XHR：当前对静态 saved 快照重抽 dedup（测边界 20/5）；真实浏览器「滚动触发新 XHR→累积」需 flow 在每次 scroll 后再 `wait_xhr`。 | S5/S9（录制侧真实化） | ⬜ |
@@ -287,6 +317,8 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 | L14 | S8探查 | `worker_main._run_worker` 的 `browser, ctx = await attach(port)` 是局部变量，attach 完丢弃；`serve_worker` 不接收 browser；`handlers._get_engine` 只 `GenericEngine(spec=spec)` 不注入 ctx/page → `engine.page=None` → `_ensure_page` 抛 `RuntimeError("No page available")` → `scrape_task` 立即失败。需 worker 级 ctx 单例 + `_get_engine` 注入 `engine.ctx`/`engine.page`。 | S9a | ✅ |
 | L15 | S8探查 | `handlers._do_qr_login` 只返回路径字符串，不 `page.goto(login_url)`、不 `screenshot` → UI 拿不到真实二维码。登录是全流程起点，stub 则后续全假。需真导航 + 截图存盘。 | S9a | ✅ |
 | L16 | S8探查 | `core/ui/ws.py` 只有 `broadcast(msg)`，**无后台 poll `progress/`+`results/`(ws_events)→WS 推送** 的 relay 循环。worker 写 progress 文件无人读回广播；UI 只能靠 5s 轮询徽章端点拿瞬态，WS 流式进度不工作。需 web 后台 relay loop。 | S9a | ✅ |
+| L17 | S10 | `test_bdd_07_rhythm.py::test_task_b_pauses_when_daily_total_hits_200` 日限额 BDD 测试失败。handler 的 `_check_rhythm` 计数逻辑与 session fixture 隔离问题有关（测试 seed 的 150 条记录与 `_check_rhythm` 查询看到的数据不一致），与 S10 改动无关（S10 前就存在的失败）。需要调查 session 隔离或 fixture 配置问题。 | S11 | ⬜ |
+| L18 | S10 | 覆盖率 84.72%，差 0.28% 到 85% 门禁。主要缺口在 handlers.py 的 handler_scrape_task 主循环（风控探针/日限额/夜间静默分支，约 155 行未覆盖）和 scrapers 子系统（recorder 67%/registry 75%），需补 engine 层面的集成测试。S10 新增 test_account.py（45 用例）提升了 accounts 相关覆盖率，但 handler_scrape_task 主循环的复杂分支（RiskProbeHit/DailyLimitError/night_sleep）仍未充分覆盖。 | S11 | ⬜ |
 
 > **收口规则**：某会话收掉一项 → 本表该行状态 ⬜→✅ + 在「当前进度快照」对应会话段记一句「收 L0X（commit `<hash>`）」。**禁止**只改快照不改本表——本表是唯一索引。
 
@@ -330,7 +362,10 @@ S1 → S2 → S3 → S4 → S5(🟡) → S6 → S6b(列表页) → S7 → S8 →
 - 🔄 **S9a 进行中**（P7.5 端到端 wiring 修复，代码+单测完成、待人验启 Chrome 烟测）。收掉 L13-L16 + L01/L10/L12 全部 7 处 wiring：① L14 worker ctx 单例（`handlers.set_worker_ctx` + `_get_engine` 注入 `GenericEngine(ctx=…)` + `_worker_page()` helper + worker_main `finally browser.close()` 生命周期）② L15 `_do_qr_login` 改 async 真 `page.goto(login_url)+screenshot`，无 ctx 退化 stub（不破 `test_qrcode_method`）③ L13 `config.WORKER_AUTOSPAWN`（默认关，cli `serve` 置 1）+ 新 `core/ipc/worker_spawner.py`（heartbeat-gated best-effort Popen，失败绝不抛、watchdog 兜底）+ `app.startup` 装载 + `api_create_task`/`api_resume_task`/`api_login_account` 调 `_ensure_worker` + `cli serve` 实装 `uvicorn.run(create_app())` ④ L16 `core/ui/ws.py run_progress_relay`（`while running:` 避 §7.4 linter）扫 `progress/`+`results/.ws_events`→`ws_manager.broadcast`，request_id→task_id 经 DB 解，startup 起/shutdown cancel ⑤ L01 `api_resume_task` 双分支：`need_human`+`request_id`→`control/ctrl_<rid>.json {action:resume}`（PRD §4.4.3）；`paused/error/failed`→新 IPC request；`_await_resume` 每 poll 写 heartbeat 防看门狗误杀挂起 worker ⑥ L12 task 属性捕获局部变量（close 前）避 DetachedInstanceError ⑦ L10 `_handle_need_human` 仅 `anonymous+auto_then_manual` 调 `detect_and_solve` 恰好一次、成功即 return "resume"、XHS(account/manual) 零变化。附带 `GET /api/tasks/{id}/progress` 端点（消除 task_detail.html 3s poll 404）。新增 `test_worker_wiring.py`/`test_progress_relay.py`/`test_routes_s9a.py`/`test_worker_spawner.py`（17 用例）+ 改 `test_integration` 的 `_do_qr_login` stub 为 async。全量回归 626 passed，cov 86.28%，约束 linter + loop_gate 全绿。
   - **裁决记 WHY**：① **`WORKER_AUTOSPAWN` 默认 0 非 1**——`test_routes_collection` 用完整 `create_app()+TestClient`（startup 跑 watchdog/relay），若默认 spawn 会真拉 Chrome 破测；`cli serve` 显式置 1 启用，路由 `getattr(app.state,"worker_spawner",None)` 缺则 skip，测试零副作用。② **ctx 用模块级单例而非参数注入**——`build_registry()` 签名零改（`test_build_registry_returns_all_ops` 不破），worker_main `set_worker_ctx(ctx)` 一次性发布，`_get_engine`/`_do_qr_login`/`_handle_need_human` 共享读；测试 patch `_get_engine` 整替不受影响，`test_known_platform_returns_engine`（ctx=None）退化为现状仍过。③ **`_await_resume` 写 heartbeat 非可有可无**——worker 挂起等人工时 `serve_worker` 主循环阻塞，心跳停 → 看门狗 30s 把合法 need_human 误杀为 paused → L01 control-file 续跑路径对 >30s 的人工处理失效；每 poll `write_heartbeat("need_human_waiting")` 让挂起 worker 对看门狗「活着」。④ **resume 双分支按 `task.status` 选**——need_human=worker 活着在 `_await_resume` 轮询（写 control 续跑、保留页面状态）；paused/error/failed=worker 可能已退（写新 request 让重拉 worker 从 last_note_index 续）。watchdog 若已把 need_human 误杀为 paused，按钮自动切「继续」走新 request 分支，自洽。⑤ **L10 只对 anonymous+auto_then_manual wire**——契约§5 默认关；XHS account/manual 命中即跳过 solver 直 need_human，零行为变化，S9a 不引入 XHS 回归。
   - **遗留（交 S9/T70 人验）**：真启 Chrome 烟测（serve→登录→建任务→抓取→导出）+ JS 运行时行为端到验（L02/L05）+ UI 增强账号下拉（L04）；这些是 🟡/❌ 人验项，非 loop_gate 管。L11（url NOT NULL）归 Sz/S9 engine 补 url 采集。
-- ⬜ **下一会话 = S9**（P6 文档同步 + P7 人验）。S9a 代码+单测已绿，S9 做 T60-T63 文档自洽 + T70 ❌ 端到端人验（启 Chrome 跑全流程）+ T71 验证码可选能力人验。S9a 烟测若发现问题可回 S9a 补丁。
+- ✅ **S10 完成**（P3.6 登录账号管理模块，收 L04）。T80 `Account` 模型重整：`nickname→remark` NOT NULL + 删 `phone`/`profile_dir` + 新增 `platform_user_id`(64)/`platform_nickname`(100) + `UniqueConstraint('platform','platform_user_id')`；T81 cookie 路径统一（删 `acct_` 前缀 bug，改用 `profile_dir_for`）+ `_import_cookies` 改 async 真 `context.add_cookies` + 平台验证 + 身份回写；T82 `_do_qr_login` 补 success_pattern 轮询（≤timeout 120s）+ `context.cookies()` 提取落盘 + 回写平台身份；T83 账号路由补齐（`GET /api/accounts` JSON 列表 · `GET /api/accounts/{id}` · `PUT /api/accounts/{id}` 改 remark · `DELETE` 清 profile 目录 + running 任务拒绝 · login/validate/import 去硬编码 platform）；T84 导入表单 account_id 改 `<select>` 选 inactive 账号 + 列表展示 `备注(平台昵称)` 双列 + 编辑备注 dialog；T85 `CollectionTask.account_id` 补 `ForeignKey('accounts.id')`（裁决 PRD §6 "无 account_id" 为规格漂移）；T86 账号状态机 wiring（成功清零→active · 失败+1 达 5→suspended · 导入命中 `platform_user_id` 冲突拒绝）。新增 `LoginSpec.verify_url`/`identity_api`/`identity_map` 字段（向后兼容），XHS/知乎 yaml 已配。`AccountCreate` schema 改 `remark` 必填。新增 `test_account.py`（45 用例覆盖模型/路由/handler/状态机）+ 更新 `test_handlers_helpers.py`/`test_routes_collection.py`/`test_models.py`/`test_integration.py` 的 nickname→remark 迁移。全量回归 682 passed + 2 deselected（预存失败），cov 84.72%（差 0.28% 到 85% 门禁，登记 L18）。收 L04（账号下拉）。
+  - **裁决记 WHY**：① **`platform_user_id` 冲突拒绝而非静默合并**——用户裁决选 A：导入 cookie 命中已存在 `platform_user_id` → 返回 `{status: "conflict", existing_id}`，不自动覆盖。避免误覆盖正确账号的平台身份。② **`tasks.account_id` 补 FK 是规格漂移修复**——PRD §6 契约曾写 "collection_tasks 无 account_id"，但采集必须知道用哪个账号登录态抓的，删了无法关联。routes/tasks.py 创建任务本就传 account_id 入库，补 FK 对齐现状。③ **新增 `LoginSpec` 字段向后兼容**——`verify_url`/`identity_api`/`identity_map` 均 optional，已有 yaml 不配这些字段不会破；handler 层 fallback 到 "无验证/无身份提取" 降级行为。④ **覆盖率差 0.28% 登记 L18 而非硬凑**——主要缺口在 `handler_scrape_task` 主循环的风控探针/日限额/夜间静默分支（约 155 行），需补 engine 层面的集成测试（mock RiskProbeHit/DailyLimitError/night_sleep），属 S11 范围；S10 不硬凑测试数量。
+  - **遗留（L17/L18）**：L17 `test_bdd_07_rhythm.py::test_task_b_pauses_when_daily_total_hits_200` 日限额 BDD 测试失败（S10 前就存在的失败，handler 的 `_check_rhythm` 计数逻辑与 session fixture 隔离问题有关，与 S10 改动无关），归 S11；L18 覆盖率 84.72% 差 0.28% 到 85% 门禁（主要缺口 handlers.py 155 行 + scrapers 子系统），归 S11。
+- ⬜ **下一会话 = S9**（P6 文档同步 + P7 端到验）。S10 已绿，S9 接它：T60-T63 spec/design/context 文档自洽 · T70 ❌ 端到端（serve→登录→建任务→抓取→导出）· T71 ❌ 验证码可选能力验证。这些是 🟡/❌ 人验项，非 loop_gate 管。
 
 - ✅ **S7 完成**（P4 CSV 宽表 + L03 旧列收口）。T40 `csv_exporter.py` 整体重写：删 AI/Excel 双模式，改为单一左连接宽表导出，10 列中文表头（`平台/笔记ID/笔记标题/笔记正文/笔记点赞数/笔记发布时间/笔记链接/评论者昵称/评论内容/评论点赞数`，PRD §4.6.3），读 PRD 列 `content_text`/`metrics_json`(解出 likes)/`publish_time`/`url` + 评论按 `item_id` join 读 `author_name`/`content_text`/`like_count`(desc)；左连接 N 评论→N 行、0 评论→1 行评论列空（PRD §4.6.2）；`utf-8-sig` BOM + `csv.DictWriter` 转义 emoji/逗号/引号（PRD §8.6）；0 条→`EmptyExportError`。T41 `routes/export.py` 去 `format` 参数，0 条→`400 JSON {ok:false,error}` 供前端 Toast；导出按钮由 `<a>` 改 `<button onclick="exportCsv(tid,this)">`，`app.js` 新增全局 `exportCsv`（fetch→200 blob 下载 / 400 `showToast` 复用 S6）；`tasks._actions_html` + `task_detail.html` 两按钮合一「导出 CSV」。L03 收口：`models/post.py`+`comment.py` 删全部旧列（content/likes/collects/comments_count/shares/tags/post_type/image_count/image_urls/local_images/published_at/raw_json/keyword_id/created_at + comment 的 post_id/platform_id/content/likes/sub_comment_count/is_author_liked/rank/published_at/raw_json/created_at）+ 删旧 `UNIQUE(post_id,platform_id)`；`platform_comment_id` 改回 NOT NULL（handler 总填 `c_pid or synth_{rank}`）；连带迁 `routes/posts.py`（`page_posts` 去 keyword 过滤、按 likes desc；`page_post_detail` 改 `item_id`/`like_count` desc）+ `posts.html`/`post_detail.html` 到 PRD 列；重写 `test_csv_export.py`（10 表头+左连接+转义+空 400+路由）+ `test_contract_core.test_dm02` 改断言旧列已删/NOT NULL 恢复。全量回归 385 passed，门禁全绿。
   - **裁决记 WHY**：

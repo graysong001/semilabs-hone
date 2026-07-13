@@ -36,9 +36,9 @@ def _fake_ipc(monkeypatch):
     monkeypatch.setattr(acc, "_ipc_client", lambda: (_FakeClient, IPCRequest))
 
 
-def _seed_account(db_session, *, platform="xiaohongshu", nickname="acc"):
+def _seed_account(db_session, *, platform="xiaohongshu", remark="acc"):
     from semilabs_hone.core.models.account import Account
-    a = Account(platform=platform, nickname=nickname)
+    a = Account(platform=platform, remark=remark)
     db_session.add(a); db_session.commit()
     return a.id
 
@@ -52,7 +52,7 @@ class TestAccountsRoutes:
 
     def test_create_account_redirects(self, client):
         resp = client.post("/api/accounts",
-                           data={"platform": "xiaohongshu", "nickname": "n1"},
+                           data={"platform": "xiaohongshu", "remark": "n1"},
                            follow_redirects=False)
         assert resp.status_code == 303
 
@@ -81,19 +81,21 @@ class TestAccountsRoutes:
         aid = _seed_account(db_session)
         resp = client.post(
             "/api/accounts/import-cookies",
-            data={"account_id": aid, "cookies": '[{"name":"sid"}]'},
-            follow_redirects=False)
-        assert resp.status_code == 303
+            data={"account_id": aid, "cookies": '[{"name":"sid"}]'})
+        # [契约变更 2026-07-13 S10] import-cookies 改 JSON 响应（支持 conflict）
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert "request_id" in body
 
     def test_import_cookies_invalid_json(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
         aid = _seed_account(db_session)
         resp = client.post(
             "/api/accounts/import-cookies",
-            data={"account_id": aid, "cookies": "not json"},
-            follow_redirects=False)
-        # Invalid JSON → empty cookies list, still submitted → redirect.
-        assert resp.status_code == 303
+            data={"account_id": aid, "cookies": "not json"})
+        # Invalid JSON → 400（不再静默吞掉成 303）
+        assert resp.status_code == 400
 
     def test_validate_account_submits_ipc(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)

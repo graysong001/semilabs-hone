@@ -32,7 +32,7 @@ def _metrics_of(item) -> dict:
 def _comments_fragment(item_id: str) -> str:
     """Render the master-detail child row (PRD §5.4.2).
 
-    Returns `<tr id="detail-<id>"><td colspan="7">…评论子表…</td></tr>` inserted
+    Returns `<tr id="detail-<id>"><td colspan="6">…评论子表…</td></tr>` inserted
     after the clicked main row (hx-swap=afterend). 0 评论 → 置灰文案。
     """
     from semilabs_hone.core.models.db import get_session
@@ -54,14 +54,12 @@ def _comments_fragment(item_id: str) -> str:
     t = _templates()
     assert t is not None, "Templates not initialized"
 
-    if not comments:
-        return t.env.get_template("partials/_comments.html").render(
-            item_id=item_id, comments=[], empty=True
-        )
-
-    return t.env.get_template("partials/_comments.html").render(
-        item_id=item_id, comments=comments, empty=False
+    content = t.env.get_template("partials/_comments.html").render(
+        item_id=item_id, comments=comments, empty=len(comments) == 0
     )
+
+    # 返回 `<tr>` 包裹的评论内容，用于表格插入
+    return f'<tr id="detail-{item_id}"><td colspan="6">{content}</td></tr>'
 
 
 @router.get("/api/items/{item_id}/comments")

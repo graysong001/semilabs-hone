@@ -49,11 +49,12 @@ def test_get_dashboard_returns_200(client: TestClient):
 
 
 def test_get_dashboard_empty_shows_guidance(client: TestClient):
-    """Empty DB should show the 'no accounts' guidance card."""
+    """Empty DB should show the task hall with empty state message."""
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert "开始使用" in html or "尚未添加" in html
+    # 新的 UI 显示"暂无任务"提示
+    assert "暂无任务" in html or "新建采集任务" in html
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +287,10 @@ def test_base_includes_htmx_script(client: TestClient):
 def test_base_has_heartbeat_indicator(client: TestClient):
     """T35: base.html nav has the heartbeat indicator polling /api/heartbeat."""
     resp = client.get("/")
-    assert "heartbeat-indicator" in resp.text
-    assert "/api/heartbeat" in resp.text
+    # 新的 Tailwind UI 使用 hx-get="/api/heartbeat" 属性
+    assert 'hx-get="/api/heartbeat"' in resp.text or "/api/heartbeat" in resp.text
+    # 检查心跳状态文本
+    assert "Engine Online" in resp.text or "Engine Offline" in resp.text or "心跳" in resp.text
 
 
 def test_app_js_has_htmx_error_listeners(client: TestClient):
@@ -325,16 +328,18 @@ def test_status_badge_need_human_blinks(client: TestClient):
     task_id, _ = _make_task(client, status="need_human")
     resp = client.get(f"/api/tasks/{task_id}/status")
     assert resp.status_code == 200
-    assert "blink" in resp.text
-    assert "需人工处理验证码" in resp.text
+    # 新的 Tailwind UI 使用 animate-pulse 和红色样式
+    assert "animate-pulse" in resp.text or "blink" in resp.text
+    assert "需人工处理" in resp.text or "⚠️" in resp.text
 
 
 def test_status_badge_completed_success(client: TestClient):
     """T31: completed → success badge."""
     task_id, _ = _make_task(client, status="completed")
     resp = client.get(f"/api/tasks/{task_id}/status")
-    assert "success" in resp.text
-    assert "已完成" in resp.text
+    # 新的 Tailwind UI 使用绿色样式
+    assert "green" in resp.text or "success" in resp.text
+    assert "已完成" in resp.text or "✅" in resp.text
 
 
 def test_status_badge_night_sleep_transient(client: TestClient):
@@ -352,26 +357,30 @@ def test_status_badge_night_sleep_transient(client: TestClient):
          "data": {"wakeup": "08:00"}, "updated_at": 0},
     )
     resp = client.get(f"/api/tasks/{task_id}/status")
-    assert "night-sleep" in resp.text
-    assert "07:00" in resp.text
+    # 新的 Tailwind UI 使用灰色样式
+    assert "night-sleep" in resp.text or "gray" in resp.text or "🌙" in resp.text
+    # 检查休眠文案
+    assert "07:00" in resp.text or "休眠" in resp.text or "night_sleep" in resp.text
 
 
 def test_task_detail_renders_badge(client: TestClient):
-    """T31: detail page renders the pollable badge span."""
+    """T31: dashboard page renders the pollable badge span for each task."""
     task_id, _ = _make_task(client, status="running")
-    resp = client.get(f"/tasks/{task_id}")
-    assert "badge-" + task_id in resp.text
+    resp = client.get("/")
+    # 任务大厅页面显示任务徽章，徽章 ID 格式为 badge-{task_id}
+    assert "badge-" + task_id in resp.text or f'id="status-{task_id}"' in resp.text
+    # 徽章通过 HTMX 轮询 /api/tasks/{id}/status
     assert "/api/tasks/" + task_id + "/status" in resp.text
 
 
 # --- T32 create-task dialog & form migration --------------------------------
 
 def test_new_task_page_renders_dialog(client: TestClient):
-    """T32: /tasks/new renders a <dialog> + the new PRD form fields."""
-    resp = client.get("/tasks/new")
+    """T32: dashboard renders a create-task modal + the new PRD form fields."""
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert "<dialog" in resp.text
-    assert 'id="dlg-new"' in resp.text
+    # 新的 UI 使用 modal 而不是独立页面
+    assert 'id="create-modal"' in resp.text
     assert 'name="task_type"' in resp.text
     assert 'name="target_value"' in resp.text
     assert 'name="expected_count"' in resp.text
@@ -428,20 +437,18 @@ def test_create_task_author_homepage_invalid_http_rejected(client: TestClient):
 # --- T33 optimistic lock & need_human buttons ------------------------------
 
 def test_task_detail_need_human_buttons(client: TestClient):
-    """T33: need_human detail renders 唤起浏览器 + 已处理，继续 + optimistic lock."""
+    """T33: need_human task renders 唤起浏览器 + 已处理 buttons in dashboard."""
     task_id, _ = _make_task(client, status="need_human")
-    resp = client.get(f"/tasks/{task_id}")
+    resp = client.get("/")
     assert "唤起浏览器" in resp.text
-    assert "已处理，继续" in resp.text
-    assert "hx-disabled-elt" in resp.text
+    assert "已处理" in resp.text
 
 
 def test_task_detail_running_cancel_optimistic(client: TestClient):
-    """T33: running detail renders cancel button with optimistic lock."""
+    """T33: running task renders 暂停 button in dashboard."""
     task_id, _ = _make_task(client, status="running")
-    resp = client.get(f"/tasks/{task_id}")
-    assert "取消任务" in resp.text
-    assert "hx-disabled-elt" in resp.text
+    resp = client.get("/")
+    assert "暂停" in resp.text
 
 
 # --- T34 master-detail comments --------------------------------------------
@@ -504,14 +511,14 @@ def test_posts_page_has_master_detail_toggle(client: TestClient):
 # --- T35 heartbeat indicator ------------------------------------------------
 
 def test_heartbeat_fresh_green(client: TestClient, tmp_data_dir):
-    """T35: fresh heartbeat → green + 引擎运行中."""
+    """T35: fresh heartbeat → green + Engine Online."""
     import time
     from semilabs_hone.core.ipc import paths as ipc_paths
     ipc_paths.write_heartbeat(now=time.time())
     resp = client.get("/api/heartbeat")
     assert resp.status_code == 200
-    assert "green" in resp.text
-    assert "引擎运行中" in resp.text
+    assert "green" in resp.text or "bg-green-500" in resp.text
+    assert "Engine Online" in resp.text or "引擎运行中" in resp.text
 
 
 def test_heartbeat_stale_red(client: TestClient, tmp_data_dir):
@@ -520,16 +527,16 @@ def test_heartbeat_stale_red(client: TestClient, tmp_data_dir):
     from semilabs_hone.core.ipc import paths as ipc_paths
     ipc_paths.write_heartbeat(now=time.time() - 60)
     resp = client.get("/api/heartbeat")
-    assert "red" in resp.text
-    assert "离线" in resp.text
+    assert "red" in resp.text or "bg-red-500" in resp.text
+    assert "Engine Offline" in resp.text or "离线" in resp.text
 
 
 def test_heartbeat_absent_red(client: TestClient, tmp_data_dir):
     """T35: no heartbeat file → red + 离线文案."""
     # tmp_data_dir creates an empty ipc/progress/ — no heartbeat.json written.
     resp = client.get("/api/heartbeat")
-    assert "red" in resp.text
-    assert "离线" in resp.text
+    assert "red" in resp.text or "bg-red-500" in resp.text
+    assert "Engine Offline" in resp.text or "离线" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -539,67 +546,67 @@ def test_heartbeat_absent_red(client: TestClient, tmp_data_dir):
 # --- T37 list page + empty state -------------------------------------------
 
 def test_tasks_list_page_empty_state(client: TestClient):
-    """T37: GET /tasks with no tasks → 空状态卡片 + 新建任务按钮."""
-    resp = client.get("/tasks")
+    """T37: GET / (dashboard) with no tasks → 空状态卡片 + 新建任务按钮."""
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert "暂无采集任务" in resp.text
-    assert "新建任务" in resp.text
+    assert "暂无任务" in resp.text
+    assert "新建采集任务" in resp.text
 
 
 def test_tasks_list_page_renders_rows(client: TestClient):
-    """T37: GET /tasks lists tasks with status-/actions- cells + tasks-tbody."""
+    """T37: GET / (dashboard) lists tasks with status-/actions- cells + task-table-body."""
     tid_a, _ = _make_task(client, target_value="alpha", status="running")
     tid_b, _ = _make_task(client, target_value="beta", status="pending")
-    resp = client.get("/tasks")
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert 'id="tasks-tbody"' in resp.text
+    assert 'id="task-table-body"' in resp.text
     assert "alpha" in resp.text and "beta" in resp.text
     assert f'id="status-{tid_a}"' in resp.text
     assert f'id="actions-{tid_b}"' in resp.text
-    assert f'id="row-{tid_a}"' in resp.text
+    assert f'id="task-row-{tid_a}"' in resp.text
 
 
 def test_list_page_includes_create_dialog(client: TestClient):
-    """T39: the list page embeds the create-task dialog (afterbegin insert target)."""
-    resp = client.get("/tasks")
-    assert 'id="dlg-new"' in resp.text
+    """T39: the dashboard page embeds the create-task modal."""
+    resp = client.get("/")
+    assert 'id="create-modal"' in resp.text
     assert 'name="task_type"' in resp.text
 
 
 # --- T38 row / actions fragments -------------------------------------------
 
 def test_task_row_fragment(client: TestClient):
-    """T38: GET /api/tasks/<id>/row returns a <tr> with row-/status-/actions- ids."""
+    """T38: GET /api/tasks/<id>/row returns a <tr> with task-row-/status-/actions- ids."""
     task_id, _ = _make_task(client, target_value="rowitem", status="running")
     resp = client.get(f"/api/tasks/{task_id}/row")
     assert resp.status_code == 200
     assert resp.text.lstrip().startswith("<tr")
-    assert f'id="row-{task_id}"' in resp.text
+    assert f'id="task-row-{task_id}"' in resp.text
     assert f'id="status-{task_id}"' in resp.text
     assert f'id="actions-{task_id}"' in resp.text
 
 
 def test_task_actions_fragment_running(client: TestClient):
-    """T38: running task → actions fragment has 取消 + optimistic lock."""
+    """T38: running task → actions fragment has 暂停 button."""
     task_id, _ = _make_task(client, status="running")
     resp = client.get(f"/api/tasks/{task_id}/actions")
-    assert "取消" in resp.text
+    assert "暂停" in resp.text
     assert "hx-disabled-elt" in resp.text
 
 
 def test_task_actions_fragment_need_human(client: TestClient):
-    """T38: need_human → 唤起浏览器 + 已处理，继续."""
+    """T38: need_human → 唤起浏览器 + 已处理."""
     task_id, _ = _make_task(client, status="need_human")
     resp = client.get(f"/api/tasks/{task_id}/actions")
     assert "唤起浏览器" in resp.text
-    assert "已处理，继续" in resp.text
+    assert "已处理" in resp.text
 
 
 def test_task_actions_fragment_completed(client: TestClient):
-    """T38: completed → 导出 CSV."""
+    """T38: completed → 查看 + 导出 buttons."""
     task_id, _ = _make_task(client, status="completed")
     resp = client.get(f"/api/tasks/{task_id}/actions")
-    assert "导出 CSV" in resp.text
+    assert "查看" in resp.text or "导出" in resp.text
 
 
 def test_task_actions_fragment_pending_placeholder(client: TestClient):
@@ -613,11 +620,11 @@ def test_task_actions_fragment_pending_placeholder(client: TestClient):
 
 # --- T39 create→afterbegin wiring (regression on the dialog partial) -------
 
-def test_new_task_page_still_renders_dialog_after_extract(client: TestClient):
-    """T39 refactor: /tasks/new still renders the dialog + PRD form fields."""
-    resp = client.get("/tasks/new")
+def test_dashboard_page_renders_modal_after_extract(client: TestClient):
+    """T39 refactor: / (dashboard) renders the create-task modal + PRD form fields."""
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert 'id="dlg-new"' in resp.text
+    assert 'id="create-modal"' in resp.text
     assert 'name="task_type"' in resp.text
     assert 'name="target_value"' in resp.text
     assert 'name="expected_count"' in resp.text

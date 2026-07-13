@@ -217,7 +217,7 @@ class TestHandlerScrapeTask:
 
         # Create account
         from semilabs_hone.core.models.account import Account
-        acct = Account(platform="xiaohongshu", nickname="test")
+        acct = Account(platform="xiaohongshu", remark="test")
         db_session.add(acct)
         db_session.commit()
 
@@ -687,7 +687,7 @@ class TestRoutesAccounts:
 
         resp = client.post(
             "/api/accounts",
-            data={"platform": "xiaohongshu", "nickname": "test_account"},
+            data={"platform": "xiaohongshu", "remark": "test_account"},
             follow_redirects=False,
         )
         assert resp.status_code in (200, 303, 307)

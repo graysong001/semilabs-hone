@@ -737,3 +737,177 @@ document.getElementById('select-all')?.addEventListener('change', function() {
 └── （Tailwind CSS 通过 CDN 引入，无需本地 CSS 文件）
 ```
 ---
+## 十三、平台登录配置页 (`/accounts`)
+> 侧边栏「素材抓取 → 平台登录配置」入口，对应路由 `GET /accounts`（`active_page: "auth"`）。这是采集的全流程起点：任何采集任务必须挂在一个已登录的账号壳上。本节定义账号管理的**数据模型**、**交互流程**、**管理操作**。
+
+### 13.1 概念模型（三个标识的区分）
+| 标识 | 含义 | 来源 |
+|---|---|---|
+| `account_id` | 系统内部自增主键 | 添加账号时系统生成 |
+| `platform_user_id` | 平台侧真实用户ID（小红书 user_id 等） | 从 cookie / 扫码成功后提取 |
+| `remark`（账号备注） | 用户手填的备注标签，**必填** | 添加账号表单 |
+| `platform_nickname` | 平台显示的真实昵称 | 导入/登录时自动提取，不可手改 |
+| `platform_id` | 采集到的笔记/评论平台ID，用于去重 | 与账号无关 |
+
+> **账号备注与平台昵称是两个用途**：前者是用户自己认账号的别名（"我的小号A"），后者是平台显示的真实昵称。列表展示 `备注 (平台昵称)` 最清楚。账号备注 NOT NULL；`platform_user_id` 通过 `UNIQUE(platform, platform_user_id)` 去重，防止重复导入同一 cookie 建出重复账号。
+
+### 13.2 数据模型（`accounts` 表增强）
+| 字段 | 类型 | 说明 | 处置 |
+|---|---|---|---|
+| `id` | Integer PK | 内部自增主键 | 保留 |
+| `platform` | String(20) | 平台名 | 保留 |
+| `remark` | String(100) NOT NULL | 账号备注（原 `nickname` 改名+加约束） | **改名+NOT NULL** |
+| `platform_user_id` | String(64) nullable | 平台真实用户ID | **新增** |
+| `platform_nickname` | String(100) nullable | 平台真实昵称 | **新增** |
+| `login_method` | String(20) | `qrcode` / `cookie_import` | 保留 |
+| `color_scheme`/`timezone`/`locale`/`viewport_w`/`viewport_h` | — | 一账号一固定指纹（spec §4.1+§7.2 反检测设计） | 保留 |
+| `status` | String(20) | `inactive`/`active`/`suspended`/`banned` | 保留 |
+| `last_login_at`/`last_scrape_at` | DateTime | 最后登录/采集时间 | 保留 |
+| `fail_count` | Integer | 连续失败计数，成功清零，达 5 → suspended | 保留 |
+| `daily_scrape_count`/`total_scrape_count` | Integer | 计数（注：S8 已改用 SQLite COUNT 当日入库） | 保留 |
+| `notes`/时间戳 | — | 备注与时间戳 | 保留 |
+| ~~`phone`~~ | — | 全代码无引用 | **删** |
+| ~~`profile_dir`~~ | — | 用 `profile_dir_for(account_id)` 动态算，不入库 | **删** |
+
+**约束变更**：
+- 新增 `UNIQUE(platform, platform_user_id)`（`platform_user_id` 为空时不参与唯一约束，允许未登录的空壳并存）
+- `remark` NOT NULL
+
+**关系**：
+```
+accounts (1) ──FK──→ (N) collection_tasks   [task.account_id 补 ForeignKey，采集任务明确绑定账号]
+```
+> PRD §6 契约曾写"collection_tasks 无 account_id"，但采集必须知道用哪个账号登录态抓的 → 裁决**补 FK 对齐现状**，PRD 那条是规格漂移。
+
+**Cookie 存储（文件，非 DB）**：`data/collection/profiles/{account_id}/cookies.json`，Playwright `add_cookies` 接受的 `[{name,value,domain,path,...}]`。与 Chrome profile 同目录（Chrome 用 `--user-data-dir=profiles/{account_id}/`）。worker 启动时若 Chrome profile 无登录态则从 `cookies.json` `add_cookies` 注入。
+
+### 13.3 页面布局
+三个区块自上而下：**添加账号** / **导入 Cookie** / **账号列表**。全程 HTMX 局部替换，无整页 reload。
+
+```html
+<!-- templates/accounts.html -->
+{% extends "base.html" %}
+{% block title %}平台登录配置{% endblock %}
+{% block content %}
+<!-- 区块一：添加账号（建空壳） -->
+<div class="bg-app-card rounded-lg border border-gray-700 p-6 mb-6">
+  <h3 class="text-lg font-semibold text-white mb-4">添加账号</h3>
+  <form hx-post="/api/accounts" hx-target="#accounts-list" hx-swap="outerHTML">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      <div>
+        <label class="block text-sm text-gray-300 mb-2">平台 <span class="text-red-400">*</span></label>
+        <select name="platform" class="w-full h-10 px-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200">
+          {% for p in platforms %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-300 mb-2">账号备注 <span class="text-red-400">*</span></label>
+        <input type="text" name="remark" required placeholder="如：小号A" class="w-full h-10 px-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200">
+      </div>
+    </div>
+    <button type="submit" class="px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">添加账号</button>
+  </form>
+</div>
+
+<!-- 区块二：导入 Cookie（快捷登录） -->
+<div class="bg-app-card rounded-lg border border-gray-700 p-6 mb-6">
+  <h3 class="text-lg font-semibold text-white mb-4">导入 Cookie</h3>
+  <form hx-post="/api/accounts/import-cookies" hx-target="#accounts-list" hx-swap="outerHTML">
+    <div class="space-y-4 mb-4">
+      <div>
+        <label class="block text-sm text-gray-300 mb-2">选择账号 <span class="text-red-400">*</span></label>
+        <select name="account_id" required class="w-full h-10 px-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200">
+          <option value="">请选择已添加的账号壳</option>
+          {% for a in accounts if a.status == 'inactive' %}
+          <option value="{{ a.id }}">{{ a.remark }}（#{{ a.id }} · {{ a.platform }}）</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-300 mb-2">Cookie JSON <span class="text-red-400">*</span></label>
+        <textarea name="cookies" rows="3" required placeholder='[{"name":"...","value":"...","domain":"..."}]' class="w-full p-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200 resize-y"></textarea>
+      </div>
+    </div>
+    <button type="submit" class="px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">导入并验证</button>
+  </form>
+</div>
+
+<!-- 区块三：账号列表 -->
+<div id="accounts-list" class="bg-app-card rounded-lg border border-gray-700 overflow-hidden">
+  <div class="px-6 py-4 border-b border-gray-700"><h3 class="text-lg font-semibold text-white">账号列表 ({{ accounts|length }})</h3></div>
+  <table class="w-full">
+    <thead><tr class="bg-black/20 border-b border-gray-700">
+      <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">备注 (平台昵称)</th>
+      <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">平台</th>
+      <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">状态</th>
+      <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">最后登录</th>
+      <th class="px-4 py-3 text-left text-xs text-gray-400 uppercase">操作</th>
+    </tr></thead>
+    <tbody>
+      {% for a in accounts %}
+      <tr class="border-b border-gray-700/50 hover:bg-app-hover">
+        <td class="px-4 py-3 text-sm text-white">{{ a.remark }}
+          {% if a.platform_nickname %}<span class="text-xs text-gray-500 ml-1">({{ a.platform_nickname }})</span>{% endif %}
+        </td>
+        <td class="px-4 py-3">{% include "partials/_platform_badge.html" %}</td>
+        <td class="px-4 py-3">{% include "partials/_account_status_badge.html" %}</td>
+        <td class="px-4 py-3 text-sm text-gray-400">{{ a.last_login_at.strftime('%Y-%m-%d %H:%M') if a.last_login_at else '—' }}</td>
+        <td class="px-4 py-3">
+          <button hx-post="/api/accounts/{{ a.id }}/login" hx-swap="none" class="px-3 py-1 bg-brand/15 text-brand border border-brand/30 rounded text-xs">登录</button>
+          <button hx-post="/api/accounts/{{ a.id }}/validate" hx-swap="none" class="px-3 py-1 bg-green-500/15 text-green-400 border border-green-500/30 rounded text-xs">验证</button>
+          <button hx-get="/api/accounts/{{ a.id }}/edit" class="px-3 py-1 bg-gray-500/15 text-gray-300 border border-gray-500/30 rounded text-xs">编辑备注</button>
+          <button hx-delete="/api/accounts/{{ a.id }}" hx-confirm="确定删除？将同时清除该账号的浏览器配置与Cookie。" class="px-3 py-1 bg-red-500/15 text-red-400 border border-red-500/30 rounded text-xs">删除</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+```
+
+### 13.4 交互流程
+#### 流程 A — 添加账号壳
+1. 用户填 **平台**（下拉）+ **账号备注**（必填）→【添加账号】
+2. 系统：建 `Account` 行（`status=inactive`、`platform_user_id` 为空），返回 `id`
+3. 列表出现一行灰「未激活」——**此时只是空壳**，无登录态、无 cookie、无平台真实身份
+
+#### 流程 B — 扫码登录（路径 1）
+1. 用户在某行点【登录】→ `POST /api/accounts/{id}/login`
+2. 系统：worker 拉起 Chrome → 导航 `login_url` → 截图 QR → WS 广播 `qr_ready`（含截图）→ 前端弹二维码
+3. 用户：手机扫码
+4. 系统：轮询 `success_pattern`（≤120s）→ 成功后 `context.cookies()` 提取 → 落 `cookies.json` + `add_cookies` 注入 → 解析 `platform_user_id`/`platform_nickname` 回写 → `status=active` + `last_login_at`
+5. WS 广播 `login_success` → 列表徽章转绿 + 平台昵称自动填出
+
+#### 流程 C — 导入 Cookie（路径 2，快捷）
+1. 用户在「导入 Cookie」卡片：**选账号**（下拉选已有空壳，非手填数字）+ **cookie JSON**
+2. 点【导入并验证】→ `POST /api/accounts/import-cookies`
+3. 系统：`json.loads` → `add_cookies` 注入 → 用注入的 cookie 请求平台需登录接口验证：
+   - **验证成功** → 提取 `platform_user_id`/`platform_nickname` 回写 → `status=active` + `last_login_at`
+   - **cookie 无效** → 留 `inactive` + `fail_count+1` + Toast 报错
+   - **`platform_user_id` 命中同平台已有账号** → **拒绝**，提示「该平台账号已存在为账号 #N，是否更新它的 cookie」（用户裁决：选 A 拒绝，不静默合并）
+
+### 13.5 管理操作
+| 动作 | 触发 | 系统行为 |
+|---|---|---|
+| 状态徽章 | 列表 5s 轮询 | active 绿脉冲 / inactive 灰 / suspended 红 / banned 深红 |
+| 验证登录态 | 点【验证】 | 加载 cookie → 请求需登录接口 → 刷新 status + fail_count（成功清零，连续 5 次 suspended） |
+| 编辑备注 | 点【编辑备注】→ dialog | `PUT /api/accounts/{id}`，只改 `remark`，不改 `platform_user_id`/`platform_nickname` |
+| 失效检测 | 采集中风控探针命中 URL 跳 `/login` | 任务 `need_human` + 账号 `fail_count+1` + UI 提示唤起扫码 |
+| 重新登录 | need_human 唤起 | 回到流程 B |
+| 删除 | 点【删除】+ 确认 | 清 profile 目录 + cookies.json + DB 行；**若该账号有 running 任务则拒绝删除（先停任务）** |
+| 状态不可手改 | — | active/inactive/suspended/banned 由系统按验证结果/失败计数驱动，用户不能直接切 |
+| 平台身份不可手改 | — | `platform_user_id`/`platform_nickname` 只能由系统从平台提取 |
+
+### 13.6 账号状态机
+```
+inactive ──登录成功/cookie验证通过──→ active
+   ↑                                   │
+   │                              失效检测/验证失败×5
+   │                                   ↓
+   └────────────────── suspended（连续失败达 5 次）
+```
+- 成功（扫码或验证）→ 清零 `fail_count` → `active`
+- 验证失败 → `fail_count+1`，达 5 → `suspended`
+- 无静默续期（PRD 不重试 Login/SessionExpired 异常红线）
+---

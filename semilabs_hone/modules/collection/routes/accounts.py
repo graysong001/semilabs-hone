@@ -1,12 +1,20 @@
 """Account management routes — CRUD + login/validate/import-cookies.
 
-Design: docs/skim_design.md §13.1.
+Design: docs/ui_design_spec_v2.md §十三.
 All long-running ops (login, validate) go through IPC client submit,
 returning {request_id, status} so the frontend can track via WebSocket.
+
+[契约变更 2026-07-13 S10]
+- 建壳：nickname → remark（必填）
+- login/validate/import 三路由 platform 从 Account.platform 读（去硬编码）
+- DELETE 清 profile 目录 + cookies.json + 有 running 任务→拒绝
+- 新增 GET /api/accounts (JSON) / GET /api/accounts/{id} (JSON)
+- 新增 PUT /api/accounts/{id} (改 remark) / GET /api/accounts/{id}/edit (dialog)
+- import-cookies 支持 conflict 响应（命中已存在 platform_user_id → 拒绝提示）
 """
 from __future__ import annotations
 
-import time
+import json
 import uuid
 
 from fastapi import APIRouter, Form, Request
@@ -26,6 +34,11 @@ def _ipc_client():
     from semilabs_hone.core.ipc.client import IPCClient
     from semilabs_hone.core.ipc.protocol import IPCRequest
     return IPCClient, IPCRequest
+
+
+def _get_account_or_404(sess, account_id: int):
+    from semilabs_hone.core.models.account import Account
+    return sess.query(Account).filter(Account.id == account_id).first()
 
 
 # ---------------------------------------------------------------------------
@@ -53,30 +66,158 @@ async def page_accounts(request: Request) -> HTMLResponse:
     assert t is not None, "Templates not initialized"
     return t.TemplateResponse(
         request, "accounts.html",
-        {"accounts": accounts, "platforms": platforms, "active_page": "auth"},
+        {
+            "accounts": accounts,
+            "platforms": platforms,
+            "inactive_accounts": [a for a in accounts if a.status == "inactive"],
+            "active_page": "auth",
+        },
     )
 
 
 # ---------------------------------------------------------------------------
-# API endpoints
+# JSON APIs (供任务创建下拉 / 外部调用)
+# ---------------------------------------------------------------------------
+
+@router.get("/api/accounts")
+async def api_list_accounts() -> JSONResponse:
+    """GET /api/accounts — JSON 列表，供下拉 / 任务创建页选账号（顺手收 L04）。"""
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.account import Account
+
+    sess = get_session()
+    try:
+        accounts = sess.query(Account).order_by(Account.id.desc()).all()
+        out = []
+        for a in accounts:
+            out.append({
+                "id": a.id,
+                "platform": a.platform,
+                "remark": a.remark,
+                "platform_user_id": a.platform_user_id,
+                "platform_nickname": a.platform_nickname,
+                "status": a.status,
+                "last_login_at": a.last_login_at.isoformat() if a.last_login_at else None,
+                "fail_count": a.fail_count,
+            })
+        return JSONResponse(out)
+    finally:
+        sess.close()
+
+
+@router.get("/api/accounts/{account_id}")
+async def api_get_account(account_id: int) -> JSONResponse:
+    """GET /api/accounts/{id} — JSON 详情。"""
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.account import Account
+
+    sess = get_session()
+    try:
+        a = _get_account_or_404(sess, account_id)
+        if a is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        return JSONResponse({
+            "ok": True,
+            "id": a.id,
+            "platform": a.platform,
+            "remark": a.remark,
+            "platform_user_id": a.platform_user_id,
+            "platform_nickname": a.platform_nickname,
+            "status": a.status,
+            "last_login_at": a.last_login_at.isoformat() if a.last_login_at else None,
+            "fail_count": a.fail_count,
+        })
+    finally:
+        sess.close()
+
+
+@router.get("/api/accounts/{account_id}/edit", response_class=HTMLResponse)
+async def api_edit_account_dialog(request: Request, account_id: int) -> HTMLResponse:
+    """GET /api/accounts/{id}/edit — 编辑备注 dialog partial。"""
+    from semilabs_hone.core.models.db import get_session
+
+    sess = get_session()
+    try:
+        a = _get_account_or_404(sess, account_id)
+        if a is None:
+            return HTMLResponse("<p>账号不存在</p>", status_code=404)
+        t = _templates()
+        assert t is not None
+        return t.TemplateResponse(
+            request, "_account_edit_dialog.html",
+            {"account": a},
+        )
+    finally:
+        sess.close()
+
+
+@router.put("/api/accounts/{account_id}")
+async def api_update_account(
+    request: Request,
+    account_id: int,
+    remark: str | None = Form(default=None),
+) -> JSONResponse:
+    """PUT /api/accounts/{id} — 改 remark（仅改备注，不改平台身份）。
+
+    [契约变更 2026-07-13 S10] 用户裁决：platform_user_id/platform_nickname 由系统
+    自动提取，不可手改；只有 remark 是用户可编辑的。
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.account import Account
+
+    # 兼容 JSON body（PUT 表单少用，测试用 JSON 更方便）
+    if remark is None:
+        try:
+            body = await request.json()
+            remark = body.get("remark")
+        except Exception:
+            return JSONResponse({"ok": False, "error": "remark 必填"}, status_code=400)
+
+    if not remark or not remark.strip():
+        return JSONResponse({"ok": False, "error": "remark 必填"}, status_code=400)
+
+    sess = get_session()
+    try:
+        a = _get_account_or_404(sess, account_id)
+        if a is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        a.remark = remark.strip()[:100]
+        sess.commit()
+        return JSONResponse({"ok": True, "id": a.id, "remark": a.remark})
+    except Exception as exc:
+        sess.rollback()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Mutation APIs
 # ---------------------------------------------------------------------------
 
 @router.post("/api/accounts")
 async def api_create_account(
     request: Request,
     platform: str = Form(default="xiaohongshu"),
-    nickname: str = Form(default=""),
+    remark: str = Form(default=""),
+    nickname: str = Form(default=""),  # 兼容旧 form（前端已切 remark）
 ) -> RedirectResponse:
-    """POST /api/accounts — create account, redirect to /accounts."""
+    """POST /api/accounts — 建账号空壳（status=inactive, platform_user_id 空）。
+
+    [契约变更 2026-07-13 S10] remark NOT NULL 必填（用户裁决）。
+    """
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.account import Account
 
+    final_remark = (remark or "").strip() or (nickname or "").strip()
+    if not final_remark:
+        return RedirectResponse(url="/accounts?error=remark_required", status_code=303)
+
     sess = get_session()
     try:
-        acct = Account(platform=platform, nickname=nickname or None)
+        acct = Account(platform=platform, remark=final_remark[:100])
         sess.add(acct)
         sess.commit()
-        acct_id = acct.id
     finally:
         sess.close()
 
@@ -84,19 +225,48 @@ async def api_create_account(
 
 
 @router.delete("/api/accounts/{account_id}")
-async def api_delete_account(account_id: int) -> JSONResponse:
-    """DELETE /api/accounts/{id} — delete account."""
+async def api_delete_account(request: Request, account_id: int) -> JSONResponse:
+    """DELETE /api/accounts/{id} — 删账号。
+
+    [契约变更 2026-07-13 S10]
+    - 有 running 任务挂该账号→拒绝删除（先停任务）
+    - 清 profile 目录 + cookies.json
+    - 删 DB 行
+    """
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.account import Account
+    from semilabs_hone.core.models.task import CollectionTask
 
     sess = get_session()
     try:
-        acct = sess.query(Account).filter(Account.id == account_id).first()
-        if acct:
-            sess.delete(acct)
-            sess.commit()
-            return JSONResponse({"ok": True})
-        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        acct = _get_account_or_404(sess, account_id)
+        if acct is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+
+        # 检查是否有 running 任务挂该账号
+        running_count = sess.query(CollectionTask).filter(
+            CollectionTask.account_id == account_id,
+            CollectionTask.status == "running",
+        ).count()
+        if running_count > 0:
+            return JSONResponse(
+                {"ok": False, "error": f"该账号有 {running_count} 个 running 任务，请先停止"},
+                status_code=409,
+            )
+
+        # 清 profile 目录 + cookies.json
+        try:
+            from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+            import shutil
+            profile_dir = profile_dir_for(account_id)
+            if profile_dir.exists():
+                shutil.rmtree(profile_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        sess.delete(acct)
+        sess.commit()
+        return JSONResponse({"ok": True})
     except Exception as exc:
         sess.rollback()
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
@@ -108,8 +278,20 @@ async def api_delete_account(account_id: int) -> JSONResponse:
 async def api_login_account(request: Request, account_id: int) -> JSONResponse:
     """POST /api/accounts/{id}/login — start login via IPC.
 
+    [契约变更 2026-07-13 S10] platform 从 Account.platform 读（去硬编码）。
     Returns {request_id, status} — frontend tracks via WS.
     """
+    from semilabs_hone.core.models.db import get_session
+
+    sess = get_session()
+    try:
+        acct = _get_account_or_404(sess, account_id)
+        if acct is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        platform = acct.platform
+    finally:
+        sess.close()
+
     IPCClient, IPCRequest = _ipc_client()
     request_id = uuid.uuid4().hex[:12]
 
@@ -118,14 +300,13 @@ async def api_login_account(request: Request, account_id: int) -> JSONResponse:
         module="collection",
         op="login",
         account_id=account_id,
-        payload={"account_id": account_id, "platform": "xiaohongshu", "method": "auto", "request_id": request_id},
+        payload={"account_id": account_id, "platform": platform, "method": "auto", "request_id": request_id},
     )
 
     client = IPCClient()
     client.submit(req)
 
-    # L13: ensure a worker is alive to drive the login flow. No-op when
-    # auto-spawn is off (tests).
+    # L13: ensure a worker is alive to drive the login flow.
     spawner = getattr(request.app.state, "worker_spawner", None)
     if spawner is not None:
         try:
@@ -141,17 +322,40 @@ async def api_import_cookies(
     request: Request,
     account_id: int = Form(default=0),
     cookies: str = Form(default=""),
-) -> RedirectResponse:
-    """POST /api/accounts/import-cookies — import cookies via IPC."""
-    IPCClient, IPCRequest = _ipc_client()
-    request_id = uuid.uuid4().hex[:12]
+) -> JSONResponse:
+    """POST /api/accounts/import-cookies — import cookies via IPC.
 
-    # Parse cookies JSON
-    import json
+    [契约变更 2026-07-13 S10]
+    - platform 从 Account.platform 读（去硬编码）
+    - 命中已存在 platform_user_id → 返回 conflict（不静默合并）
+    - JSON 响应（前端根据 status 展示 Toast 或冲突提示）
+    """
+    from semilabs_hone.core.models.db import get_session
+
+    # 解析 cookies JSON（前置校验，避免 IPC 里再错）
     try:
         cookies_data = json.loads(cookies) if cookies else []
     except json.JSONDecodeError:
-        cookies_data = []
+        return JSONResponse({"ok": False, "error": "Cookie JSON 格式错误"}, status_code=400)
+
+    if not isinstance(cookies_data, list):
+        return JSONResponse({"ok": False, "error": "Cookie 必须是 JSON 数组"}, status_code=400)
+
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "error": "请选择账号"}, status_code=400)
+
+    # 取 platform（从 Account 读）
+    sess = get_session()
+    try:
+        acct = _get_account_or_404(sess, account_id)
+        if acct is None:
+            return JSONResponse({"ok": False, "error": "账号不存在"}, status_code=404)
+        platform = acct.platform
+    finally:
+        sess.close()
+
+    IPCClient, IPCRequest = _ipc_client()
+    request_id = uuid.uuid4().hex[:12]
 
     req = IPCRequest(
         request_id=request_id,
@@ -160,24 +364,46 @@ async def api_import_cookies(
         account_id=account_id,
         payload={
             "account_id": account_id,
-            "platform": "xiaohongshu",
+            "platform": platform,
             "method": "cookie_import",
             "cookies": cookies_data,
+            "request_id": request_id,
         },
     )
 
     client = IPCClient()
-    client.submit(req)
+    result = client.submit(req) or {}
 
-    return RedirectResponse(url="/accounts", status_code=303)
+    # conflict 透传（handler 内部已做 UNIQUE 检查 + 拒绝）
+    if isinstance(result, dict) and result.get("status") == "conflict":
+        return JSONResponse({
+            "ok": False,
+            "status": "conflict",
+            "existing_id": result.get("existing_id"),
+            "error": f"该平台账号已存在为账号 #{result.get('existing_id')}，是否更新它的 cookie？",
+        }, status_code=409)
+
+    return JSONResponse({"request_id": request_id, "status": "submitted", "ok": True})
 
 
 @router.post("/api/accounts/{account_id}/validate")
-async def api_validate_account(account_id: int) -> JSONResponse:
+async def api_validate_account(request: Request, account_id: int) -> JSONResponse:
     """POST /api/accounts/{id}/validate — validate session via IPC.
 
+    [契约变更 2026-07-13 S10] platform 从 Account.platform 读（去硬编码）。
     Returns {request_id, status}.
     """
+    from semilabs_hone.core.models.db import get_session
+
+    sess = get_session()
+    try:
+        acct = _get_account_or_404(sess, account_id)
+        if acct is None:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        platform = acct.platform
+    finally:
+        sess.close()
+
     IPCClient, IPCRequest = _ipc_client()
     request_id = uuid.uuid4().hex[:12]
 
@@ -186,7 +412,7 @@ async def api_validate_account(account_id: int) -> JSONResponse:
         module="collection",
         op="validate",
         account_id=account_id,
-        payload={"account_id": account_id, "platform": "xiaohongshu", "request_id": request_id},
+        payload={"account_id": account_id, "platform": platform, "request_id": request_id},
     )
 
     client = IPCClient()

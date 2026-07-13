@@ -129,7 +129,8 @@ def _actions_html(task) -> str:
     if task.status == "running":
         parts.append(
             f'<button class="text-yellow-400 hover:text-yellow-300" title="暂停" '
-            f'hx-post="/api/tasks/{tid}/pause" hx-target="#actions-{tid}" hx-swap="innerHTML" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
+            f'hx-post="/api/tasks/{tid}/pause" hx-target="#actions-{tid}" hx-swap="innerHTML" '
+            f'hx-disabled-elt="this" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
             f'<svg width="16" height="16" fill="currentColor">'
             f'<rect x="4" y="3" width="3" height="10"/><rect x="11" y="3" width="3" height="10"/>'
             f'</svg></button>'
@@ -151,7 +152,8 @@ def _actions_html(task) -> str:
         # 块1: paused/error/failed → 恢复 (复用 /resume)
         parts.append(
             f'<button class="text-green-400 hover:text-green-300" title="恢复" '
-            f'hx-post="/api/tasks/{tid}/resume" hx-target="#actions-{tid}" hx-swap="innerHTML" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
+            f'hx-post="/api/tasks/{tid}/resume" hx-target="#actions-{tid}" hx-swap="innerHTML" '
+            f'hx-disabled-elt="this" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
             f'<svg width="16" height="16" fill="currentColor"><path d="M5 3l9 5-9 5V3z"/></svg></button>'
         )
     if task.status == "completed":
@@ -234,7 +236,7 @@ async def api_task_row(task_id: str) -> HTMLResponse:
 
     t = _templates()
     assert t is not None, "Templates not initialized"
-    html = t.env.get_template("_task_row.html").render(**_row_context(task))
+    html = t.env.get_template("partials/_task_row.html").render(**_row_context(task))
     return HTMLResponse(html)
 
 

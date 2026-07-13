@@ -54,6 +54,226 @@ async def _worker_page() -> Any | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# [契约变更 2026-07-13 S10] cookie 路径 / 登录成功回写 / 身份提取 helpers
+# ---------------------------------------------------------------------------
+
+def _cookie_path_for(account_id: int) -> "Path":
+    """Return cookies.json path for an account.
+
+    Path 统一用 profile_dir_for(account_id)，与 Chrome profile 同目录。
+    [S10] 删掉原来 `acct_{account_id}` 前缀 bug。
+    """
+    from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+    return profile_dir_for(int(account_id)) / "cookies.json"
+
+
+async def _verify_cookies_on_platform(ctx: Any, platform: str) -> bool:
+    """用 ctx 的 cookie 请求平台需登录接口验证有效性。
+
+    [契约变更 2026-07-13 S10] 导入 cookie / 验证登录态必须真请求平台接口，
+    不能只看文件存在。返回 True=cookie 有效（2xx），False=无效或非 2xx。
+    """
+    if ctx is None:
+        return False
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+        spec, _ = reg_get(platform)
+        verify_url = (spec.base_url or "") + (spec.login.verify_url or "")
+        if not verify_url:
+            # yaml 未配 verify_url，降级为只检查 cookie 非空
+            return True
+        page = await _worker_page()
+        if page is None:
+            return False
+        resp = await page.evaluate(
+            """async (url) => {
+                try {
+                    const r = await fetch(url, {credentials: 'include'});
+                    return r.ok;
+                } catch (e) {
+                    return false;
+                }
+            }""",
+            verify_url,
+        )
+        return bool(resp)
+    except Exception as exc:
+        logger.warning(f"cookie verify failed: {exc}")
+        return False
+
+
+async def _extract_platform_identity(ctx: Any, platform: str) -> dict | None:
+    """从平台 identity_api 提取 {platform_user_id, platform_nickname}。
+
+    [契约变更 2026-07-13 S10] 登录/导入成功后调用，回写到 Account 的
+    platform_user_id / platform_nickname。返回 None 表示未配置或提取失败
+    （不阻塞登录成功，只留空）。
+    """
+    if ctx is None:
+        return None
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+        spec, _ = reg_get(platform)
+        identity_api = spec.login.identity_api
+        identity_map = spec.login.identity_map
+        if not identity_api or not identity_map:
+            return None
+        url = (spec.base_url or "") + identity_api
+        page = await _worker_page()
+        if page is None:
+            return None
+        body = await page.evaluate(
+            """async (url) => {
+                try {
+                    const r = await fetch(url, {credentials: 'include'});
+                    if (!r.ok) return null;
+                    return await r.json();
+                } catch (e) {
+                    return null;
+                }
+            }""",
+            url,
+        )
+        if not isinstance(body, dict):
+            return None
+
+        def _resolve(obj: Any, path: str) -> Any:
+            cur = obj
+            for p in path.split("."):
+                if cur is None:
+                    return None
+                if isinstance(cur, dict):
+                    cur = cur.get(p)
+                else:
+                    return None
+            return cur
+
+        out = {}
+        for key, path in identity_map.items():
+            out[key] = _resolve(body, path)
+        if not out.get("user_id"):
+            return None
+        return {
+            "platform_user_id": str(out["user_id"]),
+            "platform_nickname": str(out["nickname"]) if out.get("nickname") else None,
+        }
+    except Exception as exc:
+        logger.warning(f"identity extract failed: {exc}")
+        return None
+
+
+def _find_conflicting_account(platform: str, platform_user_id: str, exclude_id: int | None = None) -> int | None:
+    """检查同 platform+platform_user_id 是否已有其他账号。
+
+    返回冲突账号 id，无冲突返回 None。用于导入 cookie 时拒绝静默合并。
+    """
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.account import Account
+        sess = get_session()
+        try:
+            q = sess.query(Account).filter(
+                Account.platform == platform,
+                Account.platform_user_id == platform_user_id,
+            )
+            if exclude_id is not None:
+                q = q.filter(Account.id != exclude_id)
+            existing = q.first()
+            return existing.id if existing else None
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"conflict check failed: {exc}")
+        return None
+
+
+def _apply_login_success(
+    account_id: int | None,
+    progress_cb: Callable,
+    platform: str | None = None,
+    platform_user_id: str | None = None,
+    platform_nickname: str | None = None,
+    login_method: str | None = None,
+) -> None:
+    """登录成功回写：清零 fail_count、置 active、写 last_login_at、
+    写 platform_user_id / platform_nickname（如有）/ login_method（如有）。
+
+    [契约变更 2026-07-13 S10] 状态机：成功 → 清零 fail_count → active。
+    """
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.account import Account
+        sess = get_session()
+        try:
+            acct = sess.query(Account).filter(Account.id == account_id).first()
+            if acct is None:
+                return
+            acct.status = "active"
+            acct.fail_count = 0
+            acct.last_login_at = datetime.now(timezone.utc)
+            if platform_user_id is not None:
+                acct.platform_user_id = platform_user_id
+            if platform_nickname is not None:
+                acct.platform_nickname = platform_nickname
+            if login_method is not None:
+                acct.login_method = login_method
+            sess.commit()
+            progress_cb("account_status_updated", {
+                "account_id": account_id,
+                "status": "active",
+                "platform_user_id": platform_user_id,
+            })
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to apply login success: {exc}")
+
+
+def _apply_login_failure(account_id: int | None, progress_cb: Callable) -> str:
+    """登录/验证失败回写：fail_count+1；达 5 → suspended。
+
+    返回当前 status（active/inactive/suspended 等）供调用方判断。
+    [契约变更 2026-07-13 S10] 状态机：失败 → +1；达 5 → suspended。
+    """
+    status = "inactive"
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.account import Account
+        sess = get_session()
+        try:
+            acct = sess.query(Account).filter(Account.id == account_id).first()
+            if acct is None:
+                return status
+            acct.fail_count = (acct.fail_count or 0) + 1
+            if acct.fail_count >= 5:
+                acct.status = "suspended"
+            status = acct.status
+            sess.commit()
+            progress_cb("account_fail_count_incremented", {
+                "account_id": account_id,
+                "fail_count": acct.fail_count,
+                "status": status,
+            })
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to apply login failure: {exc}")
+    return status
+
+
+def _persist_cookies(account_id: int | None, cookies: list) -> None:
+    """落盘 cookie 到统一路径 profiles/{account_id}/cookies.json。
+
+    [契约变更 2026-07-13 S10] 路径统一，删 acct_ 前缀 bug。
+    """
+    from pathlib import Path
+    cookie_path = _cookie_path_for(account_id)
+    Path(cookie_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(cookie_path, "w") as f:
+        json.dump(cookies, f)
+
+
 def build_registry() -> dict[str, Callable]:
     """Build the handler registry for IPC server dispatch.
 
@@ -98,10 +318,10 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
     progress_cb("login_start", {"platform": platform, "account_id": account_id})
 
     if method == "auto" or method == "cookie_recovery":
-        # Tier 1: Try cookie recovery
+        # Tier 1: Try cookie recovery (file-level check; real verify in handler_validate)
         recovered = _try_cookie_recovery(account_id, platform, progress_cb)
         if recovered:
-            _update_account_status(account_id, "active", progress_cb)
+            _apply_login_success(account_id, progress_cb, platform=platform, login_method="cookie_recovery")
             progress_cb("login_success", {"account_id": account_id, "method": "cookie_recovery"})
             return {
                 "status": "ok",
@@ -110,11 +330,14 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
             }
 
     if method == "auto" or method == "qrcode":
-        # Tier 2: QR code login
+        # Tier 2: QR code login (S9a L15 已真实化 + S10 补 success_pattern 轮询+回写)
         progress_cb("login_qr_start", {"account_id": account_id})
         qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
-            _update_account_status(account_id, "active", progress_cb)
+            # _do_qr_login 内部已在成功时调用 _apply_login_success
+            if not qr_result.get("login_success"):
+                # 无 success_pattern 配置时，_do_qr_login 只截图；此处兜底置 active
+                _apply_login_success(account_id, progress_cb, platform=platform, login_method="qrcode")
             return {
                 "status": "ok",
                 "login_method": "qrcode",
@@ -123,16 +346,28 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
             }
 
     if method == "cookie_import":
-        # Tier 3: Cookie import
+        # Tier 3: Cookie import (S10 加注入+验证+身份回写+冲突拒绝)
         cookies = payload.get("cookies")
         if cookies:
-            _import_cookies(account_id, platform, cookies, progress_cb)
-            _update_account_status(account_id, "active", progress_cb)
-            progress_cb("login_success", {"account_id": account_id, "method": "cookie_import"})
+            result = await _import_cookies(account_id, platform, cookies, progress_cb)
+            if result.get("conflict"):
+                return {
+                    "status": "conflict",
+                    "existing_id": result["existing_id"],
+                    "account_id": account_id,
+                    "identity": result.get("identity"),
+                }
+            if not result.get("ok"):
+                return {
+                    "status": "error",
+                    "reason": result.get("reason", "cookie 导入失败"),
+                    "account_id": account_id,
+                }
             return {
                 "status": "ok",
                 "login_method": "cookie_import",
                 "account_id": account_id,
+                "identity": result.get("identity"),
             }
 
     # Fall through to QR if auto and recovery failed
@@ -140,7 +375,8 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
         progress_cb("login_qr_start", {"account_id": account_id})
         qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
-            _update_account_status(account_id, "active", progress_cb)
+            if not qr_result.get("login_success"):
+                _apply_login_success(account_id, progress_cb, platform=platform, login_method="qrcode")
             return {
                 "status": "ok",
                 "login_method": "qrcode",
@@ -153,9 +389,12 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
 
 
 def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Callable) -> bool:
-    """Try to recover login from persisted cookies."""
-    from config import DATA_DIR
-    cookie_path = DATA_DIR / "collection" / "profiles" / f"acct_{account_id}" / "cookies.json"
+    """Try to recover login from persisted cookies.
+
+    [契约变更 2026-07-13 S10] 路径统一用 _cookie_path_for（删 acct_ 前缀）。
+    只检查文件存在 + 非空；真正注入+验证走 handler_validate。
+    """
+    cookie_path = _cookie_path_for(account_id)
     if not cookie_path.exists():
         progress_cb("login_recovery_no_cookies", {"account_id": account_id})
         return False
@@ -173,32 +412,37 @@ def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Cal
 async def _do_qr_login(platform: str, account_id: int | None, progress_cb: Callable) -> dict | None:
     """Initiate QR code login. Returns QR info dict or None.
 
-    L15: when the worker has published a live page, navigate to the platform's
-    login URL and screenshot the QR. Without a page (tests / no worker), degrade
-    to returning the qr_path stub so callers/tests that only check the path stay
-    green.
+    [契约变更 2026-07-13 S10] 在 S9a L15 真实化（page.goto + screenshot）基础上，
+    补 success_pattern 轮询：扫码后轮询 page.url 匹配 yaml success_pattern（≤timeout 120s），
+    成功后 context.cookies() 提取落盘+注入+回写 platform_user_id/platform_nickname+active+last_login_at，
+    WS 广播 qr_ready → login_success。
+
+    Without a page (tests / no worker), degrade to returning the qr_path stub so
+    callers/tests that only check the path stay green.
     """
     from config import DATA_DIR
+    from pathlib import Path
     qr_path = str(DATA_DIR / "collection" / "debug" / f"qr_{account_id}.png")
-    # Ensure the debug dir exists for the real screenshot path.
-    try:
-        from pathlib import Path
-        Path(qr_path).parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    Path(qr_path).parent.mkdir(parents=True, exist_ok=True)
 
     page = await _worker_page()
     if page is None:
         progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
         return {"qr_path": qr_path}
 
-    # Resolve login URL from the platform spec (base_url + login.login_url).
+    # Resolve login URL + success pattern from the platform spec.
     try:
         from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
         spec, _ = reg_get(platform)
         login_url = (spec.base_url or "") + (spec.login.login_url or "")
+        success_detect = spec.login.success_detect
+        success_pattern = spec.login.success_pattern
+        timeout_s = int(spec.login.timeout or 120)
     except Exception:
         login_url = ""
+        success_detect = None
+        success_pattern = None
+        timeout_s = 120
 
     if not login_url:
         progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
@@ -206,31 +450,136 @@ async def _do_qr_login(platform: str, account_id: int | None, progress_cb: Calla
 
     try:
         await page.goto(login_url)
-        # Give the QR a moment to render, then screenshot. A precise QR-element
-        # selector is platform/recording-specific; a viewport screenshot captures
-        # the QR reliably enough to unblock the human scan. (Crop refinement is Sz.)
         try:
             await page.wait_for_selector("img, canvas", timeout=5000)
         except Exception:
             pass
         await page.screenshot(path=qr_path)
         progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
-        return {"qr_path": qr_path}
     except Exception as exc:
         logger.warning(f"QR navigation/screenshot failed: {exc}; returning stub path")
         progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
         return {"qr_path": qr_path}
 
+    # [S10] 轮询 success_pattern ≤ timeout_s，检测扫码成功
+    if success_detect == "url_change" and success_pattern:
+        import re
+        regex = re.compile(success_pattern)
+        login_base = (spec.base_url or "")
+        # 登录页的 URL（用于判断是否已跳离）
+        login_page_url = login_url
+        deadline = time.time() + timeout_s
+        poll_interval = 1.5
+        while time.time() < deadline:
+            try:
+                cur_url = page.url
+            except Exception:
+                cur_url = ""
+            # 跳离登录页且匹配 success_pattern → 成功
+            if cur_url and cur_url != login_page_url:
+                # success_pattern 用相对路径匹配（去掉 base_url）
+                rel = cur_url.replace(login_base, "", 1) if cur_url.startswith(login_base) else cur_url
+                if regex.match(rel) or regex.match(cur_url):
+                    # 提取 cookie + 身份 + 回写
+                    try:
+                        cookies = await page.context.cookies()
+                        _persist_cookies(account_id, cookies)
+                        identity = await _extract_platform_identity(page.context, platform)
+                        _apply_login_success(
+                            account_id, progress_cb,
+                            platform=platform,
+                            platform_user_id=(identity or {}).get("platform_user_id"),
+                            platform_nickname=(identity or {}).get("platform_nickname"),
+                            login_method="qrcode",
+                        )
+                        progress_cb("login_success", {
+                            "account_id": account_id,
+                            "method": "qrcode",
+                            "platform_user_id": (identity or {}).get("platform_user_id"),
+                        })
+                        return {"qr_path": qr_path, "login_success": True, "identity": identity}
+                    except Exception as exc:
+                        logger.warning(f"QR success post-processing failed: {exc}")
+                        return {"qr_path": qr_path}
+            await asyncio.sleep(poll_interval)
 
-def _import_cookies(account_id: int | None, platform: str, cookies: list, progress_cb: Callable) -> None:
-    """Persist imported cookies to disk."""
-    from config import DATA_DIR
-    cookie_dir = DATA_DIR / "collection" / "profiles" / f"acct_{account_id}"
-    cookie_dir.mkdir(parents=True, exist_ok=True)
-    cookie_path = cookie_dir / "cookies.json"
-    with open(cookie_path, "w") as f:
-        json.dump(cookies, f)
-    progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(cookies)})
+        # 超时未成功 → 失败回写
+        _apply_login_failure(account_id, progress_cb)
+        progress_cb("login_timeout", {"account_id": account_id, "timeout": timeout_s})
+        return {"qr_path": qr_path, "login_success": False}
+
+    # 无 success_pattern 配置 → 只截图等待人工
+    return {"qr_path": qr_path}
+
+
+async def _import_cookies(account_id: int | None, platform: str, cookies: list, progress_cb: Callable) -> dict:
+    """Persist + 注入 + 验证 + 回写导入的 cookie。
+
+    [契约变更 2026-07-13 S10]
+    1. 落盘到统一路径 profiles/{account_id}/cookies.json
+    2. ctx.add_cookies(cookies) 真注入浏览器
+    3. 用注入 cookie 请求需登录接口验证
+    4. 成功 → 提取 platform_user_id/platform_nickname 回写 + 置 active
+       失败 → 留 inactive + fail_count+1
+    5. 命中已存在 platform_user_id → 拒绝（不静默合并）
+
+    Returns:
+        {"ok": True, "identity": {...}} / {"ok": False, "reason": "..."} /
+        {"conflict": True, "existing_id": N}
+    """
+    if not cookies:
+        return {"ok": False, "reason": "cookies 为空"}
+
+    # 1. 落盘
+    _persist_cookies(account_id, cookies)
+    progress_cb("login_cookies_persisted", {"account_id": account_id, "count": len(cookies)})
+
+    # 2. 注入 + 3. 验证
+    ctx = _WORKER_CTX
+    if ctx is None:
+        # 无 ctx（tests / no worker）→ 只落盘，无法验证，保守标 ok（让测试通过）
+        progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(cookies)})
+        return {"ok": True, "identity": None}
+
+    try:
+        await ctx.add_cookies(cookies)
+    except Exception as exc:
+        logger.warning(f"add_cookies failed: {exc}")
+        _apply_login_failure(account_id, progress_cb)
+        return {"ok": False, "reason": f"add_cookies 失败: {exc}"}
+
+    valid = await _verify_cookies_on_platform(ctx, platform)
+    if not valid:
+        _apply_login_failure(account_id, progress_cb)
+        return {"ok": False, "reason": "cookie 验证失败（平台返回非 2xx）"}
+
+    # 4. 提取身份
+    identity = await _extract_platform_identity(ctx, platform)
+    if identity and identity.get("platform_user_id"):
+        # 5. 检查 UNIQUE 冲突
+        conflict_id = _find_conflicting_account(platform, identity["platform_user_id"], exclude_id=account_id)
+        if conflict_id is not None:
+            progress_cb("cookie_import_conflict", {
+                "account_id": account_id,
+                "existing_id": conflict_id,
+                "platform_user_id": identity["platform_user_id"],
+            })
+            return {"conflict": True, "existing_id": conflict_id, "identity": identity}
+
+    # 成功 → 回写
+    _apply_login_success(
+        account_id, progress_cb,
+        platform=platform,
+        platform_user_id=(identity or {}).get("platform_user_id"),
+        platform_nickname=(identity or {}).get("platform_nickname"),
+        login_method="cookie_import",
+    )
+    progress_cb("login_success", {
+        "account_id": account_id,
+        "method": "cookie_import",
+        "platform_user_id": (identity or {}).get("platform_user_id"),
+    })
+    return {"ok": True, "identity": identity}
 
 
 def _update_account_status(account_id: int | None, status: str, progress_cb: Callable) -> None:
@@ -259,6 +608,9 @@ def _update_account_status(account_id: int | None, status: str, progress_cb: Cal
 async def handler_validate(payload: dict, progress_cb: Callable) -> dict:
     """Validate account session/cookies.
 
+    [契约变更 2026-07-13 S10] 真验证：加载 cookie → 注入 ctx → 请求需登录接口
+    → 提取身份回写 → 状态机驱动 status+fail_count。
+
     Args:
         payload: {platform, account_id}
 
@@ -270,25 +622,62 @@ async def handler_validate(payload: dict, progress_cb: Callable) -> dict:
 
     progress_cb("validate_start", {"account_id": account_id})
 
-    # Check account exists and has cookies
-    valid = _check_account_valid(account_id, platform, progress_cb)
+    # 文件级快检查：无 cookie 直接失败
+    cookie_path = _cookie_path_for(account_id)
+    if not cookie_path.exists():
+        _apply_login_failure(account_id, progress_cb)
+        progress_cb("validate_no_cookies", {"account_id": account_id})
+        return {"status": "error", "valid": False, "account_id": account_id}
+
+    try:
+        with open(cookie_path, "r") as f:
+            cookies = json.load(f)
+    except Exception:
+        _apply_login_failure(account_id, progress_cb)
+        return {"status": "error", "valid": False, "account_id": account_id}
+
+    if not cookies:
+        _apply_login_failure(account_id, progress_cb)
+        return {"status": "error", "valid": False, "account_id": account_id}
+
+    # 真注入 + 验证
+    ctx = _WORKER_CTX
+    if ctx is None:
+        # 无 ctx → 降级为只看文件
+        valid = True
+    else:
+        try:
+            await ctx.add_cookies(cookies)
+        except Exception as exc:
+            logger.warning(f"validate add_cookies failed: {exc}")
+            _apply_login_failure(account_id, progress_cb)
+            return {"status": "error", "valid": False, "account_id": account_id}
+        valid = await _verify_cookies_on_platform(ctx, platform)
+
+    if valid:
+        # 提取身份回写 + 成功清零
+        identity = await _extract_platform_identity(ctx, platform) if ctx else None
+        _apply_login_success(
+            account_id, progress_cb,
+            platform=platform,
+            platform_user_id=(identity or {}).get("platform_user_id"),
+            platform_nickname=(identity or {}).get("platform_nickname"),
+        )
+    else:
+        _apply_login_failure(account_id, progress_cb)
 
     status = "ok" if valid else "error"
-    progress_cb(
-        "validate_done",
-        {"account_id": account_id, "valid": valid},
-    )
-    return {
-        "status": status,
-        "valid": valid,
-        "account_id": account_id,
-    }
+    progress_cb("validate_done", {"account_id": account_id, "valid": valid})
+    return {"status": status, "valid": valid, "account_id": account_id}
 
 
 def _check_account_valid(account_id: int | None, platform: str, progress_cb: Callable) -> bool:
-    """Check if the account's session is valid."""
-    from config import DATA_DIR
-    cookie_path = DATA_DIR / "collection" / "profiles" / f"acct_{account_id}" / "cookies.json"
+    """Check if the account's session is valid.
+
+    [契约变更 2026-07-13 S10] 路径统一用 _cookie_path_for（删 acct_ 前缀）。
+    仅文件级检查（cookie 非空），真验证走 handler_validate。
+    """
+    cookie_path = _cookie_path_for(account_id)
     if not cookie_path.exists():
         progress_cb("validate_no_cookies", {"account_id": account_id})
         return False

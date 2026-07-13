@@ -5,6 +5,9 @@ flow: _try_cookie_recovery, _import_cookies, _update_account_status,
 _check_account_valid, _promote_to_running, _set_task_need_human, _set_task_paused,
 _update_task_progress, _load_task, _complete_task, _get_engine, handler_login
 tiers, handler_validate, handler_search/detail/comments.
+
+[契约变更 2026-07-13 S10] cookie 路径统一用 profile_dir_for(account_id) =
+profiles/{account_id}/（删 acct_ 前缀 bug）。_import_cookies 改 async（注入+验证+回写）。
 """
 from __future__ import annotations
 
@@ -21,9 +24,9 @@ def _cap():
     return (lambda m, d=None: out.append((m, d))), out
 
 
-def _make_account(db_session, *, platform="xiaohongshu", nickname="acct"):
+def _make_account(db_session, *, platform="xiaohongshu", remark="acct"):
     from semilabs_hone.core.models.account import Account
-    acct = Account(platform=platform, nickname=nickname)
+    acct = Account(platform=platform, remark=remark)
     db_session.add(acct)
     db_session.commit()
     return acct.id
@@ -38,6 +41,12 @@ def _make_task(db_session, *, status="pending", max_posts=10):
     return t.id
 
 
+def _cookie_path(account_id: int):
+    """Cookie 路径统一：profiles/{account_id}/cookies.json（删 acct_ 前缀）。"""
+    from config import DATA_DIR
+    return DATA_DIR / "collection" / "profiles" / str(account_id) / "cookies.json"
+
+
 # ─── cookie / account helpers ────────────────────────────────────────────
 
 class TestCookieRecovery:
@@ -47,8 +56,7 @@ class TestCookieRecovery:
         assert any(m == "login_recovery_no_cookies" for m, _ in out)
 
     def test_found_cookies_returns_true(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_3" / "cookies.json"
+        p = _cookie_path(3)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps([{"name": "sid", "value": "x"}]))
         cap, out = _cap()
@@ -56,28 +64,34 @@ class TestCookieRecovery:
         assert any(m == "login_recovery_found_cookies" for m, _ in out)
 
     def test_corrupt_cookie_returns_false(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_4" / "cookies.json"
+        p = _cookie_path(4)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("{not json")
         assert h_mod._try_cookie_recovery(4, "xiaohongshu", lambda *a: None) is False
 
 
 class TestImportCookies:
-    def test_persists_cookies_and_dir(self, tmp_data_dir):
-        from config import DATA_DIR
+    async def test_persists_cookies_to_unified_path(self, tmp_data_dir):
+        """_import_cookies 落盘到 profiles/{id}/cookies.json（删 acct_ 前缀）。"""
         cookies = [{"name": "sid", "value": "v"}]
         cap, out = _cap()
-        h_mod._import_cookies(8, "xiaohongshu", cookies, cap)
-        p = DATA_DIR / "collection" / "profiles" / "acct_8" / "cookies.json"
-        assert p.exists()
+        result = await h_mod._import_cookies(8, "xiaohongshu", cookies, cap)
+        p = _cookie_path(8)
+        assert p.exists(), f"cookie 应落盘到 {p}（不再用 acct_8）"
         assert json.loads(p.read_text()) == cookies
-        assert any(m == "login_cookies_imported" for m, _ in out)
+        # 无 _WORKER_CTX 时降级：只落盘，标 ok
+        assert result["ok"] is True
+        assert any(m == "login_cookies_persisted" for m, _ in out)
+
+    async def test_empty_cookies_rejected(self, tmp_data_dir):
+        result = await h_mod._import_cookies(9, "xiaohongshu", [], lambda *a: None)
+        assert result["ok"] is False
+        assert "空" in result["reason"] or not _cookie_path(9).exists()
 
 
 class TestUpdateAccountStatus:
     def test_updates_existing_account(self, db_session, tmp_data_dir):
-        aid = _make_account(db_session, nickname="up")
+        aid = _make_account(db_session, remark="up")
         cap, out = _cap()
         h_mod._update_account_status(aid, "active", cap)
 
@@ -101,22 +115,19 @@ class TestCheckAccountValid:
         assert h_mod._check_account_valid(11, "xiaohongshu", lambda *a: None) is False
 
     def test_valid_cookies(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_12" / "cookies.json"
+        p = _cookie_path(12)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps([{"name": "x"}]))
         assert h_mod._check_account_valid(12, "xiaohongshu", lambda *a: None) is True
 
     def test_empty_cookies_invalid(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_13" / "cookies.json"
+        p = _cookie_path(13)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps([]))
         assert h_mod._check_account_valid(13, "xiaohongshu", lambda *a: None) is False
 
     def test_corrupt_cookies_invalid(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_14" / "cookies.json"
+        p = _cookie_path(14)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("{bad")
         assert h_mod._check_account_valid(14, "xiaohongshu", lambda *a: None) is False
@@ -241,8 +252,7 @@ class TestGetEngine:
 
 class TestHandlerLoginTiers:
     async def test_cookie_recovery_success(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_21" / "cookies.json"
+        p = _cookie_path(21)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps([{"name": "sid"}]))
         cap, out = _cap()
@@ -351,8 +361,7 @@ class TestHandlerValidate:
         assert res["valid"] is False
 
     async def test_validate_with_cookies_valid(self, tmp_data_dir):
-        from config import DATA_DIR
-        p = DATA_DIR / "collection" / "profiles" / "acct_32" / "cookies.json"
+        p = _cookie_path(32)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps([{"name": "sid"}]))
         res = await h_mod.handler_validate(

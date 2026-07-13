@@ -51,13 +51,13 @@ def session(db_session):
 
 class TestAccountDefaults:
     def test_account_create_defaults_platform_xiaohongshu(self, session):
-        acct = Account(nickname="test")
+        acct = Account(remark="test")
         session.add(acct)
         session.commit()
         assert acct.platform == "xiaohongshu"
 
     def test_account_create_defaults_status_inactive(self, session):
-        acct = Account(nickname="test")
+        acct = Account(remark="test")
         session.add(acct)
         session.commit()
         assert acct.status == "inactive"
@@ -315,9 +315,9 @@ class TestMetricsJson:
 
 class TestSchemasDefaults:
     def test_account_create_defaults_platform(self):
-        ac = AccountCreate(nickname="test")
+        ac = AccountCreate(remark="test")
         assert ac.platform == "xiaohongshu"
-        assert ac.nickname == "test"
+        assert ac.remark == "test"
 
     def test_task_create_defaults(self):
         tc = TaskCreate(target_value="keyword")

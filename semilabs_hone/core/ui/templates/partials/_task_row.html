@@ -1,0 +1,21 @@
+<tr id="task-row-{{ task.id }}" class="border-b border-gray-700/50 hover:bg-app-hover transition-colors">
+  <td class="px-4 py-3" id="status-{{ task.id }}" hx-get="/api/tasks/{{ task.id }}/status" hx-trigger="every 5s" hx-swap="innerHTML">
+    {{ badge|safe }}
+  </td>
+  <td class="px-4 py-3">
+    <div class="font-medium text-white">{{ task.target_value[:30] if task.target_value else '-' }}</div>
+    <div class="text-xs text-gray-500 mt-0.5">{{ task.task_type }} · {{ task.expected_count }}条</div>
+    {% if task.error_msg %}<div class="text-xs text-red-400 mt-1">{{ task.error_msg }}</div>{% endif %}
+  </td>
+  <td class="px-4 py-3">
+    {% include "partials/_progress_bar.html" %}
+  </td>
+  <td class="px-4 py-3">
+    {% if task.platform == 'xiaohongshu' %}<span class="inline-block px-2.5 py-0.5 rounded text-xs font-medium bg-red-500/15 text-red-400">小红书</span>
+    {% else %}<span class="inline-block px-2.5 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-400">{{ task.platform }}</span>{% endif %}
+  </td>
+  <td class="px-4 py-3 text-sm text-gray-400">{{ task.created_at.strftime('%Y-%m-%d %H:%M') if task.created_at else '-' }}</td>
+  <td class="px-4 py-3" id="actions-{{ task.id }}" hx-get="/api/tasks/{{ task.id }}/actions" hx-trigger="every 5s" hx-swap="innerHTML">
+    {{ actions|safe }}
+  </td>
+</tr>

@@ -9,8 +9,12 @@ PRD §6.1 — canonical task table:
 last_note_index/sort_type/download_images/collect_comments/error_message/
 error_category/started_at/completed_at），供 handlers/routes/csv/tests 等
 S4/S6/S7 消费者继续使用，零逻辑改动。旧列在 S4/S6/S7 重写各自消费者时
-切到 PRD 列名并从模型删除（create_all 重建即生效）。account_id 的旧 FK
-已移除（PRD collection_tasks 无 account_id），仅保留裸列。
+切到 PRD 列名并从模型删除（create_all 重建即生效）。
+
+[契约变更 2026-07-13 S10] account_id 补 ForeignKey('accounts.id')。PRD §6 契约
+曾写"collection_tasks 无 account_id" → 裁决为规格漂移：采集必须知道用哪个账号
+登录态抓的，删了无法关联，故补 FK 对齐现状（routes/tasks.py 创建任务本就传
+account_id 入库）。
 """
 import uuid
 from datetime import datetime, timezone
@@ -49,7 +53,8 @@ class CollectionTask(Base):
     request_id = Column(String(12), nullable=True)
 
     # --- Legacy columns retained for S4/S6/S7 consumers (to be dropped later) ---
-    account_id = Column(Integer, nullable=True)  # FK dropped (PRD has no account_id)
+    # [契约变更 2026-07-13 S10] account_id 补 FK，采集任务明确绑定账号（裁决：规格漂移）
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     max_posts_per_keyword = Column(Integer, nullable=False, default=20)
     posts_scraped = Column(Integer, nullable=False, default=0)
     last_note_index = Column(Integer, nullable=False, default=0)
