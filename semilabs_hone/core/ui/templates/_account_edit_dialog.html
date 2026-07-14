@@ -7,9 +7,8 @@
               class="text-gray-400 hover:text-white">✕</button>
     </div>
     <form hx-put="/api/accounts/{{ account.id }}"
-          hx-target="#account-edit-dialog-slot"
-          hx-swap="innerHTML"
-          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();showToast({severity:'success',message:'备注已更新',duration:2000});htmx.ajax('GET','/accounts', '#accounts-list');}else{showToast({severity:'error',message:'更新失败',duration:3000});}">
+          hx-swap="none"
+          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();showToast({severity:'success',message:'备注已更新',duration:2000});setTimeout(()=>location.reload(),1500);}else{showToast({severity:'error',message:'更新失败',duration:3000});}">
       <div class="mb-4">
         <label class="block text-sm text-gray-300 mb-2">账号备注 <span class="text-red-400">*</span></label>
         <input type="text" name="remark" required maxlength="100" value="{{ account.remark or '' }}"

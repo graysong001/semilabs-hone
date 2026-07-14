@@ -69,7 +69,6 @@ async def page_accounts(request: Request) -> HTMLResponse:
         {
             "accounts": accounts,
             "platforms": platforms,
-            "inactive_accounts": [a for a in accounts if a.status == "inactive"],
             "active_page": "auth",
         },
     )
@@ -151,6 +150,78 @@ async def api_edit_account_dialog(request: Request, account_id: int) -> HTMLResp
         sess.close()
 
 
+@router.get("/api/accounts/{account_id}/update-cookie-dialog", response_class=HTMLResponse)
+async def api_update_cookie_dialog(request: Request, account_id: int) -> HTMLResponse:
+    """GET /api/accounts/{id}/update-cookie-dialog — 更新 cookie dialog partial。"""
+    from semilabs_hone.core.models.db import get_session
+
+    sess = get_session()
+    try:
+        a = _get_account_or_404(sess, account_id)
+        if a is None:
+            return HTMLResponse("<p>账号不存在</p>", status_code=404)
+        t = _templates()
+        assert t is not None
+        return t.TemplateResponse(
+            request, "_account_update_cookie_dialog.html",
+            {"account": a},
+        )
+    finally:
+        sess.close()
+
+
+@router.post("/api/accounts/{account_id}/update-cookie")
+async def api_update_cookie(
+    request: Request,
+    account_id: int,
+    cookies: str = Form(default=""),
+) -> JSONResponse:
+    """POST /api/accounts/{id}/update-cookie — 更新指定账号的 cookie。
+
+    [方案A重构] 替代原全局 import-cookies 端点，改为行级操作。
+    """
+    # 解析 cookies JSON
+    try:
+        cookies_data = json.loads(cookies) if cookies else []
+    except json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": "Cookie JSON 格式错误"}, status_code=400)
+
+    if not isinstance(cookies_data, list) or not cookies_data:
+        return JSONResponse({"ok": False, "error": "Cookie 必须是非空 JSON 数组"}, status_code=400)
+
+    # 取 platform（从 Account 读）
+    from semilabs_hone.core.models.db import get_session
+    sess = get_session()
+    try:
+        acct = _get_account_or_404(sess, account_id)
+        if acct is None:
+            return JSONResponse({"ok": False, "error": "账号不存在"}, status_code=404)
+        platform = acct.platform
+    finally:
+        sess.close()
+
+    # 提交 IPC
+    IPCClient, IPCRequest = _ipc_client()
+    request_id = uuid.uuid4().hex[:12]
+    req = IPCRequest(
+        request_id=request_id,
+        module="collection",
+        op="login",
+        account_id=account_id,
+        payload={
+            "account_id": account_id,
+            "platform": platform,
+            "method": "cookie_import",
+            "cookies": cookies_data,
+            "request_id": request_id,
+        },
+    )
+    client = IPCClient()
+    client.submit(req)
+
+    return JSONResponse({"ok": True, "request_id": request_id, "status": "submitted"})
+
+
 @router.put("/api/accounts/{account_id}")
 async def api_update_account(
     request: Request,
@@ -201,10 +272,12 @@ async def api_create_account(
     platform: str = Form(default="xiaohongshu"),
     remark: str = Form(default=""),
     nickname: str = Form(default=""),  # 兼容旧 form（前端已切 remark）
+    cookies: str = Form(default=""),  # 可选，有则建壳后导入 cookie
 ) -> RedirectResponse:
-    """POST /api/accounts — 建账号空壳（status=inactive, platform_user_id 空）。
+    """POST /api/accounts — 建账号（空壳或建壳+导入 cookie）。
 
     [契约变更 2026-07-13 S10] remark NOT NULL 必填（用户裁决）。
+    方案A重构：合并原"添加账号"和"导入cookie"为一步，cookie 为可选字段。
     """
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.account import Account
@@ -218,8 +291,34 @@ async def api_create_account(
         acct = Account(platform=platform, remark=final_remark[:100])
         sess.add(acct)
         sess.commit()
+        new_id = acct.id
     finally:
         sess.close()
+
+    # 如果提供了 cookies，提交 IPC cookie_import
+    if cookies and cookies.strip():
+        try:
+            cookies_data = json.loads(cookies)
+            if isinstance(cookies_data, list) and cookies_data:
+                IPCClient, IPCRequest = _ipc_client()
+                req_id = uuid.uuid4().hex[:12]
+                req = IPCRequest(
+                    request_id=req_id,
+                    module="collection",
+                    op="login",
+                    account_id=new_id,
+                    payload={
+                        "account_id": new_id,
+                        "platform": platform,
+                        "method": "cookie_import",
+                        "cookies": cookies_data,
+                        "request_id": req_id,
+                    },
+                )
+                client = IPCClient()
+                client.submit(req)
+        except Exception:
+            pass  # cookie 导入失败不阻塞建壳
 
     return RedirectResponse(url="/accounts", status_code=303)
 

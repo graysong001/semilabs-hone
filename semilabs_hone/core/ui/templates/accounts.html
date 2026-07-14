@@ -9,11 +9,10 @@
   </nav>
 </div>
 
-<!-- 区块一：添加账号（建空壳） -->
+<!-- 区块一：添加账号 -->
 <div class="bg-app-card rounded-lg border border-gray-700 p-6 mb-6">
   <h3 class="text-lg font-semibold text-white mb-4">添加账号</h3>
-  <form hx-post="/api/accounts" hx-target="#accounts-list" hx-swap="outerHTML"
-        hx-on::after-request="if(event.detail.successful){this.reset();showToast({severity:'success',message:'账号已添加',duration:2000});}else{showToast({severity:'error',message:'添加失败',duration:3000});}">
+  <form method="post" action="/api/accounts">
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
       <div>
         <label class="block text-sm text-gray-300 mb-2">平台 <span class="text-red-400">*</span></label>
@@ -31,34 +30,11 @@
         <input type="text" name="remark" required placeholder="如：小号A" class="w-full h-10 px-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:border-brand focus:outline-none">
       </div>
     </div>
-    <button type="submit" class="px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">添加账号</button>
-  </form>
-</div>
-
-<!-- 区块二：导入 Cookie（快捷登录） -->
-<div class="bg-app-card rounded-lg border border-gray-700 p-6 mb-6">
-  <h3 class="text-lg font-semibold text-white mb-4">导入 Cookie</h3>
-  <form hx-post="/api/accounts/import-cookies"
-        hx-on::after-request="if(event.detail.successful){showToast({severity:'success',message:'Cookie 已导入',duration:2000});}else if(event.detail.xhr.status===409){const r=JSON.parse(event.detail.xhr.responseText);showToast({severity:'warn',message:r.error||'账号冲突',duration:4000});}else{showToast({severity:'error',message:'导入失败',duration:3000});}">
-    <div class="space-y-4 mb-4">
-      <div>
-        <label class="block text-sm text-gray-300 mb-2">选择账号 <span class="text-red-400">*</span></label>
-        <select name="account_id" required class="w-full h-10 px-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200 focus:border-brand focus:outline-none">
-          <option value="">请选择已添加的账号壳</option>
-          {% for a in inactive_accounts %}
-          <option value="{{ a.id }}">{{ a.remark }}（#{{ a.id }} · {{ a.platform }}）</option>
-          {% endfor %}
-          {% if not inactive_accounts %}
-          <option value="" disabled>暂无可导入的空壳账号，请先添加</option>
-          {% endif %}
-        </select>
-      </div>
-      <div>
-        <label class="block text-sm text-gray-300 mb-2">Cookie JSON <span class="text-red-400">*</span></label>
-        <textarea name="cookies" rows="3" required placeholder='[{"name":"...", "value":"...", "domain":"..."}]' class="w-full p-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:border-brand focus:outline-none resize-y"></textarea>
-      </div>
+    <div class="mb-4">
+      <label class="block text-sm text-gray-300 mb-2">Cookie JSON（可选，留空则建空壳账号，后续扫码登录）</label>
+      <textarea name="cookies" rows="2" placeholder='[{"name":"...", "value":"...", "domain":"..."}]' class="w-full p-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:border-brand focus:outline-none resize-y"></textarea>
     </div>
-    <button type="submit" class="px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">导入并验证</button>
+    <button type="submit" class="px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">添加账号</button>
   </form>
 </div>
 
@@ -134,13 +110,13 @@
           <div class="flex items-center gap-2">
             <button hx-post="/api/accounts/{{ acct.id }}/login"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast({severity:'success',message:'登录请求已发送',duration:2000});}else{showToast({severity:'error',message:'登录失败',duration:3000});}"
+                    hx-on::after-request="if(event.detail.successful){showToast({severity:'success',message:'登录请求已发送，请扫码后等待页面刷新',duration:3000});let poll=setInterval(()=>location.reload(),5000);setTimeout(()=>clearInterval(poll),120000);}else{showToast({severity:'error',message:'登录失败',duration:3000});}"
                     class="px-3 py-1 bg-brand/15 text-brand border border-brand/30 rounded text-xs font-medium hover:bg-brand/25">
               登录
             </button>
             <button hx-post="/api/accounts/{{ acct.id }}/validate"
                     hx-swap="none"
-                    hx-on::after-request="if(event.detail.successful){showToast({severity:'success',message:'验证请求已发送',duration:2000});}else{showToast({severity:'error',message:'验证失败',duration:3000});}"
+                    hx-on::after-request="if(event.detail.successful){showToast({severity:'success',message:'验证中...',duration:1500});setTimeout(()=>location.reload(),3000);}else{showToast({severity:'error',message:'验证失败',duration:3000});}"
                     class="px-3 py-1 bg-green-500/15 text-green-400 border border-green-500/30 rounded text-xs font-medium hover:bg-green-500/25">
               验证
             </button>
@@ -150,10 +126,15 @@
                     class="px-3 py-1 bg-gray-500/15 text-gray-300 border border-gray-500/30 rounded text-xs font-medium hover:bg-gray-500/25">
               编辑备注
             </button>
+            <button hx-get="/api/accounts/{{ acct.id }}/update-cookie-dialog"
+                    hx-target="#account-edit-dialog-slot"
+                    hx-swap="innerHTML"
+                    class="px-3 py-1 bg-yellow-500/15 text-yellow-400 border border-yellow-500/30 rounded text-xs font-medium hover:bg-yellow-500/25">
+              更新Cookie
+            </button>
             <button hx-delete="/api/accounts/{{ acct.id }}"
                     hx-confirm="确定删除？将同时清除该账号的浏览器配置与Cookie。"
-                    hx-target="#accounts-list"
-                    hx-swap="outerHTML"
+                    hx-on::after-request="if(event.detail.successful) location.reload();"
                     class="px-3 py-1 bg-red-500/15 text-red-400 border border-red-500/30 rounded text-xs font-medium hover:bg-red-500/25">
               删除
             </button>

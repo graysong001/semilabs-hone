@@ -1,0 +1,26 @@
+<dialog open id="account-edit-dialog" class="modal-backdrop fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+        hx-on:htmx:after-swap="this.querySelector('dialog').showModal()">
+  <div class="bg-app-card border border-gray-700 rounded-lg p-6 w-full max-w-md" onclick="event.stopPropagation()">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-semibold text-white">更新 Cookie · 账号 #{{ account.id }}</h3>
+      <button type="button" onclick="document.getElementById('account-edit-dialog').remove()"
+              class="text-gray-400 hover:text-white">✕</button>
+    </div>
+    <form hx-post="/api/accounts/{{ account.id }}/update-cookie"
+          hx-swap="none"
+          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();showToast({severity:'success',message:'Cookie 已更新',duration:2000});setTimeout(()=>location.reload(),2000);}else if(event.detail.xhr.status===409){const r=JSON.parse(event.detail.xhr.responseText);showToast({severity:'warn',message:r.error||'账号冲突',duration:4000});}else{showToast({severity:'error',message:'更新失败',duration:3000});}">
+      <div class="mb-4">
+        <label class="block text-sm text-gray-300 mb-2">Cookie JSON <span class="text-red-400">*</span></label>
+        <textarea name="cookies" rows="4" required placeholder='[{"name":"...", "value":"...", "domain":"..."}]' class="w-full p-3 bg-app-input border border-gray-600 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:border-brand focus:outline-none resize-y"></textarea>
+      </div>
+      <p class="text-xs text-gray-500 mb-4">
+        粘贴新的 Cookie JSON 数组。系统将注入浏览器并验证有效性，同时提取平台身份回写。
+      </p>
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="document.getElementById('account-edit-dialog').remove()"
+                class="px-4 py-2 bg-gray-600/20 text-gray-300 border border-gray-600/40 rounded-lg text-sm">取消</button>
+        <button type="submit" class="px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">更新并验证</button>
+      </div>
+    </form>
+  </div>
+</dialog>

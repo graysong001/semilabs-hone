@@ -469,21 +469,19 @@ class TestAccountRoutes:
 # ─── 模板层（accounts.html 下拉） ─────────────────────────────────────────
 
 class TestAccountsTemplate:
-    def test_accounts_page_has_inactive_select(self, client, db_session):
-        """导入 cookie 表单 account_id 改下拉（选 inactive 账号）。"""
+    def test_accounts_page_has_update_cookie_button(self, client, db_session):
+        """账号列表每行有「更新 Cookie」按钮。"""
         from semilabs_hone.core.models.account import Account
-        # 一个 inactive + 一个 active
-        a1 = Account(platform="xiaohongshu", remark="inactive-one", status="inactive")
-        a2 = Account(platform="xiaohongshu", remark="active-one", status="active")
-        db_session.add_all([a1, a2]); db_session.commit()
+        a = Account(platform="xiaohongshu", remark="test-acc", status="inactive")
+        db_session.add(a); db_session.commit()
         resp = client.get("/accounts")
         assert resp.status_code == 200
-        # 下拉应含 inactive 账号
-        assert 'name="account_id"' in resp.text
-        assert "inactive-one" in resp.text
-        # active 账号不出现在导入下拉（但列表里展示）
         # 列表展示 `备注 (平台昵称)` 双列
         assert "备注 (平台昵称)" in resp.text
+        # 每行有「更新 Cookie」按钮
+        assert "更新Cookie" in resp.text
+        # 添加账号表单有可选 cookie 输入框
+        assert 'name="cookies"' in resp.text
 
 
 # ─── S10 补覆盖率：mock _WORKER_CTX 走真 ctx 路径 ─────────────────────────
