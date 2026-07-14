@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -132,39 +133,176 @@ async def api_get_account(account_id: int) -> JSONResponse:
 
 @router.get("/api/accounts/{account_id}/edit", response_class=HTMLResponse)
 async def api_edit_account_dialog(request: Request, account_id: int) -> HTMLResponse:
-    """GET /api/accounts/{id}/edit — 编辑备注 dialog partial。"""
+    """GET /api/accounts/{id}/edit — 统一编辑 dialog partial（备注 + cookie 回显）。"""
     from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+    import os
 
     sess = get_session()
     try:
         a = _get_account_or_404(sess, account_id)
         if a is None:
             return HTMLResponse("<p>账号不存在</p>", status_code=404)
+
+        # 读已绑定的 cookie 文件
+        cookie_json = ""
+        cookie_count = 0
+        cookie_mtime = None
+        cookie_path = profile_dir_for(account_id) / "cookies.json"
+        if cookie_path.exists():
+            try:
+                with open(cookie_path, "r") as f:
+                    raw = json.load(f)
+                if isinstance(raw, list):
+                    cookie_count = len(raw)
+                    cookie_json = json.dumps(raw, ensure_ascii=False, indent=2)
+                    mtime = os.path.getmtime(cookie_path)
+                    cookie_mtime = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+
         t = _templates()
         assert t is not None
         return t.TemplateResponse(
             request, "_account_edit_dialog.html",
-            {"account": a},
+            {
+                "account": a,
+                "cookie_json": cookie_json,
+                "cookie_count": cookie_count,
+                "cookie_mtime": cookie_mtime,
+            },
         )
     finally:
         sess.close()
 
 
+@router.post("/api/accounts/{account_id}/edit")
+async def api_edit_account(
+    request: Request,
+    account_id: int,
+    remark: str = Form(default=""),
+    cookies: str = Form(default=""),
+) -> JSONResponse:
+    """POST /api/accounts/{id}/edit — 统一更新备注 + cookie。
+
+    - remark：同步写 DB（非空才更新）
+    - cookies：非空且为合法 JSON 数组 → 提交 IPC cookie_import（异步验证）
+    """
+    from semilabs_hone.core.models.db import get_session
+
+    # 1. 更新 remark（同步）
+    remark_changed = False
+    if remark and remark.strip():
+        sess = get_session()
+        try:
+            a = _get_account_or_404(sess, account_id)
+            if a is None:
+                return JSONResponse({"ok": False, "error": "账号不存在"}, status_code=404)
+            new_remark = remark.strip()[:100]
+            if a.remark != new_remark:
+                a.remark = new_remark
+                sess.commit()
+                remark_changed = True
+            platform = a.platform
+        finally:
+            sess.close()
+    else:
+        # 只取 platform（cookie 提交需要）
+        sess = get_session()
+        try:
+            a = _get_account_or_404(sess, account_id)
+            if a is None:
+                return JSONResponse({"ok": False, "error": "账号不存在"}, status_code=404)
+            platform = a.platform
+        finally:
+            sess.close()
+
+    # 2. 更新 cookie（异步 IPC）
+    cookie_submitted = False
+    cookie_error = None
+    if cookies and cookies.strip():
+        try:
+            cookies_data = json.loads(cookies)
+            if isinstance(cookies_data, list) and cookies_data:
+                IPCClient, IPCRequest = _ipc_client()
+                req_id = uuid.uuid4().hex[:12]
+                req = IPCRequest(
+                    request_id=req_id,
+                    module="collection",
+                    op="login",
+                    account_id=account_id,
+                    payload={
+                        "account_id": account_id,
+                        "platform": platform,
+                        "method": "cookie_import",
+                        "cookies": cookies_data,
+                        "request_id": req_id,
+                    },
+                )
+                client = IPCClient()
+                client.submit(req)
+                cookie_submitted = True
+            elif not isinstance(cookies_data, list):
+                cookie_error = "Cookie 必须是 JSON 数组"
+        except json.JSONDecodeError:
+            cookie_error = "Cookie JSON 格式错误"
+
+    if cookie_error:
+        return JSONResponse({"ok": False, "error": cookie_error}, status_code=400)
+
+    msg_parts = []
+    if remark_changed:
+        msg_parts.append("备注已更新")
+    if cookie_submitted:
+        msg_parts.append("Cookie 验证中")
+    if not msg_parts:
+        msg_parts.append("无变更")
+    return JSONResponse({"ok": True, "message": "，".join(msg_parts), "remark_changed": remark_changed, "cookie_submitted": cookie_submitted})
+
+
 @router.get("/api/accounts/{account_id}/update-cookie-dialog", response_class=HTMLResponse)
 async def api_update_cookie_dialog(request: Request, account_id: int) -> HTMLResponse:
-    """GET /api/accounts/{id}/update-cookie-dialog — 更新 cookie dialog partial。"""
+    """GET /api/accounts/{id}/update-cookie-dialog — 更新 cookie dialog partial。
+
+    读取已绑定的 cookie 文件内容回显到 textarea，让用户看到当前 cookie。
+    """
     from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+    import os
 
     sess = get_session()
     try:
         a = _get_account_or_404(sess, account_id)
         if a is None:
             return HTMLResponse("<p>账号不存在</p>", status_code=404)
+
+        # 读已绑定的 cookie 文件
+        cookie_json = ""
+        cookie_count = 0
+        cookie_mtime = None
+        cookie_path = profile_dir_for(account_id) / "cookies.json"
+        if cookie_path.exists():
+            try:
+                with open(cookie_path, "r") as f:
+                    raw = json.load(f)
+                if isinstance(raw, list):
+                    cookie_count = len(raw)
+                    cookie_json = json.dumps(raw, ensure_ascii=False, indent=2)
+                    mtime = os.path.getmtime(cookie_path)
+                    cookie_mtime = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+
         t = _templates()
         assert t is not None
         return t.TemplateResponse(
             request, "_account_update_cookie_dialog.html",
-            {"account": a},
+            {
+                "account": a,
+                "cookie_json": cookie_json,
+                "cookie_count": cookie_count,
+                "cookie_mtime": cookie_mtime,
+            },
         )
     finally:
         sess.close()

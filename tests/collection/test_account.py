@@ -469,8 +469,8 @@ class TestAccountRoutes:
 # ─── 模板层（accounts.html 下拉） ─────────────────────────────────────────
 
 class TestAccountsTemplate:
-    def test_accounts_page_has_update_cookie_button(self, client, db_session):
-        """账号列表每行有「更新 Cookie」按钮。"""
+    def test_accounts_page_has_edit_button(self, client, db_session):
+        """账号列表每行有合并的「编辑」按钮（备注+cookie 统一编辑）。"""
         from semilabs_hone.core.models.account import Account
         a = Account(platform="xiaohongshu", remark="test-acc", status="inactive")
         db_session.add(a); db_session.commit()
@@ -478,8 +478,11 @@ class TestAccountsTemplate:
         assert resp.status_code == 200
         # 列表展示 `备注 (平台昵称)` 双列
         assert "备注 (平台昵称)" in resp.text
-        # 每行有「更新 Cookie」按钮
-        assert "更新Cookie" in resp.text
+        # 每行有合并的「编辑」按钮（指向 /edit）
+        assert f'hx-get="/api/accounts/{a.id}/edit"' in resp.text
+        # 不再有独立的「编辑备注」「更新Cookie」按钮
+        assert "编辑备注" not in resp.text
+        assert "更新Cookie" not in resp.text
         # 添加账号表单有可选 cookie 输入框
         assert 'name="cookies"' in resp.text
 

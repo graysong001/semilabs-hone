@@ -124,13 +124,7 @@
                     hx-target="#account-edit-dialog-slot"
                     hx-swap="innerHTML"
                     class="px-3 py-1 bg-gray-500/15 text-gray-300 border border-gray-500/30 rounded text-xs font-medium hover:bg-gray-500/25">
-              编辑备注
-            </button>
-            <button hx-get="/api/accounts/{{ acct.id }}/update-cookie-dialog"
-                    hx-target="#account-edit-dialog-slot"
-                    hx-swap="innerHTML"
-                    class="px-3 py-1 bg-yellow-500/15 text-yellow-400 border border-yellow-500/30 rounded text-xs font-medium hover:bg-yellow-500/25">
-              更新Cookie
+              编辑
             </button>
             <button hx-delete="/api/accounts/{{ acct.id }}"
                     hx-confirm="确定删除？将同时清除该账号的浏览器配置与Cookie。"
@@ -146,6 +140,6 @@
   </table>
 </div>
 
-<!-- 编辑备注 dialog 占位 -->
+<!-- 编辑 dialog 占位 -->
 <div id="account-edit-dialog-slot"></div>
 {% endblock %}
