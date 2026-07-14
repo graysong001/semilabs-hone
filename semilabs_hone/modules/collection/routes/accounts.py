@@ -42,6 +42,33 @@ def _get_account_or_404(sess, account_id: int):
     return sess.query(Account).filter(Account.id == account_id).first()
 
 
+def _validate_cookie_json(cookies_str: str) -> tuple[list | None, str | None]:
+    """校验 cookie JSON 字符串：解析 + 元素级校验。
+
+    Returns:
+        (cookies_list, None) 校验通过
+        (None, error_msg) 校验失败，error_msg 含具体原因（前端展示）
+    """
+    try:
+        cookies_data = json.loads(cookies_str)
+    except json.JSONDecodeError as e:
+        return None, f"Cookie JSON 格式错误：{e}"
+    if not isinstance(cookies_data, list):
+        return None, "Cookie 必须是 JSON 数组，如 [{\"name\":\"...\",\"value\":\"...\",\"domain\":\"...\"}]"
+    if not cookies_data:
+        return None, "Cookie 数组不能为空"
+    for i, c in enumerate(cookies_data):
+        if not isinstance(c, dict):
+            return None, f"第 {i+1} 条 cookie 不是对象（缺少 name/value）"
+        if not c.get("name"):
+            return None, f"第 {i+1} 条 cookie 缺少 name 字段"
+        if "value" not in c:
+            return None, f"第 {i+1} 条 cookie 缺少 value 字段"
+        if not c.get("domain"):
+            return None, f"第 {i+1} 条 cookie 缺少 domain 字段（Playwright 注入需要）"
+    return cookies_data, None
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
@@ -217,47 +244,60 @@ async def api_edit_account(
         finally:
             sess.close()
 
-    # 2. 更新 cookie（异步 IPC）
+    # 2. 处理 cookie：严格校验 → 同步落盘 → 异步提交 IPC 验证
+    cookie_saved = False
     cookie_submitted = False
-    cookie_error = None
     if cookies and cookies.strip():
-        try:
-            cookies_data = json.loads(cookies)
-            if isinstance(cookies_data, list) and cookies_data:
-                IPCClient, IPCRequest = _ipc_client()
-                req_id = uuid.uuid4().hex[:12]
-                req = IPCRequest(
-                    request_id=req_id,
-                    module="collection",
-                    op="login",
-                    account_id=account_id,
-                    payload={
-                        "account_id": account_id,
-                        "platform": platform,
-                        "method": "cookie_import",
-                        "cookies": cookies_data,
-                        "request_id": req_id,
-                    },
-                )
-                client = IPCClient()
-                client.submit(req)
-                cookie_submitted = True
-            elif not isinstance(cookies_data, list):
-                cookie_error = "Cookie 必须是 JSON 数组"
-        except json.JSONDecodeError:
-            cookie_error = "Cookie JSON 格式错误"
+        # 2a. 严格校验（JSON 解析 + 元素级 name/value/domain）
+        cookies_data, err = _validate_cookie_json(cookies)
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
 
-    if cookie_error:
-        return JSONResponse({"ok": False, "error": cookie_error}, status_code=400)
+        # 2b. 同步落盘（立即可见，不依赖 worker）
+        from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+        cookie_dir = profile_dir_for(account_id)
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        cookie_path = cookie_dir / "cookies.json"
+        with open(cookie_path, "w") as f:
+            json.dump(cookies_data, f, ensure_ascii=False, indent=2)
+        cookie_saved = True
+
+        # 2c. 异步提交 IPC 验证（worker 有 ctx 时注入+验证+提取身份）
+        IPCClient, IPCRequest = _ipc_client()
+        req_id = uuid.uuid4().hex[:12]
+        req = IPCRequest(
+            request_id=req_id,
+            module="collection",
+            op="login",
+            account_id=account_id,
+            payload={
+                "account_id": account_id,
+                "platform": platform,
+                "method": "cookie_import",
+                "cookies": cookies_data,
+                "request_id": req_id,
+            },
+        )
+        client = IPCClient()
+        client.submit(req)
+        cookie_submitted = True
 
     msg_parts = []
     if remark_changed:
         msg_parts.append("备注已更新")
+    if cookie_saved:
+        msg_parts.append("Cookie 已保存")
     if cookie_submitted:
-        msg_parts.append("Cookie 验证中")
+        msg_parts.append("验证中")
     if not msg_parts:
         msg_parts.append("无变更")
-    return JSONResponse({"ok": True, "message": "，".join(msg_parts), "remark_changed": remark_changed, "cookie_submitted": cookie_submitted})
+    return JSONResponse({
+        "ok": True,
+        "message": "，".join(msg_parts),
+        "remark_changed": remark_changed,
+        "cookie_saved": cookie_saved,
+        "cookie_submitted": cookie_submitted,
+    })
 
 
 @router.get("/api/accounts/{account_id}/update-cookie-dialog", response_class=HTMLResponse)
@@ -433,30 +473,38 @@ async def api_create_account(
     finally:
         sess.close()
 
-    # 如果提供了 cookies，提交 IPC cookie_import
+    # 如果提供了 cookies，校验 → 同步落盘 → 异步 IPC 验证
     if cookies and cookies.strip():
-        try:
-            cookies_data = json.loads(cookies)
-            if isinstance(cookies_data, list) and cookies_data:
-                IPCClient, IPCRequest = _ipc_client()
-                req_id = uuid.uuid4().hex[:12]
-                req = IPCRequest(
-                    request_id=req_id,
-                    module="collection",
-                    op="login",
-                    account_id=new_id,
-                    payload={
-                        "account_id": new_id,
-                        "platform": platform,
-                        "method": "cookie_import",
-                        "cookies": cookies_data,
-                        "request_id": req_id,
-                    },
-                )
-                client = IPCClient()
-                client.submit(req)
-        except Exception:
-            pass  # cookie 导入失败不阻塞建壳
+        cookies_data, err = _validate_cookie_json(cookies)
+        if err:
+            # cookie 格式错：建壳已成功，重定向带标记（前端 Toast 提示）
+            return RedirectResponse(url="/accounts?cookie_error=1", status_code=303)
+
+        # 同步落盘
+        from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+        cookie_dir = profile_dir_for(new_id)
+        cookie_dir.mkdir(parents=True, exist_ok=True)
+        with open(cookie_dir / "cookies.json", "w") as f:
+            json.dump(cookies_data, f, ensure_ascii=False, indent=2)
+
+        # 异步 IPC 验证
+        IPCClient, IPCRequest = _ipc_client()
+        req_id = uuid.uuid4().hex[:12]
+        req = IPCRequest(
+            request_id=req_id,
+            module="collection",
+            op="login",
+            account_id=new_id,
+            payload={
+                "account_id": new_id,
+                "platform": platform,
+                "method": "cookie_import",
+                "cookies": cookies_data,
+                "request_id": req_id,
+            },
+        )
+        client = IPCClient()
+        client.submit(req)
 
     return RedirectResponse(url="/accounts", status_code=303)
 
