@@ -50,14 +50,21 @@
 | 08 | 录制器+LLM | 🔄 | 🟡 | 05,07 | `pytest tests/collection/test_llm_mapper.py -q` | 人录制+anthropic key+真站点 | [08](modules/08-scrapers-recorder.md) |
 | 09 | 验证码+调度 | ✅ | ✅ | 05,06 | `pytest tests/collection/test_rhythm.py -q` | captcha 真样本 | [09](modules/09-collection-captcha-scheduler.md) |
 | 10 | 导出+图片磁盘 | ✅ | ✅ | 02 | `pytest tests/collection/test_csv_export.py -q` | — | [10](modules/10-collection-export-image.md) |
-| 11 | 采集-集成 | 🔄 | 🟡 | 04,05,07,09,10 | `pytest tests/collection/test_integration.py -q` | 扫码+真抓取端到端(§20 1-6)+**冒烟门(见下)** | [11](modules/11-collection-integration.md) |
+| 11 | 采集-集成 | 🔄 | 🟡 | 04,05,07,09,10 | `pytest tests/collection/test_integration.py tests/collection/test_sop_routes.py -q` | 真扫码登录（真平台账号） | [11](modules/11-collection-integration.md) |
 | 12 | 测试 | 🔄 | ✅ | 各模块 | `pytest -q --cov=semilabs_hone --cov-fail-under=85` | — | [12](modules/12-tests.md) |
+| 13 | 真实链路 E2E | ✅ | ✅ | 05,07,11 | `pytest tests/e2e -q`（无 Chrome 自动 skip） | — | [USER_SOP](USER_SOP.md) |
 
 > **loop 自动交付候选（✅）**：01,02,03,03a,04,06,07,09,10,12 —— 共 10 个，loop 可全程自动标 done。
 > **人工签收（🟡）**：05,05a,08,11 —— loop 写代码+单测，端到验留你。
 > DM-12 为持续态，随各模块增量。
 
-> **2026-07-28 设计 review 修复**：17 项问题（P0×4/P1×3/P2×8/P3×2）按四阶段修复，全部完成，详见 [FIX_PLAN.md](FIX_PLAN.md)（分支 fix/design-review-17，F1–F13 各自原子提交）。冒烟门（人工）：真 Chrome 跑一次 search flow 返回非空 ItemRef 且 `posts` 表落行——这是 mock 绿无法覆盖的最后一里，归入 DM-11 人工门。
+> **2026-07-28 设计 review 修复**：17 项问题（P0×4/P1×3/P2×8/P3×2）按四阶段修复，全部完成，详见 [FIX_PLAN.md](FIX_PLAN.md)（分支 fix/design-review-17，F1–F13 各自原子提交）。
+>
+> **2026-07-29 SOP 推演修复**：按用户操作 SOP 逐步推演 + 真实 E2E 验证，共 33 项（含 8 个 P0），全部完成，
+> 详见 [USER_SOP.md](USER_SOP.md)；裁决已回写 `skim_design.md` §22。
+> 原本的人工冒烟门（真 Chrome 跑一次 search flow）**已自动化**为 DM-13：`pytest tests/e2e -q`
+> （真本地站点 + 真 Chrome + 真 worker 子进程 + 真 WebSocket）。DM-11 剩下的人工项只有
+> “在真实平台（小红书）用自己手机扫码登录并跑一次真抓取”—— 这一步无法自动化。
 
 ## 依赖 DAG
 

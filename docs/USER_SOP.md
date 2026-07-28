@@ -102,24 +102,39 @@ worker 按 platform.yaml 的 step 链回放：`search` → 去重 → `detail` �
 
 | # | 级别 | SOP 步 | 缺口（用户可感知的现象） | 裁决/修法 | 状态 |
 |---|---|---|---|---|---|
-| G1 | P0 | S6 | `collect_comments=False` 时 `comments` 变量未定义 → 落库抛 NameError 被宽 except 吞掉 → **一条都存不进去**，任务却报 ok | 每条笔记初始化 `comments=[]`；落库异常只吞 DB 层异常并计入 `store_failed` 上报 | ⬜ |
-| G2 | P0 | S3/S4 | login/validate/import-cookies 三个路由把 `platform` 硬编码成 xiaohongshu → 非 XHS 账号登录必错平台 | 从 DB 读 `account.platform` | ⬜ |
-| G3 | P0 | S2 | 建账号/导入 Cookie/删除都是 303 整页重定向被 HTMX 塞进 `#accounts-list` → 页面套页面 | 抽 `_accounts_table.html` 片段，三个写操作都返回片段 | ⬜ |
-| G4 | P0 | S3 | 二维码截图经 progress 上报，但 tracker 只当普通 progress 转发 → **UI 永远看不到二维码** | tracker 建 progress→WS 事件映射（`qr_ready`/`captcha_required`/`login_success`），账号页渲染二维码 | ⬜ |
-| G5 | P0 | S6 | `app.js` 从不派发 `ws:message`，任务详情页监听它 → 实时日志/统计永远不动 | app.js 派发 `CustomEvent('ws:message')`，页面脚本消费 | ⬜ |
-| G6 | P1 | S6 | 任务页每 3s 轮询 `/api/tasks/{id}/progress`，该接口不存在 → 404 刷屏且降级失效 | 实现该接口（progress 文件 + DB 状态） | ⬜ |
-| G7 | P1 | S6 | progress 里没有 percent，进度条永远 0；且 app.js 找 `progress-<id>`，模板里叫 `progress-fill` | worker 算真实百分比；统一进度条元素契约 | ⬜ |
-| G8 | P1 | S5 | 建任务零校验：账号可以是 0/不存在/别的平台/没登录 → 一路走到 worker 才炸 | 服务端四项校验 + 400 带 fix_hint；账号下拉只列该平台 active | ⬜ |
-| G9 | P1 | S6/S9 | `daily_scrape_count` 永不自增 → 日限 200 形同虚设；也无跨天重置 | 每落库一条自增并写 `last_scrape_at`；跨天自动归零（additive 列 `daily_count_date`） | ⬜ |
-| G10 | P1 | S6 | 预热用 `engine.page`，此时还是 None → 预热静默跳过（反检测 Layer 4 缺一环） | engine 暴露 `ensure_page()`；预热前先取页 | ⬜ |
-| G11 | P1 | S1/S9 | 没有任务列表页，历史任务/断点续跑找不到入口 | 加 `/tasks` 列表 + dashboard 真实计数与运行中入口 | ⬜ |
-| G12 | P1 | S9 | web 退出不停 worker → 孤儿 Chrome 常驻 | app shutdown 钩子 → `supervisor.shutdown_all()` | ⬜ |
-| G13 | P2 | S2/S5 | registry 只扫包内 `platforms/`，用户录制生成的 yaml 无处安放（设计 §19 走不通） | registry 额外扫 `data/collection/platforms/*/platform.yaml`，用户目录优先 | ⬜ |
-| G14 | P2 | S4 | 会话失效返回 `status="error"` → UI 弹"未知错误" | 契约改 `ok + valid:false`，UI 显示"未登录/已失效" | ⬜ |
-| G15 | P2 | S6 | `_upsert_post` 每个字段都写一遍 `getattr(...) or dict.get(...)`，40 行重复 | 边界处一次性归一化为 dict（`_as_mapping`） | ⬜ |
-| G16 | P2 | S6 | 搜索 flow 忽略 `sort`（URL 模板里没有 sort），评论 flow 无触发步 → 等 XHR 必超时 | XHS yaml 补 sort 参数 + 评论前 scroll 触发 | ⬜ |
-| G17 | P2 | S9 | 安静时段写死 22–07，本机测试/白天以外无法演练；无关闭开关 | `QUIET_HOURS` 支持 `off`/环境变量覆盖（`None`=不限） | ⬜ |
-| G18 | P0 | 全链路 | 端到端只有 mock 引擎测试，真实链路从未被自动验证 | 建**真站点 + 真 Chrome + 真 worker** 的 E2E（`tests/e2e/`），Chrome 缺失才 skip | ⬜ |
+| G1 | P0 | S6 | `collect_comments=False` 时 `comments` 变量未定义 → 落库抛 NameError 被宽 except 吞掉 → **一条都存不进去**，任务却报 ok | 每条笔记初始化 `comments=[]`；落库异常只吞 DB 层异常并计入 `store_failed` 上报 | ✅ |
+| G2 | P0 | S3/S4 | login/validate/import-cookies 三个路由把 `platform` 硬编码成 xiaohongshu → 非 XHS 账号登录必错平台 | 从 DB 读 `account.platform` |✅ |
+| G3 | P0 | S2 | 建账号/导入 Cookie/删除都是 303 整页重定向被 HTMX 塞进 `#accounts-list` → 页面套页面 | 抽 `_accounts_table.html` 片段，三个写操作都返回片段 |✅ |
+| G4 | P0 | S3 | 二维码截图经 progress 上报，但 tracker 只当普通 progress 转发 → **UI 永远看不到二维码** | tracker 建 progress→WS 事件映射（`qr_ready`/`captcha_required`/`login_success`），账号页渲染二维码 |✅ |
+| G5 | P0 | S6 | `app.js` 从不派发 `ws:message`，任务详情页监听它 → 实时日志/统计永远不动 | app.js 派发 `CustomEvent('ws:message')`，页面脚本消费 |✅ |
+| G6 | P1 | S6 | 任务页每 3s 轮询 `/api/tasks/{id}/progress`，该接口不存在 → 404 刷屏且降级失效 | 实现该接口（progress 文件 + DB 状态） |✅ |
+| G7 | P1 | S6 | progress 里没有 percent，进度条永远 0；且 app.js 找 `progress-<id>`，模板里叫 `progress-fill` | worker 算真实百分比；统一进度条元素契约 |✅ |
+| G8 | P1 | S5 | 建任务零校验：账号可以是 0/不存在/别的平台/没登录 → 一路走到 worker 才炸 | 服务端四项校验 + 400 带 fix_hint；账号下拉只列该平台 active |✅ |
+| G9 | P1 | S6/S9 | `daily_scrape_count` 永不自增 → 日限 200 形同虚设；也无跨天重置 | 每落库一条自增并写 `last_scrape_at`；跨天自动归零（additive 列 `daily_count_date`） | ✅ |
+| G10 | P1 | S6 | 预热用 `engine.page`，此时还是 None → 预热静默跳过（反检测 Layer 4 缺一环） | engine 暴露 `ensure_page()`；预热前先取页 | ✅ |
+| G11 | P1 | S1/S9 | 没有任务列表页，历史任务/断点续跑找不到入口 | 加 `/tasks` 列表 + dashboard 真实计数与运行中入口 |✅ |
+| G12 | P1 | S9 | web 退出不停 worker → 孤儿 Chrome 常驻 | app shutdown 钩子 → `supervisor.shutdown_all()` |✅ |
+| G13 | P2 | S2/S5 | registry 只扫包内 `platforms/`，用户录制生成的 yaml 无处安放（设计 §19 走不通） | registry 额外扫 `data/collection/platforms/*/platform.yaml`，用户目录优先 |✅ |
+| G14 | P2 | S4 | 会话失效返回 `status="error"` → UI 弹"未知错误" | 契约改 `ok + valid:false`，UI 显示"未登录/已失效" |✅ |
+| G15 | P2 | S6 | `_upsert_post` 每个字段都写一遍 `getattr(...) or dict.get(...)`，40 行重复 | 边界处一次性归一化为 dict（`_as_mapping`） | ✅ |
+| G16 | P2 | S6 | 搜索 flow 忽略 `sort`（URL 模板里没有 sort），评论 flow 无触发步 → 等 XHR 必超时 | XHS yaml 补 sort 参数 + 评论前 scroll 触发 |✅ |
+| G17 | P2 | S9 | 安静时段写死 22–07，本机测试/白天以外无法演练；无关闭开关 | `QUIET_HOURS` 支持 `off`/环境变量覆盖（`None`=不限） | ✅ |
+| G18 | P0 | 全链路 | 端到端只有 mock 引擎测试，真实链路从未被自动验证 | 建**真站点 + 真 Chrome + 真 worker** 的 E2E（`tests/e2e/`），Chrome 缺失才 skip |✅ |
+| G19 | P1 | S6/S7 | 落库丢字段：`post_type/image_urls/tags/published_at` 抓到但没写进 posts → 详情页没图没标签 | 落库补全这些列（image_urls/tags 存 JSON，published_at 解析 epoch/ISO） | ✅ |
+| G20 | P1 | S6 | `warmup.random_browse` 每页硬睡 30–90s 且 url 列表根本没被使用（调用参数写错）→ 预热要么假跑要么卡死任务 | 重写：真导航 url + 停留走 `rhythm.warmup_dwell()`（config 可调/可关），测试可中和 | ✅ |
+| G21 | P0 | S5/S6 | `_check_rhythm` 用 `except Exception: pass` 把 `DailyLimitError` 一起吞掉 → 日限红线永久失效（有计数也不生效） | 节律异常必须外抛，只有账号查库失败才兜底 | ✅ |
+| G22 | P1 | S1 | 顶部导航/引导卡指向 `/collection`，该路由不存在 → 点进去 404 | manifest 声明 `NAV`（账号/任务/素材），外壳按声明渲染真实页面 | ✅ |
+| G23 | P0 | S6 | engine 直接用 yaml 里的相对路径导航，从不拼 `base_url` → 真跑第一步就 `Cannot navigate to invalid URL`（mock page 接受任何字符串所以从未暴露） | 导航前 `urljoin(spec.base_url, rendered)`，统一在一处解析 | ✅ |
+| G24 | P0 | S6 | XHR 监听在 `goto` 之后才注册 → 页面加载时发出的请求全部错过，拦截永久失效（只剩 DOM/LLM 兜底） | 取页即武装监听并缓冲响应；`wait_xhr` 从缓冲取；导航时清缓冲防止上一页残留被误消费 | ✅ |
+| G25 | P0 | S6 | `extract_api` 只会在响应里找列表，详情类单对象响应（`{note:{...}}`）一个字段都抽不到 | 找不到列表时按单对象抽取（map 作用于根） | ✅ |
+| G26 | P1 | S6 | DOM 兜底对 JSONPath map 也照跑，产出一行全 None 的假数据入库 | 只有 `css:`/`xpath:` map 才兜底；`extract_dom` 全空时返回 `[]` | ✅ |
+| G27 | P1 | S6 | 无 API key 时每条失败项都真发一次 Anthropic 请求（网络噪声 + 401） | 无 `ANTHROPIC_API_KEY` 直接跳过 LLM 兜底 | ✅ |
+| G28 | P0 | S6 | `ScrapedPost.published_at` 只接受 str，真实平台给 epoch 整数 → 整个正文组校验失败被丢弃（标题/正文全丢） | schema 接受 str/int/float，落库侧统一解析 | ✅ |
+| G29 | P1 | S6 | `fetch_item` 只取 `items[0]`，把 `Post.interactions` 那半（点赞/收藏/评论数）直接扔掉 | 详情 flow 的多组抽取合并成一条 ScrapedPost | ✅ |
+| G30 | P1 | S9 | supervisor 用 SIGTERM 停 worker，worker 没有信号处理 → 进程直接死，`finally` 不执行，真 Chrome 变孤儿 | worker 把 SIGTERM/SIGINT 转成正常 unwind，`finally` 里终止 Chrome | ✅ |
+| G31 | P0 | S3/S5/S6 | `worker_main.py` **没有 `if __name__ == "__main__"`** → supervisor 的 `python -m ... worker_main` 只是导入模块然后退出，web→worker 这条路从来没通过 | 补 `__main__` 块调用 `sys.exit(main())`；新增"模块可执行"回归测试 | ✅ |
+| G32 | P0 | S3/S6 | worker 拉起 Chrome 后立刻 `connect_over_cdp` → 首次必 ECONNREFUSED，worker 当场失败 | `attach()` 内置等端口就绪重试（默认 30s） | ✅ |
+| G33 | P2 | S9 | worker 日志重定向到文件后是块缓冲，被 SIGTERM 杀掉时日志尾巴全丢，事故没有现场 | supervisor 用 `python -u` + `PYTHONUNBUFFERED=1` 拉起 | ✅ |
 
 ---
 

@@ -710,3 +710,58 @@ UI ◀──WS error(BrowserClosed)── web
 - **纯 SSR/无 XHR 站点**：`wait_selector`+`extract_dom` 走 HTML→LLM，成本高、降级路径，MVP 不优先；
 - **跨模块并发上限**：MVP 不做，待 analysis 上线时按"全厂 N 个 worker 上限"补；
 - **分析数据契约**：defer 到 analysis 立项。
+
+---
+
+## 22. SOP 推演回写（2026-07-29，USER_SOP G1–G33 固化）
+
+第二轮 review 从**用户操作 SOP**（选平台→登录→建任务→抓取→看数据→导出→异常恢复）逐步推演，
+用"真站点 + 真 Chrome + 真 worker"的 E2E 验证，共固化 33 项裁决（清单见 [USER_SOP.md](USER_SOP.md)）。
+以下是对本文档既有章节的补充契约。
+
+### 22.1 §5.2 API 拦截的真正时序（G23/G24/G25/G26）
+
+- **拦截必须先于触发**：响应监听在**取得 page 时**武装（`engine.ensure_page`），不是在 `wait_xhr` 时。
+  页面自身加载期发出的 XHR 早于任何 step，晚装监听等于永远抓不到。
+- 监听把响应体读出后放入**有界缓冲**（200 条）；`wait_xhr` 从缓冲里按 `url_pattern`(+method) 取最早未消费的一条。
+- **导航即清缓冲**：上一页的残留响应绝不能被下一页的 `wait_xhr` 误消费（同一 flow 抓多条笔记时会串号）。
+- step 里的 URL 一律先 `urljoin(spec.base_url, 渲染后的相对路径)`：录制产物是站内相对路径，浏览器无法直接导航。
+- 抽取支持两种响应形状：列表型（search/comments，逐项抽取）与**单对象型**（detail，map 作用于根）。
+- DOM 兜底只在 map 里含 `css:`/`xpath:` 时才有意义；JSONPath map 兜底会产出全 None 的假行，禁止入库。
+
+### 22.2 §6 worker 进程契约（G30/G31/G32/G33）
+
+- `worker_main` 必须能被 `python -m <WORKER_ENTRY>` 直接执行（`__main__` 块 → `sys.exit(main())`）——
+  supervisor 就是这么拉起它的；缺这一块整条 web→worker 链路是死的。
+- `attach()` 自带"等 CDP 端口就绪"重试（默认 30s）：刚 Popen 的 Chrome 必然还没监听。
+- worker 把 SIGTERM/SIGINT 转成正常 unwind，`finally` 里 `terminate()` Chrome，避免孤儿浏览器。
+- supervisor 用 `python -u` + `PYTHONUNBUFFERED=1` 拉起，保证被杀时日志尾巴不丢。
+
+### 22.3 §12 节律与安全红线（G9/G20/G21）
+
+- 日限（200/账号/天）要真的可判：每落库一条自增 `accounts.daily_scrape_count`，跨天按 `daily_count_date` 归零。
+- **节律异常必须外抛**：`QuietHoursError`/`DailyLimitError` 不允许被兜底 `except` 吞掉（只有账号查库失败才兜底）。
+- 预热是真导航 + 真停留（`rhythm.warmup_dwell`）；`config.WARMUP_PAGES=None` 关闭。
+- 延迟/安静时段/预热均可经环境变量覆盖，**默认值即安全基线**，调低的封号风险由使用者自担。
+
+### 22.4 §13 UI 契约（G3/G4/G5/G6/G7/G11/G22）
+
+- 写操作（建号/删号/导 Cookie）返回**账号表片段**，由 HTMX 原地替换；不要整页重定向。
+- worker 的关键 progress 消息映射为一等 WS 事件：`qr_ready`（带截图 base64）/`captcha_required`/`login_success`/`disk_warn`；
+  `validate` 的结果是 `session_status{valid}`（会话失效是答案，不是错误）。
+- `app.js` 把每条 WS 消息再派发为 DOM 事件 `ws:message`，页面脚本消费；进度条元素用 `data-progress-for="<task_id>"`。
+- progress 是**被覆写的快照 + 1Hz 轮询**，不是事件流；`GET /api/tasks/{id}/progress` 是 WS 断线时的降级通道。
+- 导航项由模块 manifest 的 `NAV` 声明，外壳渲染真实存在的页面。
+
+### 22.5 §19 用户录制平台的落地位置（G13）
+
+录制生成的 `platform.yaml` 属于**用户数据**，写入 `data/collection/platforms/<platform>/platform.yaml`；
+registry 同时扫包内 `platforms/` 与该用户目录，**同名时用户目录优先**。用户目录里的 spec 是纯声明式 YAML，
+不加载 `adapter.py`（不执行用户目录下的代码）。
+
+### 22.6 验收门升级（原 §20 第 12 条）
+
+`docs/DEV_PLAN.md` 的"真实链路冒烟"从人工门变为**自动门**：`tests/e2e/` 用 stdlib HTTP 起一个真站点、
+以产品自身的 `launch_real_chrome + connect_over_cdp` 起真 Chrome，跑真 handler / 真 worker 子进程，
+断言 SQLite 真有数据、`/posts` 与 `/api/export` 真读得到、取消真生效、`navigator.webdriver` 真是 undefined。
+没有 Chrome 的环境（CI）自动 skip。
