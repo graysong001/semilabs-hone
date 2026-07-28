@@ -12,10 +12,10 @@
 
 | 阶段 | 目标 | 包含项 | 状态 |
 |---|---|---|---|
-| P0 | 系统能跑：打通 serve→worker→engine 真实链路 | F1–F3 | 🔄 |
-| P1 | 系统敢跑：安全红线真实化 | F4–F6 | ⬜ |
-| P2 | 符合设计：结构修补 | F7–F12 | ⬜ |
-| P3 | 治理：设计文档回写 + 进度校正 | F13 | ⬜ |
+| P0 | 系统能跑：打通 serve→worker→engine 真实链路 | F1–F3 | ✅ |
+| P1 | 系统敢跑：安全红线真实化 | F4–F6 | ✅ |
+| P2 | 符合设计：结构修补 | F7–F12 | ✅ |
+| P3 | 治理：设计文档回写 + 进度校正 | F13 | ✅ |
 
 ---
 
@@ -123,7 +123,7 @@ extract step：`saved` 响应为空时调 `field_extract.extract_dom(page, group
 `server.py`：写 result 后删 request 文件；每 60 轮 poll gc 一次超 1h 的 results/progress/cancel 孤儿；`serve_worker` 加 `idle_timeout`（默认 `config.WORKER_IDLE_TIMEOUT`），超时退出主循环，worker_main 退出前 `proc.terminate()` Chrome。`client.wait_result` 读到 result 后删文件。`handler_scrape_task` resume 时从 posts 表读该 task 已抓 platform_id 预填 `seen_ids`（跳过详情/评论重复请求）。
 **验收门**：`pytest tests/core/test_ipc.py -q` 绿 + 新增 gc/idle/cleanup 测试；resume 跳过测试。
 
-### F12 engine LLM 模型走 config（review P2-15）　状态：⬜
+### F12 engine LLM 模型走 config（review P2-15）　状态：✅ (9d1c6a8)
 
 `_llm_fallback` 用 `config.LLM_MODEL`（lazy import），删硬编码 `claude-haiku-4-5-20250414`。
 **验收门**：测试断言调用模型名 == config.LLM_MODEL。
@@ -132,7 +132,7 @@ extract step：`saved` 响应为空时调 `field_extract.extract_dom(page, group
 
 ## P3 治理
 
-### F13 设计文档回写 + 进度校正（review P3-16/17）　状态：⬜
+### F13 设计文档回写 + 进度校正（review P3-16/17）　状态：✅
 
 - `skim_design.md` 补 §6.6「worker 资源注入与生命周期契约」（F1/F2 的裁决固化：资源注入方式、per-(module,account) 匹配、supervisor/tracker 职责）。
 - `skim_design.md` §4.3 注明：CDP attach 模式下 viewport 用真实窗口，timezone/locale/color-scheme 经 Emulation override。

@@ -215,6 +215,8 @@ async def attach(port: int) -> tuple[Browser, BrowserContext]:
 - UA 默认 = 本机真实 Chrome UA（见 §5.3），不覆盖；
 - `--user-data-dir=data/collection/profiles/<account_id>/` 隔离 → Cookie/localStorage 自然持久化。
 
+**CDP attach 模式下的落地方式**（2026-07-28 review F6 固化）：`assign_fingerprint()` 每账号独立随机抽取（**非进程级单例**，多账号同指纹会关联封号）；viewport 用真实窗口**不覆盖**（CDP 接管的是用户真窗口，强改尺寸反而暴露）；timezone/locale/color-scheme 由 engine 在取得 page 后逐 page 经 CDP `Emulation.setTimezoneOverride/setLocaleOverride/setEmulatedMedia` 应用（`fingerprint.apply_to_page(page, fp)`，每 page 一次），不用 init_script 篡改 navigator。
+
 ### 4.4 最小化 Stealth 注入（Layer 3）
 
 移除 `playwright-stealth`。真 Chrome 的 navigator/WebGL/Canvas 已是真值，**伪造反而暴露**。只注入 `NOISE_ONLY_SCRIPT`：
@@ -317,6 +319,17 @@ class IPCResult(BaseModel):
 ### 6.5 D9 修复
 
 BrowserPool 概念消失：worker 全程持有 Chrome+ctx，不向 Web 暴露 page；scraper 在 worker 内直接用 `attach()` 的 ctx。
+
+### 6.6 worker 资源注入与生命周期契约（2026-07-28 review F1/F2/F11 固化）
+
+**问题**：§6.4 只说了"worker 启动资源 + 注册 handler"，但资源（browser ctx/account）如何流向 handler/engine 没有契约，曾导致 engine 拿不到 ctx 静默零抓取。固化如下：
+
+1. **资源注入**：worker `attach()` 后调模块的 `handlers.set_worker_resources(ctx=ctx, account=account)`（account 从 DB 读、detach）；`_get_engine()` 用注入资源构造 engine。handler 签名与 IPC 协议不变。
+2. **请求路由**：`serve_worker(module, account_id=N)` 按 `(module, account_id)` 匹配——请求的 `account_id` 为空或与 worker 绑定账号一致才被拾取；`account_id=None` 的 worker 是模块通用 worker。
+3. **取消即时化**：`progress_cb` 每次写 progress 前自检 cancel 哨兵，命中即抛内部 `_RequestCancelled` → 写 `cancelled` result（长任务取消粒度=单步）。
+4. **web 侧生命周期**：路由 submit 后调 `supervisor.ensure_worker(module, account_id)`（进程内 `{(module,account): Popen}` 注册表，按 manifest `WORKER_ENTRY` 拉起，死进程自动清理）+ `tracker.track_request(...)`（后台任务：轮询 progress→WS 广播；等 result→广播终态/ws_events→删 result 文件；worker 死/超时→广播 BrowserClosedError）。
+5. **总线卫生**：request 文件在写 result 时删除、result 文件在 web 侧读取后删除（consume-on-read）；worker 每 60 轮 poll gc 一次超 1h 的 results/progress/cancel 孤儿；`serve_worker` 空闲 `WORKER_IDLE_TIMEOUT`（600s）无匹配请求自动退出（下次 submit 由 supervisor 重生），退出前 worker_main `proc.terminate()` Chrome。
+6. **captcha 契约**：handler 抛 `CaptchaError`（category=captcha）→ server 写 `paused` result + `ws_events:[captcha_required]`；`handler_scrape_task` 抛出前先把 task 行置 `paused`，DB 与 IPC 不错位。
 
 ---
 

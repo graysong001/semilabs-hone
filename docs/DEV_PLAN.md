@@ -41,19 +41,23 @@
 | 01 | core 基座 | ✅ | ✅ | — | `pytest tests/core/test_retry.py -q` | — | [01](modules/01-core-foundation.md) |
 | 02 | 数据模型 | ✅ | ✅ | 01 | `pytest tests/core/test_models.py -q` | — | [02](modules/02-data-models.md) |
 | 03 | IPC 总线 | ✅ | ✅ | 01 | `pytest tests/core/test_ipc.py -q` | — | [03](modules/03-ipc-bus.md) |
+| 03a | IPC 总线补强（F1/F3/F9/F11：账号路由、cancel 即时化、captcha paused、gc/idle 退出/consume-on-read） | ✅ | ✅ | 03 | `pytest tests/core/test_ipc.py -q` | — | [FIX_PLAN](FIX_PLAN.md) |
 | 04 | Web 外壳 | ✅ | ✅ | 02,03 | `pytest tests/core/test_routes.py -q` | serve 起+人看渲染 | [04](modules/04-web-shell.md) |
 | 05 | 采集-浏览器 | 🔄 | 🟡 | 01,03 | `pytest tests/collection/test_cdp.py -q` | 真 Chrome+扫码+navigator.webdriver | [05](modules/05-collection-browser.md) |
+| 05a | 浏览器接线补强（F2/F5/F6：CLI serve/worker 接线、supervisor/tracker、登录三级经 ctx 真实化、按账号指纹+CDP Emulation apply） | 🔄 | 🟡 | 05 | `pytest tests/collection/test_integration.py -q` | 真扫码登录端到端 | [FIX_PLAN](FIX_PLAN.md) |
 | 06 | 采集-反检测 | ✅ | ✅ | 05 | `pytest tests/collection/test_human_behavior.py tests/collection/test_fingerprint.py -q` | 真实注入效果人看 | [06](modules/06-collection-anti-detect.md) |
 | 07 | 抓取引擎 | ✅ | ✅ | 05,06 | `pytest tests/collection/test_field_extract.py tests/collection/test_engine.py -q` | 真跑 XHR(可选) | [07](modules/07-scrapers-engine.md) |
 | 08 | 录制器+LLM | 🔄 | 🟡 | 05,07 | `pytest tests/collection/test_llm_mapper.py -q` | 人录制+anthropic key+真站点 | [08](modules/08-scrapers-recorder.md) |
 | 09 | 验证码+调度 | ✅ | ✅ | 05,06 | `pytest tests/collection/test_rhythm.py -q` | captcha 真样本 | [09](modules/09-collection-captcha-scheduler.md) |
 | 10 | 导出+图片磁盘 | ✅ | ✅ | 02 | `pytest tests/collection/test_csv_export.py -q` | — | [10](modules/10-collection-export-image.md) |
-| 11 | 采集-集成 | 🔄 | 🟡 | 04,05,07,09,10 | `pytest tests/collection/test_integration.py -q` | 扫码+真抓取端到端(§20 1-6) | [11](modules/11-collection-integration.md) |
+| 11 | 采集-集成 | 🔄 | 🟡 | 04,05,07,09,10 | `pytest tests/collection/test_integration.py -q` | 扫码+真抓取端到端(§20 1-6)+**冒烟门(见下)** | [11](modules/11-collection-integration.md) |
 | 12 | 测试 | 🔄 | ✅ | 各模块 | `pytest -q --cov=semilabs_hone --cov-fail-under=85` | — | [12](modules/12-tests.md) |
 
-> **loop 自动交付候选（✅）**：01,02,03,04,06,07,09,10,12 —— 共 9 个，loop 可全程自动标 done。
-> **人工签收（🟡）**：05,08,11 —— loop 写代码+单测，端到验留你。
+> **loop 自动交付候选（✅）**：01,02,03,03a,04,06,07,09,10,12 —— 共 10 个，loop 可全程自动标 done。
+> **人工签收（🟡）**：05,05a,08,11 —— loop 写代码+单测，端到验留你。
 > DM-12 为持续态，随各模块增量。
+
+> **2026-07-28 设计 review 修复**：17 项问题（P0×4/P1×3/P2×8/P3×2）按四阶段修复，全部完成，详见 [FIX_PLAN.md](FIX_PLAN.md)（分支 fix/design-review-17，F1–F13 各自原子提交）。冒烟门（人工）：真 Chrome 跑一次 search flow 返回非空 ItemRef 且 `posts` 表落行——这是 mock 绿无法覆盖的最后一里，归入 DM-11 人工门。
 
 ## 依赖 DAG
 
