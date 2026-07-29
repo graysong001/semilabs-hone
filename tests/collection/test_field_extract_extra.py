@@ -90,8 +90,9 @@ class TestExtractDomEdges:
         assert rows == []
 
     def test_xpath_returns_none(self):
+        # xpath maps yield None fields; an all-None row is dropped (G26)
         rows = extract_dom("<html></html>", "Post.body", {"x": "xpath://div"})
-        assert rows[0]["x"] is None
+        assert rows == []
 
     def test_attr_extraction(self):
         html = '<a href="https://x.com">link</a>'
@@ -99,8 +100,9 @@ class TestExtractDomEdges:
         assert rows[0]["url"] == "https://x.com"
 
     def test_bad_selector_returns_none(self):
+        # unusable selector extracts nothing → no fake row (G26)
         rows = extract_dom("<div>x</div>", "Post.body", {"t": "css:"})
-        assert rows[0]["t"] is None or rows == [{}] or len(rows) >= 1
+        assert rows == []
 
     def test_empty_html_returns_empty(self):
         assert extract_dom("", "Post.body", {"t": "css:div"}) == []

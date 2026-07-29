@@ -225,6 +225,8 @@ class TestValidateGroup:
 
     async def test_llm_fallback_success_parses_response(self, monkeypatch):
         eng = GenericEngine(spec=_spec_with_flow("f", []))
+        # G27: without credentials the fallback is skipped entirely
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         fake_msg = MagicMock()
         fake_msg.content = [MagicMock(text='{"item_id": "llm1", "platform": "tp"}')]
         fake_client = MagicMock()
@@ -320,7 +322,7 @@ class TestWaitXhr:
                 return {"items": [1, 2]}
 
             async def text(self):
-                return ""
+                return '{"items": [1, 2]}'
 
         class _PageXhr:
             def on(self, event, cb):

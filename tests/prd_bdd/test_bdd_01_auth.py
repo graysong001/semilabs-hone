@@ -100,11 +100,14 @@ class TestScenario12PortConflict:
             async def start(self):
                 return self
 
+            async def stop(self):
+                pass
+
         fake_pw_mod = type(sys)("playwright.async_api")
         fake_pw_mod.async_playwright = lambda: _FakePW()
         with patch.dict(sys.modules, {"playwright.async_api": fake_pw_mod}):
             with pytest.raises(cdp.CDPAttachError) as exc_info:
-                await cdp.attach(9333)
+                await cdp.attach(9333, timeout=0)
         assert cdp.CDP_PORT_BUSY_HINT in str(exc_info.value)
 
     def test_worker_main_exits_nonzero_on_cdp_attach_error(self, tmp_data_dir, monkeypatch):

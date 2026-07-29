@@ -22,7 +22,7 @@ def test_dm06_anti_detect_contract():
         assert callable(getattr(hb, name, None)), f"human_behavior 缺 {name}"
     fp = pytest.importorskip("semilabs_hone.modules.collection.anti_detect.fingerprint")
     assert hasattr(fp, "Fingerprint")
-    for name in ["assign_fingerprint", "load_fingerprint", "apply_fingerprint"]:
+    for name in ["assign_fingerprint", "load_fingerprint", "apply_to_page"]:
         assert callable(getattr(fp, name, None)), f"fingerprint 缺 {name}"
     ua = pytest.importorskip("semilabs_hone.modules.collection.anti_detect.ua_pool")
     assert callable(getattr(ua, "get_ua", None))

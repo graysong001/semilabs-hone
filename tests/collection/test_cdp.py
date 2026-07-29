@@ -128,7 +128,7 @@ class TestCDPAttachError:
 
     @pytest.mark.asyncio
     async def test_attach_wraps_connection_failure(self):
-        """connect_over_cdp failure → CDPAttachError with the busy-port hint."""
+        """connect_over_cdp failure (retry window exhausted) → CDPAttachError."""
         import asyncio
 
         class _FakePW:
@@ -140,13 +140,16 @@ class TestCDPAttachError:
             async def start(self):
                 return self
 
+            async def stop(self):
+                pass
+
         # Stub async_playwright so attach does not need real playwright.
         import sys
         fake_pw_mod = type(sys)("playwright.async_api")
         fake_pw_mod.async_playwright = lambda: _FakePW()
         with patch.dict(sys.modules, {"playwright.async_api": fake_pw_mod}):
             with pytest.raises(cdp.CDPAttachError) as exc_info:
-                await cdp.attach(9333)
+                await cdp.attach(9333, timeout=0)
         assert cdp.CDP_PORT_BUSY_HINT in str(exc_info.value)
 
 

@@ -44,30 +44,24 @@ class MockResponse:
 
 
 def _make_mock_page(search_response: dict | None = None, url_pattern: str = "/api/search"):
-    """Create a mock page object for testing.
+    """Create a page stand-in that emits its XHR response on navigation.
 
-    Fires the XHR response when a 'response' listener is registered,
-    using loop.call_soon so wait_for has already started.
+    Mirrors a real browser: the response listener is armed before the
+    navigation (engine.ensure_page), and the page's own request fires while
+    loading (USER_SOP G24).
     """
     resp = search_response or _load_fixture("search_response.json")
 
     class MockPage:
         def __init__(self):
             self._listeners: dict[str, list] = {}
-            self._goto_called = False
 
         async def goto(self, url: str):
-            self._goto_called = True
+            for callback in self._listeners.get("response", []):
+                callback(MockResponse(f"https://example.com{url_pattern}", resp))
 
         def on(self, event: str, callback):
             self._listeners.setdefault(event, []).append(callback)
-            # Fire the response via call_soon so wait_for starts before callback fires
-            if event == "response" and self._goto_called:
-                loop = asyncio.get_running_loop()
-                loop.call_soon(
-                    callback,
-                    MockResponse(f"https://example.com{url_pattern}", resp),
-                )
 
         def remove_listener(self, event: str, callback):
             if event in self._listeners:
@@ -258,19 +252,16 @@ class _ScrollPage:
         self.wheel_calls = 0
 
     async def goto(self, url: str):
-        self._goto_called = True
+        # Emit the XHR while "loading" — the listener is armed at ensure_page
+        # time, before navigation (USER_SOP G24).
+        for callback in self._listeners.get("response", []):
+            callback(MockResponse(f"https://example.com{self._url}", self._resp))
 
     async def go_back(self):
         self.go_back_calls += 1
 
     def on(self, event: str, callback):
         self._listeners.setdefault(event, []).append(callback)
-        if event == "response" and self._goto_called:
-            loop = asyncio.get_running_loop()
-            loop.call_soon(
-                callback,
-                MockResponse(f"https://example.com{self._url}", self._resp),
-            )
 
     def remove_listener(self, event, callback):
         try:

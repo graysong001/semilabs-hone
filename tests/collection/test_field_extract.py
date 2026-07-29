@@ -190,10 +190,10 @@ class TestExtractDom:
         assert results[0]["url"] == "https://example.com"
 
     def test_css_no_match(self):
-        """No matching selector returns None, not crash."""
+        """Nothing matched means no row at all (USER_SOP G26: no fake rows)."""
         html = "<div>no match</div>"
         results = extract_dom(html, "test", {"title": "css:.nonexistent"})
-        assert results[0]["title"] is None
+        assert results == []
 
     def test_empty_html(self):
         """Empty HTML should return list with None values."""
