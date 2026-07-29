@@ -4,9 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}semilabs-hone{% endblock %}</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <!-- Vendored locally: a local-first tool must not depend on a CDN at runtime. -->
+  <link rel="stylesheet" href="/static/vendor/pico.min.css">
   <link rel="stylesheet" href="/static/style.css">
-  <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  <script src="/static/vendor/htmx.min.js" defer></script>
 </head>
 <body>
   <nav class="container-fluid">
@@ -16,7 +17,9 @@
     <ul class="nav-tabs">
       {% set mods = get_modules() %}
       {% for mid, mod in mods.items() %}
-      <li><a href="/{{ mid }}" class="nav-tab">{{ mod.name }}</a></li>
+        {% for entry in mod.nav or [] %}
+        <li><a href="{{ entry.url }}" class="nav-tab">{{ mod.name }} · {{ entry.label }}</a></li>
+        {% endfor %}
       {% endfor %}
     </ul>
     <ul>

@@ -300,10 +300,14 @@ def test_create_third_task_still_only_one_running(client: TestClient):
 # ---------------------------------------------------------------------------
 
 def test_base_includes_htmx_script(client: TestClient):
-    """T30: base.html must load htmx.js (else all hx- attrs are inert)."""
+    """T30: base.html must load htmx.js (else all hx- attrs are inert).
+
+    htmx is vendored locally (/static/vendor/htmx.min.js): a local-first
+    tool must not depend on a CDN at runtime.
+    """
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "htmx.org" in resp.text
+    assert "/static/vendor/htmx.min.js" in resp.text
 
 
 def test_base_has_heartbeat_indicator(client: TestClient):

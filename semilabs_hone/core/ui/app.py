@@ -56,12 +56,14 @@ def _discover_modules() -> list[dict]:
         module_id = getattr(manifest, "MODULE_ID", mod_dir.name)
         routes = getattr(manifest, "ROUTES", [])
         worker_entry = getattr(manifest, "WORKER_ENTRY", None)
+        nav = getattr(manifest, "NAV", [])
 
         results.append({
             "name": name,
             "module_id": module_id,
             "routes": routes,
             "worker_entry": worker_entry,
+            "nav": nav,
         })
 
     return results
