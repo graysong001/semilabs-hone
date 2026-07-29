@@ -16,6 +16,14 @@
   background-color: var(--pico-secondary-background);
 }
 
+/* Brand link (base.html) */
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-decoration: none;
+}
+
 /* WS status indicator */
 .ws-indicator {
   display: inline-flex;
@@ -63,7 +71,11 @@
   border-left: 4px solid var(--pico-primary);
 }
 
-/* Progress bar (for future task progress) */
+/* Progress (task_detail.html) */
+.progress-container {
+  margin: 1.5rem 0;
+}
+
 .progress-bar {
   width: 100%;
   height: 4px;
@@ -72,10 +84,18 @@
   overflow: hidden;
 }
 
+/* task_detail.html uses .progress-fill; keep .progress-bar-fill as alias. */
+.progress-fill,
 .progress-bar-fill {
   height: 100%;
   background-color: var(--pico-primary);
   transition: width 0.3s;
+}
+
+#progress-text {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
 }
 
 /* Toast notifications (PRD §5.1.2: 右上角, 3s) */
@@ -159,6 +179,16 @@
   color: #c9c9e0;
 }
 
+.badge.inactive {        /* account: inactive (复用 muted 样式) */
+  background-color: var(--pico-secondary-background);
+  color: var(--pico-muted-color);
+}
+
+.badge.suspended {       /* account: suspended (复用 error 样式) */
+  background-color: var(--pico-del-color);
+  color: var(--pico-del-contrast, #fff);
+}
+
 @keyframes badge-blink {
   50% { opacity: 0.25; }
 }
@@ -192,4 +222,132 @@
 @keyframes heartbeat-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+/* Real-time log console (task_detail.html; 尺寸由模板 inline style 定) */
+.log-container {
+  margin: 1.5rem 0;
+}
+
+.task-log {
+  border: 1px solid var(--pico-muted-border-color);
+  line-height: 1.65;
+}
+
+.task-log:empty::before {
+  content: "等待 worker 上报…";
+  color: var(--pico-muted-color);
+}
+
+.task-log > div {
+  white-space: pre-wrap;
+}
+
+/* Action buttons row (task_detail.html) */
+.action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.action-buttons button,
+.action-buttons a[role="button"] {
+  width: auto;
+  margin: 0;
+}
+
+/* Inline notifications (task_detail.html JS 动态创建 .alert-*) */
+.notification-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.alert {
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.5rem;
+  border-left: 3px solid var(--pico-muted-color);
+  background-color: var(--pico-card-background-color);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  font-size: 0.85rem;
+}
+
+.alert-info { border-left-color: var(--pico-primary); }
+.alert-warn { border-left-color: var(--pico-warning-color, #f0a500); }
+.alert-error { border-left-color: var(--pico-del-color); }
+
+/* Task creation result (task_new.html / tasks_list.html / _task_new_dialog.html) */
+.task-result:not(:empty) {
+  margin-top: 1.25rem;
+}
+
+.task-result article {
+  margin: 0;
+}
+
+/* Filter form (posts.html) */
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.filter-form label {
+  margin: 0;
+}
+
+.filter-form button {
+  width: auto;
+}
+
+/* Posts browsing (posts.html / post_detail.html) */
+.post-content {
+  white-space: pre-wrap;
+  line-height: 1.75;
+  font-size: 0.95rem;
+}
+
+.comment-item {
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  font-size: 0.9rem;
+}
+
+.comment-item:last-child {
+  border-bottom: 0;
+}
+
+.pagination {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1.25rem;
+  font-size: 0.85rem;
+}
+
+.pagination a,
+.pagination span {
+  padding: 0.3rem 0.7rem;
+  border-radius: 8px;
+  text-decoration: none;
+}
+
+.pagination a:hover {
+  background-color: var(--pico-secondary-background);
+}
+
+.pagination .current {
+  background-color: var(--pico-primary);
+  color: var(--pico-primary-inverse);
+}
+
+/* HTMX feedback: dim the swapping region while a request runs */
+.htmx-request,
+.htmx-request.htmx-indicator {
+  opacity: 0.6;
+  transition: opacity 0.15s;
 }
