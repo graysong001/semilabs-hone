@@ -75,13 +75,13 @@ git cherry-pick d810008 e8e027c f8881a5 7e5051a
 
 | # | 任务 | fix 线参照 | 要点 |
 |---|---|---|---|
-| 4.1 | `ipc/server.py` 合并 | 同路径 | 在 feat 版（burn/坏 JSON 容错/control/心跳/need_human）基础上移植：F1 per-(module,account) 路由、F11 idle 退出（WORKER_IDLE_TIMEOUT）+ 孤儿 GC、F3 progress_cb 取消即时化（_RequestCancelled）、F9 ws_events 透传 |
-| 4.2 | `ipc/client.py`：result consume-on-read（F11） | 同路径 | 并入 feat 版（保留 poll_heartbeat） |
-| 4.3 | `browser/worker_main.py` 合并 | 同路径 | 移植：signal handlers（SIGTERM/SIGINT→正常 unwind）、Chrome `proc.terminate()` 兜底（与 feat 的 browser.close() 并存，先 close 后 terminate）、`__main__` 块（G31，supervisor 拉起依赖）、account 加载+`set_worker_resources(ctx, account)` 双参注入（feat 的 `set_worker_ctx` 单参版升级为兼容签名） |
-| 4.4 | supervisor/tracker 能力并入 spawner/watchdog | `core/ipc/supervisor.py`、`core/ui/tracker.py` | **裁决：保留 feat 的 `worker_spawner.py`/`watchdog.py` 入口与既有接线**。移入 fix 能力：per-(module,account) 进程注册表与死进程清理、submit 时按需拉起；tracker 的 progress→WS relay 与 feat 的 `run_progress_relay` 合并（留一个），补上 ws_events 透传与 BrowserClosedError 广播 |
-| 4.5 | `core/ui/app.py` 合并 | 同路径 | feat 的 startup（watchdog+relay）保留；移植 fix 的 shutdown `supervisor.shutdown_all()`（G12 防孤儿 Chrome，接到 spawner 的注册表上） |
+| 4.1 ✅ | `ipc/server.py` 合并 | 同路径 | feat 基础（burn/坏 JSON/control/心跳/need_human）上已移入：F1 路由（新增 `_peek_request` 先判路由后 burn，避免烧掉别人的请求）、F11 idle 退出+孤儿 GC、F3 `_RequestCancelled` 取消即时化、F9 ws_events 透传 |
+| 4.2 ✅ | `ipc/client.py`：result consume-on-read（F11） | 同路径 | 已并入（poll_heartbeat 保留） |
+| 4.3 ✅ | `browser/worker_main.py` 合并 | 同路径 | signal handlers、proc.terminate() 兜底（先 close 后 terminate）、`__main__` 块(G31)、account 加载+`set_worker_resources(ctx, account)`（handlers 侧已升级兼容签名，`set_worker_ctx` 保留为别名）；serve_worker 传 account_id |
+| 4.4 ✅ | supervisor/tracker 能力并入 spawner/watchdog | `core/ipc/supervisor.py`、`core/ui/tracker.py` | 已按裁决保留 feat 入口：worker_spawner 得到 per-(module,account) 注册表+manifest WORKER_ENTRY+日志重定向(G33)+ensure_worker/is_alive/stop_worker/shutdown_all；run_progress_relay 得到 G4 类型化事件+终态广播+result consume-on-read；watchdog 事件补 category=BrowserClosedError（死 worker 广播经 watchdog 兜底，非 per-request tracker） |
+| 4.5 ✅ | `core/ui/app.py` 合并 | 同路径 | startup（watchdog+relay）保留；shutdown 已接 `worker_spawner.shutdown_all()`（G12） |
 
-**验收门**：`pytest tests/core/test_ipc.py tests/core/test_worker_spawner.py -q` 全绿；fix 线 `tests/core/test_supervisor.py`/`test_tracker.py` 适配移植后并入（测 spawner 新能力）。
+**验收门：✅**（2026-07-29：test_ipc+test_worker_spawner+relay/wiring/s9a 共 87 绿；fix 线 test_supervisor 已适配并入 test_worker_spawner（含 G31 模块可执行回归）；tracker 测试由 relay/watchdog 测试覆盖不另移植；全量 636 绿。提交 d8a8b03/3d0b4bd）
 
 ---
 
