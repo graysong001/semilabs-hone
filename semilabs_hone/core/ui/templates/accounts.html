@@ -146,8 +146,9 @@
 <script>
 window.addEventListener('load', function() {
   const params = new URLSearchParams(window.location.search);
-  if (params.get('cookie_error')) {
-    showToast({severity: 'error', message: 'Cookie 格式错误，账号已创建但 cookie 未保存，请点「编辑」重新填写', duration: 5000});
+  const cookieErr = params.get('cookie_error');
+  if (cookieErr) {
+    showToast({severity: 'error', message: 'Cookie 保存失败：' + cookieErr + '（账号已创建，请点编辑修正）', duration: 6000});
   }
   if (params.get('error') === 'remark_required') {
     showToast({severity: 'error', message: '账号备注不能为空', duration: 3000});

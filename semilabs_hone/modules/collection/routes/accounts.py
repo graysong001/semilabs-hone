@@ -477,8 +477,9 @@ async def api_create_account(
     if cookies and cookies.strip():
         cookies_data, err = _validate_cookie_json(cookies)
         if err:
-            # cookie 格式错：建壳已成功，重定向带标记（前端 Toast 提示）
-            return RedirectResponse(url="/accounts?cookie_error=1", status_code=303)
+            # cookie 格式错：建壳已成功，重定向带具体原因（URL encode，前端 Toast）
+            from urllib.parse import quote
+            return RedirectResponse(url=f"/accounts?cookie_error={quote(err)}", status_code=303)
 
         # 同步落盘
         from semilabs_hone.modules.collection.browser.profile import profile_dir_for

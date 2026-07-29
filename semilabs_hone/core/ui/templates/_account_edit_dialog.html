@@ -8,7 +8,17 @@
     </div>
     <form hx-post="/api/accounts/{{ account.id }}/edit"
           hx-swap="none"
-          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();const r=JSON.parse(event.detail.xhr.responseText);showToast({severity:'success',message:r.message||'已更新',duration:2000});setTimeout(()=>location.reload(),2000);}else if(event.detail.xhr.status===409){const r=JSON.parse(event.detail.xhr.responseText);showToast({severity:'warn',message:r.error||'账号冲突',duration:4000});}else{showToast({severity:'error',message:'更新失败',duration:3000});}">
+          hx-on::after-request="
+            let resp=null;
+            try{resp=event.detail.xhr.responseText?JSON.parse(event.detail.xhr.responseText):null;}catch(e){}
+            if(event.detail.successful){
+              document.getElementById('account-edit-dialog').remove();
+              showToast({severity:'success',message:(resp&&resp.message)||'已更新',duration:2000});
+              setTimeout(()=>location.reload(),2000);
+            }else{
+              const msg=(resp&&resp.error)||('更新失败'+(event.detail.xhr.status?'（HTTP '+event.detail.xhr.status+'）':''));
+              showToast({severity:'error',message:msg,duration:5000});
+            }">
       <!-- 备注 -->
       <div class="mb-4">
         <label class="block text-sm text-gray-300 mb-2">账号备注 <span class="text-red-400">*</span></label>
