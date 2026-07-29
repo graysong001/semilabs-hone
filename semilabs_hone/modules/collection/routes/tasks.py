@@ -547,29 +547,37 @@ def _ensure_worker(request: Request, account_id: int | None) -> None:
 
 @router.post("/api/tasks/{task_id}/cancel")
 async def api_cancel_task(task_id: str) -> JSONResponse:
-    """POST /api/tasks/{id}/cancel — cancel running task."""
+    """POST /api/tasks/{id}/cancel — cancel running task.
+
+    Sets DB status to ``cancelled`` and writes the legacy cancel sentinel keyed
+    by the task's ``request_id`` (F3: the worker polls ``cancel_sentinel(rid)``,
+    not ``task-{task_id}``). The sentinel must exist before the worker checks it
+    on its next step boundary.
+    """
     IPCClient, _ = _ipc_client()
-    # Cancel is done via IPC client cancel method
-    # We also update DB status
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.task import CollectionTask
 
+    rid: str | None = None
     sess = get_session()
     try:
         task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
         if task:
             task.status = "cancelled"
+            rid = task.request_id  # capture before commit (L12 DetachedInstanceError)
             sess.commit()
-
-        # Cancel IPC (we need request_id; for simplicity, cancel by task_id)
-        client = IPCClient()
-        client.cancel(f"task-{task_id}")
-        return JSONResponse({"ok": True})
     except Exception as exc:
         sess.rollback()
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     finally:
         sess.close()
+
+    # Write the cancel sentinel keyed by request_id so the live worker sees it
+    # (server._is_cancelled checks cancel_sentinel(request_id), F3).
+    if rid:
+        client = IPCClient()
+        client.cancel(rid)
+    return JSONResponse({"ok": True})
 
 
 @router.post("/api/tasks/{task_id}/resume")

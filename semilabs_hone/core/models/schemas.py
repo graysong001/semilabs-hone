@@ -86,12 +86,19 @@ class ItemRef(BaseModel):
 
 
 class ScrapedPost(BaseModel):
+    # Engine injects platform from spec (F7) so multi-platform rows never
+    # cross-tag; without this field pydantic silently drops the injection and
+    # storage falls back to the xiaohongshu default.
+    platform: str | None = None
     title: str | None = None
     content: str | None = None
     author_name: str | None = None
     image_urls: list[str] | None = None
     tags: list[str] | None = None
-    published_at: str | None = None
+    # Platforms publish timestamps as epoch ms/s or ISO strings; storage
+    # normalises it (handlers._parse_published_at). A strict str type would
+    # ValidationError the whole Post.body group on an epoch int.
+    published_at: str | int | float | None = None
     likes: int | None = None
     collects: int | None = None
     comments_count: int | None = None
@@ -101,6 +108,7 @@ class ScrapedPost(BaseModel):
 
 
 class ScrapedComment(BaseModel):
+    platform: str | None = None
     platform_id: str | None = None
     author_name: str | None = None
     content: str
