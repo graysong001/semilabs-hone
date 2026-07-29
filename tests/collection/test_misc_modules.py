@@ -148,19 +148,20 @@ class TestWorkerRunWorker:
             return None
 
         monkeypatch.setattr(worker_main, "attach", fake_attach)
+        monkeypatch.setattr(worker_main, "_load_account", lambda account_id: None)
         monkeypatch.setattr(
             "semilabs_hone.modules.collection.anti_detect.stealth.inject_noise",
             fake_inject)
 
         served = {"called": False}
 
-        async def fake_serve(module, handler_registry, on_progress=None):
+        async def fake_serve(module, handler_registry, on_progress=None, **kwargs):
             served["called"] = True
 
         monkeypatch.setattr(
             "semilabs_hone.core.ipc.server.serve_worker", fake_serve)
 
-        await worker_main._run_worker(9333)
+        await worker_main._run_worker(9333, account_id=1)
         assert served["called"] is True
 
     async def test_run_worker_stealth_importerror_skipped(self, monkeypatch):
@@ -180,6 +181,7 @@ class TestWorkerRunWorker:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         monkeypatch.setattr(worker_main, "attach", fake_attach)
+        monkeypatch.setattr(worker_main, "_load_account", lambda account_id: None)
 
         async def fake_serve(*a, **k):
             pass
@@ -187,7 +189,7 @@ class TestWorkerRunWorker:
         monkeypatch.setattr(
             "semilabs_hone.core.ipc.server.serve_worker", fake_serve)
 
-        await worker_main._run_worker(9333)  # no raise
+        await worker_main._run_worker(9333, account_id=1)  # no raise
 
 
 # ─── cdp helpers ──────────────────────────────────────────────────────────
