@@ -2,7 +2,9 @@
  *
  * Manages a single WS connection to /ws with auto-reconnect.
  * Dispatches messages by msg.type: progress / warn / qr_ready /
- * captcha_required / error / disk_warn / task_completed / login_success.
+ * captcha_required / error / disk_warn / task_completed / login_success /
+ * session_status. Every message is also fanned out as a `ws:message`
+ * DOM CustomEvent for page-level scripts (task detail, accounts).
  */
 (function () {
   "use strict";
@@ -88,6 +90,10 @@
   });
 
   function dispatch(msg) {
+    // Page-level scripts (task detail, accounts) listen for this event;
+    // app.js only owns the global toast/progress affordances.
+    document.dispatchEvent(new CustomEvent("ws:message", { detail: msg }));
+
     var type = msg.type;
     switch (type) {
       case "progress":
@@ -112,6 +118,12 @@
       case "login_success":
         showToast({ severity: "info", message: "登录成功" });
         break;
+      case "session_status":
+        showToast({
+          severity: msg.valid ? "info" : "warn",
+          message: msg.message || (msg.valid ? "会话有效" : "会话已失效"),
+        });
+        break;
       default:
         break;
     }
@@ -119,15 +131,13 @@
 
   function updateProgress(msg) {
     var data = msg.data || {};
-    var barId = "progress-" + (msg.task_id || msg.request_id || "");
-    var bar = document.getElementById(barId);
-    if (bar) {
-      var pct = data.percent || 0;
-      bar.style.width = pct + "%";
-    }
-    var log = document.getElementById("task-log");
-    if (log && msg.message) {
-      log.textContent += msg.message + "\n";
+    // Progress bars are marked with data-progress-for="<task_id|request_id>";
+    // page-level rich rendering (log lines, counters) happens via ws:message.
+    var key = msg.task_id || msg.request_id || "";
+    var bar = document.querySelector('[data-progress-for="' + key + '"]');
+    if (bar && typeof data.percent === "number") {
+      bar.style.width = data.percent + "%";
+      bar.setAttribute("aria-valuenow", data.percent);
     }
   }
 
