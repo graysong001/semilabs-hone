@@ -102,11 +102,11 @@ git cherry-pick d810008 e8e027c f8881a5 7e5051a
 
 | # | 任务 | 要点 |
 |---|---|---|
-| 6.1 | `tests/e2e/` 全目录适配 PRD 模型 | fix 线 `tests/e2e/{conftest,local_site,test_real_scrape_e2e,test_full_stack_e2e}.py` 移植；改点：UUID task_id 查询、CollectionTask 字段名、config 环境变量（SEMILABS_NOTE_DELAY=0-0 等，依赖 §3 config 合并完成） |
-| 6.2 | 真 Chrome 全栈 E2E 跑通 | `pytest tests/e2e -q`（无 Chrome 自动 skip，本机有） |
-| 6.3 | 全量回归 | `bash scripts/loop_gate.sh`（含 --cov-fail-under=85）；BDD 16 场景继续全绿 |
+| 6.1 ✅ | `tests/e2e/` 全目录适配 PRD 模型 | 4 文件已移植并适配：Post→CollectionItem / Comment→CollectionComment / content→content_text / likes→metrics_json(unpack_metrics) / rank→like_count 排序 / progress 端点 `{ok,message,data}` 嵌套结构 / `/posts/{uuid}`；in-process 版 progress 断言改 404 降级（无 IPC request_id 的任务无 progress 文件，G6 契约） |
+| 6.2 ✅ | 真 Chrome 全栈 E2E 跑通 | 9/9 绿（31s）。E2E 暴露并已修 4 缺陷：① ScrapedPost/ScrapedComment 缺 `platform` 字段（F7 注入被 pydantic 静默丢弃→存库落回 xiaohongshu）+ `published_at` 严格 str 型遇 epoch int 整组 ValidationError→title/content 全空（采 fix 版 schema）② cancel 路由用 `task-{task_id}` 写哨兵而 worker 按 request_id 查——取消永远到不了 worker（F3）③ warmup 采 fix 版（urls 可注入+WARMUP_PAGES=None 关闭+dwell 走 rhythm；feat 版硬编码 30-90s 真睡且不可关）④ conftest 的 QR_LOGIN_TIMEOUT=0.05s 单测捷径由 E2E fixture 覆盖回真实值 |
+| 6.3 ✅ | 全量回归 | `bash scripts/loop_gate.sh` 绿：约束 linter + 645 用例（含 e2e 9）+ 覆盖率 85.10%≥85%。顺手修二缺陷：test_routes_s9a 本地 fixture reload(config) 没 setenv——progress 文件写进真实 data/ipc、db teardown drop 真实库（已修+补 launchagent/cli-entry 覆盖缺口测试）；loop_gate.sh 覆盖率 FAIL 后仍打 ✅（已显式拦截退出码） |
 
-**P0 完成定义**：loop_gate 绿 + E2E 绿 + BDD 绿 + legacy 列已删。
+**P0 完成定义：✅**（2026-07-29：loop_gate 绿 + E2E 9/9 绿 + BDD 16 场景绿 + legacy 列已删。提交 9f4c407/b4ea63d/bce66ad）
 
 ---
 
