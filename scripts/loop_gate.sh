@@ -14,6 +14,10 @@ echo "=== 1/2 约束 linter (check_constraints.py) ==="
 python3 scripts/check_constraints.py
 
 echo "=== 2/2 全量回归 pytest + 覆盖率门 (≥85%) ==="
-python3 -m pytest -q --cov=semilabs_hone --cov-report=term-missing --cov-fail-under=85
+# 显式拦截退出码: 覆盖率 FAIL 时绝不能滑到 ✅ (2026-07-29 实测漏拦)
+if ! python3 -m pytest -q --cov=semilabs_hone --cov-report=term-missing --cov-fail-under=85; then
+    echo "❌ loop_gate 失败: 测试或覆盖率门 (≥85%) 未过"
+    exit 1
+fi
 
 echo "✅ loop_gate 全过: 约束 + 全量测试 + 覆盖率≥85% 均绿"
