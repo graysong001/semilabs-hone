@@ -53,6 +53,11 @@ class IPCClient:
         while time.time() < deadline:
             data = read_json_if_exists(result_path(request_id))
             if data is not None:
+                # F11: consume the result file — the bus must not accumulate
+                try:
+                    result_path(request_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return IPCResult(**data)
             await asyncio.sleep(1)
         raise asyncio.TimeoutError(

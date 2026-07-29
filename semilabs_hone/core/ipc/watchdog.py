@@ -70,6 +70,7 @@ def reap_stale_running_task(session, now: float | None = None, threshold: float 
         "type": "error",
         "module": "collection",
         "task_id": task.id,
+        "category": "BrowserClosedError",
         "message": message,
     }
     logger.warning(f"[watchdog] task {task.id} running→paused (heartbeat stale, age={age})")

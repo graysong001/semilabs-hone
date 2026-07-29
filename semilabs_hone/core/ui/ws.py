@@ -59,6 +59,17 @@ class WSManager:
 ws_manager = WSManager()
 
 
+#: Worker progress messages that carry a first-class meaning for the UI.
+#: Everything else is relayed as a plain "progress" message (USER_SOP G4:
+#: the QR screenshot used to arrive as anonymous progress and was lost).
+PROGRESS_EVENT_TYPES = {
+    "qr_ready": "qr_ready",
+    "captcha_required": "captcha_required",
+    "login_success": "login_success",
+    "disk_warn": "disk_warn",
+}
+
+
 async def run_progress_relay(interval: float = 2.0) -> None:
     """Background relay: worker progress/results files → WS broadcast (L16).
 
@@ -66,8 +77,11 @@ async def run_progress_relay(interval: float = 2.0) -> None:
     (IPCResult, carrying optional `ws_events`) to the file bus; the web process
     owns WS. This loop scans both dirs, dedups by `updated_at`/seen-set, resolves
     `request_id → task_id` via DB (best-effort), and broadcasts each new item
-    through `ws_manager`. No-op when the dirs are empty (tests); cancelled on
-    shutdown (app._shutdown cancels app.state.relay_task).
+    through `ws_manager`. Key worker progress messages are promoted to
+    first-class WS event types (G4). A result is broadcast (ws_events + one
+    terminal event) and then its file is deleted — consume-on-read (F11), the
+    bus must not accumulate. No-op when the dirs are empty (tests); cancelled
+    on shutdown (app._shutdown cancels app.state.relay_task).
 
     Written with `while running:` (not bare `while True`) per the §7.4 linter:
     exits on CancelledError (shutdown) — a bounded suspend loop, not a refresh
@@ -80,11 +94,10 @@ async def run_progress_relay(interval: float = 2.0) -> None:
     )
 
     seen_progress: dict[str, float] = {}  # rid -> last broadcasted updated_at
-    seen_results: set[str] = set()
     running = True
     try:
         while running:
-            # --- progress/ → WS progress event ---
+            # --- progress/ → WS progress event (typed when first-class, G4) ---
             try:
                 pdir = progress_dir()
                 if pdir.exists():
@@ -100,12 +113,13 @@ async def run_progress_relay(interval: float = 2.0) -> None:
                             continue
                         seen_progress[rid] = updated
                         task_id = _resolve_task_id(rid)
+                        message = data.get("message", "")
                         await ws_manager.broadcast({
-                            "type": "progress",
+                            "type": PROGRESS_EVENT_TYPES.get(message, "progress"),
                             "module": "collection",
                             "task_id": task_id,
                             "request_id": rid,
-                            "message": data.get("message", ""),
+                            "message": message,
                             "data": data.get("data") or {},
                         })
             except asyncio.CancelledError:
@@ -113,21 +127,22 @@ async def run_progress_relay(interval: float = 2.0) -> None:
             except Exception:
                 pass
 
-            # --- results/ → ws_events fan-out ---
+            # --- results/ → ws_events fan-out + terminal event, then consume ---
             try:
                 rdir = results_dir()
                 if rdir.exists():
                     for f in rdir.glob("*.json"):
                         rid = f.stem
-                        if rid in seen_results:
-                            continue
                         data = read_json_if_exists(f)
                         if data is None:
                             continue
-                        seen_results.add(rid)
-                        ws_events = data.get("ws_events") or []
-                        for ev in ws_events:
+                        for ev in data.get("ws_events") or []:
                             await ws_manager.broadcast(ev)
+                        await _broadcast_terminal(rid, data)
+                        try:
+                            f.unlink()  # consume-on-read (F11)
+                        except OSError:
+                            pass
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -137,6 +152,41 @@ async def run_progress_relay(interval: float = 2.0) -> None:
     except asyncio.CancelledError:
         running = False
         raise
+
+
+async def _broadcast_terminal(request_id: str, data: dict) -> None:
+    """Broadcast one terminal WS event for a finished IPC result."""
+    status = data.get("status")
+    task_id = _resolve_task_id(request_id)
+    base = {"request_id": request_id, "task_id": task_id}
+    err = data.get("error") or {}
+    if status == "ok":
+        if task_id is not None:
+            await ws_manager.broadcast({**base, "type": "task_completed"})
+        else:
+            await ws_manager.broadcast({
+                **base, "type": "progress", "message": "done",
+                "data": data.get("data") or {},
+            })
+    elif status == "cancelled":
+        await ws_manager.broadcast({**base, "type": "warn", "message": "任务已取消"})
+    elif status == "need_human":
+        await ws_manager.broadcast({
+            **base, "type": "need_human",
+            "message": err.get("message", "需要人工处理"),
+        })
+    elif status == "paused":
+        msg_type = "captcha_required" if err.get("category") == "captcha" else "warn"
+        await ws_manager.broadcast({
+            **base, "type": msg_type, "message": err.get("message", "已暂停"),
+        })
+    elif status == "error":
+        await ws_manager.broadcast({
+            **base,
+            "type": "error",
+            "category": err.get("category"),
+            "message": err.get("message", "unknown error"),
+        })
 
 
 def _resolve_task_id(request_id: str) -> str | None:

@@ -12,9 +12,11 @@ Algorithm:
     4. Dispatch the handler by .op, streaming progress updates.
     5. Consume control directives {pause,resume,stop} from control/ — read after
        burn — before/after the handler (PRD §3.4 / §8.3 场景 3.2).
-    6. Self-check cancel sentinel before each step.
+    6. Self-check cancel sentinel before each step — progress_cb re-checks per
+       write so a long handler cancels within one step (FIX_PLAN F3).
     7. Write heartbeat every ~10s while alive (PRD §3.3).
     8. Write result (ok/error/paused/cancelled/need_human).
+    9. Per-(module, account) routing (F1) + idle exit (F11) + orphan GC.
 """
 from __future__ import annotations
 
@@ -30,10 +32,12 @@ from .paths import (
     atomic_write_json,
     burn,
     cancel_sentinel,
+    control_cancel_dir,
     control_path,
     read_json_if_exists,
     request_path,
     result_path,
+    results_dir,
     requests_dir,
     progress_path,
     progress_dir,
@@ -46,6 +50,41 @@ OnProgressFn = Callable[[str, str, dict], None]
 
 # Heartbeat cadence (PRD §3.3: every ~10s while worker alive).
 HEARTBEAT_INTERVAL = 10.0
+
+
+class _RequestCancelled(Exception):
+    """Internal: raised inside progress_cb when a cancel sentinel appears.
+
+    Lets a long-running handler abort mid-flight (bounded by step granularity)
+    instead of only being checked before/after the handler returns.
+    """
+
+
+# FIX_PLAN F11: orphan-file garbage collection.
+_GC_INTERVAL_POLLS = 60          # run gc once per N idle-loop polls
+_GC_MAX_AGE_SECONDS = 3600.0     # files older than 1h are orphans
+
+
+def _gc_orphans(now: float | None = None) -> int:
+    """Delete result/progress/cancel files older than 1h; return count removed.
+
+    Request files burn on consumption; results are deleted by the web side
+    after reading (consume-on-read). Anything left past the max age is an
+    orphan (crashed peer) and safe to reclaim.
+    """
+    now = time.time() if now is None else now
+    removed = 0
+    for d in (results_dir(), progress_dir(), control_cancel_dir()):
+        if not d.exists():
+            continue
+        for f in d.iterdir():
+            try:
+                if now - f.stat().st_mtime > _GC_MAX_AGE_SECONDS:
+                    f.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def _list_requests() -> list[Path]:
@@ -141,11 +180,39 @@ def _load_request_or_burn(path: Path) -> dict | None:
     return data
 
 
+def _peek_request(path: Path) -> dict | None:
+    """Read a request file WITHOUT burning it (routing pre-check).
+
+    Burning happens only once a request is actually picked by this worker
+    (_load_request_or_burn); a request routed to another module/account must
+    stay on disk for its owner (F1). Corrupt JSON is burned here — no owner
+    could ever parse it (PRD §8.3 场景 3.1).
+    """
+    try:
+        data = read_json_if_exists(path)
+    except Exception as exc:
+        logger.warning(f"[ipc] bad request JSON {path.name}, burning: {exc}")
+        burn(path)
+        return None
+    return data
+
+
+def _default_idle_timeout() -> float:
+    """Lazy-read config.WORKER_IDLE_TIMEOUT so tests can monkeypatch it."""
+    try:
+        import config
+        return float(config.WORKER_IDLE_TIMEOUT)
+    except Exception:
+        return 600.0
+
+
 async def serve_worker(
     module: str,
     handler_registry: dict[str, HandlerFn],
     on_progress: OnProgressFn | None = None,
     poll_interval: float = 1.0,
+    account_id: int | None = None,
+    idle_timeout: float | None = None,
 ) -> None:
     """Main loop for a module worker.
 
@@ -157,8 +224,20 @@ async def serve_worker(
         on_progress: optional callback(request_id, message, data) for
             external notification (e.g. logging).
         poll_interval: seconds between request directory polls.
+        account_id: this worker's bound account (F1). A request is picked only
+            when its module matches AND (request.account_id is None OR equals
+            this account_id). A worker with account_id=None picks any request
+            of its module (module-generic worker).
+        idle_timeout: seconds without any matching request before the loop
+            exits (default config.WORKER_IDLE_TIMEOUT, F11). The spawner
+            respawns the worker on the next submit, so idle exit is safe.
     """
+    if idle_timeout is None:
+        idle_timeout = _default_idle_timeout()
+
     last_heartbeat = 0.0
+    polls = 0
+    idle_since = time.time()
 
     while True:
         # Heartbeat: write at most every HEARTBEAT_INTERVAL (PRD §3.3).
@@ -167,23 +246,44 @@ async def serve_worker(
             write_heartbeat("alive")
             last_heartbeat = now
 
+        polls += 1
+        if polls % _GC_INTERVAL_POLLS == 0:
+            _gc_orphans()
+
         req_files = _list_requests()
         picked = None
         req_data = None
 
         for f in req_files:
+            data = _peek_request(f)
+            if data is None:
+                continue
+            if data.get("module") != module:
+                continue
+            # Per-(module, account) routing (F1): skip requests bound to a
+            # different account (one worker = one account profile).
+            req_account = data.get("account_id")
+            if (
+                account_id is not None
+                and req_account is not None
+                and req_account != account_id
+            ):
+                continue
+            # Ours — burn on load (PRD §7.2 read-after-burn).
             data = _load_request_or_burn(f)
             if data is None:
                 continue
-            if data.get("module") == module:
-                picked = f
-                req_data = data
-                break
+            picked = f
+            req_data = data
+            break
 
         if picked is None:
+            if time.time() - idle_since >= idle_timeout:
+                return  # idle exit (F11): spawner respawns on next submit
             await asyncio.sleep(poll_interval)
             continue
 
+        idle_since = time.time()  # activity resets the idle clock
         request_id = req_data["request_id"]
         op = req_data["op"]
         payload = req_data.get("payload", {})
@@ -224,6 +324,11 @@ async def serve_worker(
         try:
 
             def progress_cb(message: str, data: dict | None = None) -> None:
+                # Cancel self-check on every progress write (F3): long-running
+                # handlers call progress_cb per step, so cancellation takes
+                # effect within one step instead of after handler returns.
+                if _is_cancelled(request_id):
+                    raise _RequestCancelled()
                 _write_progress(request_id, message, data)
                 if on_progress:
                     on_progress(request_id, message, data or {})
@@ -240,7 +345,8 @@ async def serve_worker(
                 _write_result(
                     request_id,
                     handler_result["status"],
-                    data={k: v for k, v in handler_result.items() if k != "status"},
+                    data={k: v for k, v in handler_result.items() if k not in ("status", "ws_events")},
+                    ws_events=handler_result.get("ws_events"),
                 )
                 continue
 
@@ -254,6 +360,9 @@ async def serve_worker(
                 continue
 
             _write_result(request_id, "ok", data=handler_result)
+
+        except _RequestCancelled:
+            _write_result(request_id, "cancelled")
 
         except Exception as exc:
             # Categorize the error

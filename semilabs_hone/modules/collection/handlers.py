@@ -23,18 +23,27 @@ from semilabs_hone.core.utils.retry import DailyLimitError
 # Chrome via CDP and publishes the BrowserContext here so the handler-created
 # GenericEngine can resolve a page. None in tests / when no worker is attached.
 _WORKER_CTX: Any = None
+# Bound account row (detached), published alongside the ctx (F1/F6) so the
+# engine can apply the account's fixed fingerprint per page.
+_WORKER_ACCOUNT: Any = None
 
 
-def set_worker_ctx(ctx: Any) -> None:
-    """Publish the worker's live BrowserContext so handlers/engines can reach it.
+def set_worker_resources(ctx: Any, account: Any = None) -> None:
+    """Publish the worker's live BrowserContext + bound account (F1).
 
     Called once from worker_main._run_worker after `attach(port)`. Stays None in
     the web process and in tests, where _get_engine degrades to ctx=None (the
-    engine's _ensure_page then raises, which tests sidestep by mocking _get_engine
+    engine's ensure_page then raises, which tests sidestep by mocking _get_engine
     or not driving a real page).
     """
-    global _WORKER_CTX
+    global _WORKER_CTX, _WORKER_ACCOUNT
     _WORKER_CTX = ctx
+    _WORKER_ACCOUNT = account
+
+
+def set_worker_ctx(ctx: Any) -> None:
+    """Back-compat single-arg setter (pre-F1 name); prefer set_worker_resources."""
+    set_worker_resources(ctx)
 
 
 async def _worker_page() -> Any | None:
@@ -1002,9 +1011,10 @@ def _get_engine(platform: str, account_id: int | None, progress_cb: Callable) ->
         from semilabs_hone.modules.collection.scrapers.engine import GenericEngine
 
         spec, adapter_cls = get(platform)
-        # L14: inject the worker's live ctx so _ensure_page can resolve a page
+        # L14: inject the worker's live ctx so ensure_page can resolve a page
         # (None in tests → engine.ctx=None, matches pre-S9a behavior).
-        engine = GenericEngine(spec=spec, ctx=_WORKER_CTX)
+        # F6: the bound account rides along for per-page fingerprint apply.
+        engine = GenericEngine(spec=spec, ctx=_WORKER_CTX, account=_WORKER_ACCOUNT)
         return engine
     except KeyError:
         logger.warning(f"Platform '{platform}' not found in registry")

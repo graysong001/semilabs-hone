@@ -135,6 +135,14 @@ def create_app() -> FastAPI:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # G12: web exit must not leave orphan Chrome — terminate every worker
+        # registered by the spawner (workers turn SIGTERM into a normal unwind
+        # and tear down their own Chrome, USER_SOP G30).
+        try:
+            from semilabs_hone.core.ipc.worker_spawner import shutdown_all
+            shutdown_all()
+        except Exception:
+            logger.warning("worker spawner shutdown_all failed")
 
     # Mount static files
     static_dir = Path(__file__).resolve().parent / "static"
