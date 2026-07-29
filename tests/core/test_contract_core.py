@@ -44,8 +44,12 @@ def test_dm02_models_contract():
     # id 必须是 String(36) UUID PK (PRD §6.1)
     id_col = tsk.CollectionTask.__table__.columns["id"]
     assert id_col.primary_key and str(id_col.type).upper().startswith("VARCHAR"), "collection_tasks.id 非 UUID PK"
-    # D6 legacy 列保留 (S4/S6 迁移后再删)
-    assert "download_images" in cols and "collect_comments" in cols, "CollectionTask 缺 download_images/collect_comments (D6 过渡保留)"
+    # 主线合并收官 (2026-07-29): S3 过渡 legacy 列已全部删除
+    for legacy in ["account_id", "max_posts_per_keyword", "posts_scraped",
+                   "last_note_index", "sort_type", "download_images",
+                   "collect_comments", "error_message", "error_category",
+                   "started_at", "completed_at"]:
+        assert legacy not in cols, f"CollectionTask 仍残留 legacy 列 {legacy}"
     post = pytest.importorskip("semilabs_hone.core.models.post")
     assert hasattr(post, "CollectionItem")
     pcols = {c.name for c in post.CollectionItem.__table__.columns}

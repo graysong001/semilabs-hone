@@ -22,6 +22,14 @@ def _clean_registry():
     sp._WORKERS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _real_ensure_worker(monkeypatch, no_worker_launch):
+    """This module tests the spawner itself — undo the global autouse mock."""
+    original = getattr(no_worker_launch, "original", None)
+    if original is not None:
+        monkeypatch.setattr(sp, "ensure_worker", original)
+
+
 class _FakeProc:
     def __init__(self, pid=999):
         self.pid = pid

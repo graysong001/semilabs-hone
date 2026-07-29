@@ -32,8 +32,8 @@ async def _run_relay_briefly(monkeypatch, broadcasts, *, sleep=0.3):
 
 def _seed_task_with_rid(db_session, rid):
     from semilabs_hone.core.models.task import CollectionTask
-    t = CollectionTask(account_id=1, platform="xiaohongshu", status="running",
-                       max_posts_per_keyword=3, request_id=rid)
+    t = CollectionTask(platform="xiaohongshu", status="running",
+                       expected_count=3, request_id=rid)
     db_session.add(t)
     db_session.commit()
     return t.id

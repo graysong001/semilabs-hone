@@ -25,7 +25,7 @@ def client(app):
 
 
 def _fake_ipc(monkeypatch):
-    """Stub accounts _ipc_client so submit is a no-op; returns (cls, IPCRequest)."""
+    """Stub accounts _ipc so submit is a no-op; returns (cls, IPCRequest)."""
     from semilabs_hone.modules.collection.routes import accounts as acc
     from semilabs_hone.core.ipc.protocol import IPCRequest
 
@@ -33,7 +33,7 @@ def _fake_ipc(monkeypatch):
         def submit(self, req):
             return None
 
-    monkeypatch.setattr(acc, "_ipc_client", lambda: (_FakeClient, IPCRequest))
+    monkeypatch.setattr(acc, "_ipc", lambda: (_FakeClient, IPCRequest))
 
 
 def _seed_account(db_session, *, platform="xiaohongshu", nickname="acc"):
@@ -50,22 +50,38 @@ class TestAccountsRoutes:
         resp = client.get("/accounts")
         assert resp.status_code == 200
 
-    def test_create_account_redirects(self, client):
+    def test_create_account_returns_table_fragment(self, client):
+        # G3: write ops answer with the accounts-table fragment for HTMX swap.
         resp = client.post("/api/accounts",
-                           data={"platform": "xiaohongshu", "nickname": "n1"},
-                           follow_redirects=False)
-        assert resp.status_code == 303
+                           data={"platform": "xiaohongshu", "nickname": "n1"})
+        assert resp.status_code == 200
+        assert 'id="accounts-list"' in resp.text
+        assert "n1" in resp.text
+
+    def test_create_account_assigns_fingerprint_and_profile(self, client, db_session):
+        # F6: creation draws the one-account-one-fixed fingerprint + profile dir.
+        resp = client.post("/api/accounts",
+                           data={"platform": "xiaohongshu", "nickname": "fp"})
+        assert resp.status_code == 200
+        from semilabs_hone.core.models.account import Account
+        acct = db_session.query(Account).filter(Account.nickname == "fp").first()
+        assert acct is not None
+        assert acct.profile_dir
+        assert acct.viewport_w > 0 and acct.viewport_h > 0
 
     def test_delete_existing_account(self, client, db_session):
         aid = _seed_account(db_session)
         resp = client.delete(f"/api/accounts/{aid}")
         assert resp.status_code == 200
-        assert resp.json()["ok"] is True
+        assert 'id="accounts-list"' in resp.text
+        from semilabs_hone.core.models.account import Account
+        assert db_session.query(Account).filter(Account.id == aid).first() is None
 
-    def test_delete_missing_account_404(self, client):
+    def test_delete_missing_account_is_idempotent(self, client):
+        # G3: delete answers with the fragment even when the row is gone.
         resp = client.delete("/api/accounts/999999")
-        assert resp.status_code == 404
-        assert resp.json()["ok"] is False
+        assert resp.status_code == 200
+        assert 'id="accounts-list"' in resp.text
 
     def test_login_account_submits_ipc(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
@@ -76,24 +92,29 @@ class TestAccountsRoutes:
         assert "request_id" in body
         assert body["status"] == "submitted"
 
+    def test_login_unknown_account_404_with_hint(self, client):
+        resp = client.post("/api/accounts/999999/login")
+        assert resp.status_code == 404
+        assert resp.json()["fix_hint"]
+
     def test_import_cookies_valid_json(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
         aid = _seed_account(db_session)
         resp = client.post(
             "/api/accounts/import-cookies",
-            data={"account_id": aid, "cookies": '[{"name":"sid"}]'},
-            follow_redirects=False)
-        assert resp.status_code == 303
+            data={"account_id": aid, "cookies": '[{"name":"sid"}]'})
+        assert resp.status_code == 200
+        assert 'id="accounts-list"' in resp.text
 
     def test_import_cookies_invalid_json(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
         aid = _seed_account(db_session)
         resp = client.post(
             "/api/accounts/import-cookies",
-            data={"account_id": aid, "cookies": "not json"},
-            follow_redirects=False)
-        # Invalid JSON → empty cookies list, still submitted → redirect.
-        assert resp.status_code == 303
+            data={"account_id": aid, "cookies": "not json"})
+        # Invalid JSON → 400 with a fix_hint (never silently submitted).
+        assert resp.status_code == 400
+        assert resp.json()["fix_hint"]
 
     def test_validate_account_submits_ipc(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
@@ -167,8 +188,8 @@ class TestTasksHelpers:
         from semilabs_hone.core.models.task import CollectionTask
         for status in ("pending", "running", "paused", "need_human",
                        "completed", "error"):
-            task = CollectionTask(account_id=1, platform="xiaohongshu",
-                                  status=status, max_posts_per_keyword=10,
+            task = CollectionTask(platform="xiaohongshu",
+                                  status=status, expected_count=10,
                                   error_msg="boom" if status == "error" else None)
             db_session.add(task)
             db_session.commit()
@@ -180,8 +201,8 @@ class TestTasksHelpers:
         from semilabs_hone.modules.collection.routes import tasks as t
         from semilabs_hone.core.models.task import CollectionTask
         for status in ("running", "need_human", "paused", "completed", "error"):
-            task = CollectionTask(account_id=1, platform="xiaohongshu",
-                                  status=status, max_posts_per_keyword=10)
+            task = CollectionTask(platform="xiaohongshu",
+                                  status=status, expected_count=10)
             db_session.add(task)
             db_session.commit()
             html = t._actions_html(task)
@@ -207,8 +228,8 @@ class TestTasksEndpointsNotFound:
 class TestTasksCancelResume:
     def _make_task(self, db_session, status="running"):
         from semilabs_hone.core.models.task import CollectionTask
-        t = CollectionTask(account_id=1, platform="xiaohongshu",
-                           status=status, max_posts_per_keyword=10,
+        t = CollectionTask(platform="xiaohongshu",
+                           status=status, expected_count=10,
                            request_id="req-test")
         db_session.add(t); db_session.commit()
         return t.id
@@ -237,8 +258,8 @@ class TestTasksCancelResume:
         self._fake_tasks_ipc(monkeypatch)
         from semilabs_hone.core.models.task import CollectionTask
         # Another running task.
-        other = CollectionTask(account_id=1, platform="xiaohongshu",
-                               status="running", max_posts_per_keyword=10)
+        other = CollectionTask(platform="xiaohongshu",
+                               status="running", expected_count=10)
         db_session.add(other); db_session.commit()
         tid = self._make_task(db_session, status="paused")
         resp = client.post(f"/api/tasks/{tid}/resume")

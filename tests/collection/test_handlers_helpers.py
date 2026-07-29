@@ -31,8 +31,8 @@ def _make_account(db_session, *, platform="xiaohongshu", nickname="acct"):
 
 def _make_task(db_session, *, status="pending", max_posts=10):
     from semilabs_hone.core.models.task import CollectionTask
-    t = CollectionTask(account_id=1, platform="xiaohongshu",
-                       status=status, max_posts_per_keyword=max_posts)
+    t = CollectionTask(platform="xiaohongshu",
+                       status=status, expected_count=max_posts)
     db_session.add(t)
     db_session.commit()
     return t.id
@@ -180,13 +180,12 @@ class TestTaskLifecycle:
 
     def test_update_task_progress(self, db_session, tmp_data_dir):
         tid = _make_task(db_session, status="running")
-        h_mod._update_task_progress(tid, 5, 5, lambda *a: None)
+        h_mod._update_task_progress(tid, 5, lambda *a: None)
         from semilabs_hone.core.models.task import CollectionTask
         from semilabs_hone.core.models.db import get_session
         sess = get_session()
         try:
             t = sess.query(CollectionTask).filter(CollectionTask.id == tid).first()
-            assert t.last_note_index == 5
             assert t.actual_count == 5
         finally:
             sess.close()
@@ -206,7 +205,7 @@ class TestTaskLifecycle:
 
     def test_complete_task(self, db_session, tmp_data_dir):
         tid = _make_task(db_session, status="running")
-        h_mod._complete_task(tid, 7, 3, 7, lambda *a: None)
+        h_mod._complete_task(tid, 7, lambda *a: None)
         from semilabs_hone.core.models.task import CollectionTask
         from semilabs_hone.core.models.db import get_session
         sess = get_session()
@@ -214,7 +213,6 @@ class TestTaskLifecycle:
             t = sess.query(CollectionTask).filter(CollectionTask.id == tid).first()
             assert t.status == "completed"
             assert t.actual_count == 7
-            assert t.completed_at is not None
         finally:
             sess.close()
 

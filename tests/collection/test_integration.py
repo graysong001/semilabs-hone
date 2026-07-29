@@ -206,10 +206,9 @@ class TestHandlerScrapeTask:
         # Create task in DB
         from semilabs_hone.core.models.task import CollectionTask
         task = CollectionTask(
-            account_id=1,
             platform="xiaohongshu",
             status="running",
-            max_posts_per_keyword=10,
+            expected_count=10,
         )
         db_session.add(task)
         db_session.commit()
@@ -334,8 +333,8 @@ def _restore_handler_env(h_mod, orig):
 
 def _make_task(db_session, *, status="running", max_posts=10):
     from semilabs_hone.core.models.task import CollectionTask
-    task = CollectionTask(account_id=1, platform="xiaohongshu",
-                         status=status, max_posts_per_keyword=max_posts)
+    task = CollectionTask(platform="xiaohongshu",
+                         status=status, expected_count=max_posts)
     db_session.add(task)
     db_session.commit()
     return task.id

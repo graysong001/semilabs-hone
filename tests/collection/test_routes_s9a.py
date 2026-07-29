@@ -83,9 +83,8 @@ def _fake_ipc(monkeypatch):
 
 def _make_task(db_session, *, status="need_human", request_id="rid-x"):
     from semilabs_hone.core.models.task import CollectionTask
-    t = CollectionTask(account_id=1, platform="xiaohongshu", status=status,
-                      max_posts_per_keyword=5, sort_type="general",
-                      download_images=False, collect_comments=True,
+    t = CollectionTask(platform="xiaohongshu", status=status,
+                      expected_count=5,
                       request_id=request_id)
     db_session.add(t)
     db_session.commit()
@@ -140,8 +139,8 @@ class TestResumeControlFile:
         _fake_ipc(monkeypatch)
         from semilabs_hone.core.models.task import CollectionTask
         # A different task is running.
-        other = CollectionTask(account_id=2, platform="xiaohongshu", status="running",
-                               max_posts_per_keyword=3)
+        other = CollectionTask(platform="xiaohongshu", status="running",
+                               expected_count=3)
         db_session.add(other)
         db_session.commit()
         tid = _make_task(db_session, status="paused", request_id="rid-c")

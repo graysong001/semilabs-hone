@@ -39,6 +39,31 @@ def client(app):
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _seed_active_account(request, client):
+    """G8 pre-flight needs an existing, logged-in account; seed id=1 active.
+
+    Every task-create path now validates platform/account/active up front, so
+    the badge/detail/row tests need a real account row to pass creation. The
+    client fixture triggers startup→init_db, so the table exists here.
+    Opt out with ``@pytest.mark.no_seed_account`` for empty-DB assertions.
+    """
+    if request.node.get_closest_marker("no_seed_account"):
+        return
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.account import Account
+
+    sess = get_session()
+    try:
+        if sess.query(Account).filter(Account.id == 1).first() is None:
+            acct = Account(id=1, platform="xiaohongshu", nickname="t",
+                           status="active")
+            sess.add(acct)
+            sess.commit()
+    finally:
+        sess.close()
+
+
 # ---------------------------------------------------------------------------
 # GET /
 # ---------------------------------------------------------------------------
@@ -48,6 +73,7 @@ def test_get_dashboard_returns_200(client: TestClient):
     assert response.status_code == 200
 
 
+@pytest.mark.no_seed_account
 def test_get_dashboard_empty_shows_guidance(client: TestClient):
     """Empty DB should show the 'no accounts' guidance card."""
     response = client.get("/")
@@ -210,7 +236,7 @@ def test_manifest_empty_routes_no_error(app):
 def _create_task_form(target_value: str) -> dict:
     """PRD §4.1.1 form (S6/T32 migration): task_type/target_value/expected_count."""
     return {
-        "account_id": 0,
+        "account_id": 1,
         "platform": "xiaohongshu",
         "task_type": "keyword_search",
         "target_value": target_value,
@@ -245,23 +271,20 @@ def test_create_first_task_promoted_to_running(client: TestClient):
 
 
 def test_create_second_task_while_running_is_queued_pending(client: TestClient):
-    """PRD §8.2 场景 2.2: while A is running, B is created as pending (queued)."""
-    # Task A → running
+    """PRD §2.2 场景1 + §8.2 场景2.2: while A is running, B is queued as pending."""
     client.post("/api/tasks", data=_create_task_form("alpha"))
-    # Task B while A running → pending, queued
     resp = client.post("/api/tasks", data=_create_task_form("beta"))
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
     assert body["status"] == "queued"
     statuses = list(_get_task_statuses().values())
-    # Exactly one running, one pending — never two running.
     assert statuses.count("running") == 1
     assert statuses.count("pending") == 1
 
 
 def test_create_third_task_still_only_one_running(client: TestClient):
-    """A running + B pending: creating C keeps a single running (C queued too)."""
+    """A running + B/C pending: exactly one running, never two."""
     client.post("/api/tasks", data=_create_task_form("alpha"))
     client.post("/api/tasks", data=_create_task_form("beta"))
     resp = client.post("/api/tasks", data=_create_task_form("gamma"))

@@ -26,11 +26,26 @@ def client(app):
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _seed_active_account(client):
+    """G8 needs an existing logged-in account; seed id=1 active xiaohongshu."""
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.account import Account
+    sess = get_session()
+    try:
+        if sess.query(Account).filter(Account.id == 1).first() is None:
+            sess.add(Account(id=1, platform="xiaohongshu", nickname="t",
+                             status="active"))
+            sess.commit()
+    finally:
+        sess.close()
+
+
 def _create_task_form(*, target_value="alpha", task_type="keyword_search",
                       expected_count=10) -> dict:
     """PRD §4.1.1 form (S6/T32): task_type/target_value/expected_count."""
     return {
-        "account_id": 0,
+        "account_id": 1,
         "platform": "xiaohongshu",
         "task_type": task_type,
         "target_value": target_value,

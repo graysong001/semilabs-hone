@@ -22,6 +22,9 @@ class _MockPage:
         self.goto_calls: list[str] = []
         self.screenshot_calls: int = 0
         self.selector_calls: int = 0
+        # After "scanning", a real page redirects home; "^/$" matches this
+        # path so the QR success poll (F5) resolves immediately in tests.
+        self.url = "https://www.xiaohongshu.com/"
 
     async def goto(self, url: str) -> None:
         self.goto_calls.append(url)
@@ -100,9 +103,10 @@ class TestDoQrLogin:
         res = await h_mod._do_qr_login("xiaohongshu", 8, cap)
         assert res is not None
         assert "qr_path" in res
-        # Real navigation to the login URL + a screenshot were taken.
+        # Real navigation to the login URL + screenshot(s) were taken
+        # (file for the stub path + png bytes for the WS base64, G4).
         assert page.goto_calls, "page.goto must be called when ctx is live"
-        assert page.screenshot_calls == 1
+        assert page.screenshot_calls >= 1
         assert any(m == "qr_ready" for m, _ in out)
 
     async def test_with_ctx_screenshot_failure_degrades_to_stub(self, tmp_data_dir, monkeypatch):

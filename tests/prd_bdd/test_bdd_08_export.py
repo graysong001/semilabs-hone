@@ -68,8 +68,8 @@ class TestScenario81EmptyExportDefense:
         """
         # Create a task with no scraped items (关键词全网无结果).
         from semilabs_hone.core.models.task import CollectionTask
-        task = CollectionTask(account_id=1, platform="xiaohongshu",
-                              status="completed", max_posts_per_keyword=10)
+        task = CollectionTask(platform="xiaohongshu",
+                              status="completed", expected_count=10)
         db_session.add(task)
         db_session.commit()
 

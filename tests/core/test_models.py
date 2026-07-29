@@ -116,34 +116,6 @@ class TestCollectionTaskPrdDefaults:
         assert t1.id != t2.id
 
 
-class TestCollectionTaskLegacyDefaults:
-    """Retained legacy columns (handlers/routes depend on them until S4/S6)."""
-
-    def test_task_create_defaults_max_posts_20(self, session):
-        task = CollectionTask(platform="xiaohongshu", target_value="kw")
-        session.add(task)
-        session.commit()
-        assert task.max_posts_per_keyword == 20
-
-    def test_task_create_defaults_download_images_true(self, session):
-        task = CollectionTask(platform="xiaohongshu", target_value="kw")
-        session.add(task)
-        session.commit()
-        assert task.download_images is True
-
-    def test_task_create_defaults_collect_comments_true(self, session):
-        task = CollectionTask(platform="xiaohongshu", target_value="kw")
-        session.add(task)
-        session.commit()
-        assert task.collect_comments is True
-
-    def test_task_create_defaults_last_note_index_zero(self, session):
-        task = CollectionTask(platform="xiaohongshu", target_value="kw")
-        session.add(task)
-        session.commit()
-        assert task.last_note_index == 0
-
-
 class TestTaskLifecycle:
     def test_task_lifecycle_pending_to_running_to_completed(self, session):
         task = CollectionTask(platform="xiaohongshu", target_value="kw")
@@ -152,13 +124,11 @@ class TestTaskLifecycle:
         assert task.status == "pending"
 
         task.status = "running"
-        task.started_at = datetime.now(timezone.utc)
         session.commit()
         session.refresh(task)
         assert task.status == "running"
 
         task.status = "completed"
-        task.completed_at = datetime.now(timezone.utc)
         task.actual_count = 10
         session.commit()
         session.refresh(task)
@@ -167,8 +137,8 @@ class TestTaskLifecycle:
 
 
 class TestTaskResume:
-    def test_task_resume_preserves_last_note_index(self, session):
-        task = CollectionTask(platform="xiaohongshu", target_value="kw", last_note_index=15)
+    def test_task_resume_preserves_actual_count(self, session):
+        task = CollectionTask(platform="xiaohongshu", target_value="kw", actual_count=15)
         session.add(task)
         session.commit()
         session.refresh(task)
@@ -178,13 +148,13 @@ class TestTaskResume:
         task.error_msg = "browser closed"
         session.commit()
 
-        # Resume: restore to running, keep last_note_index
+        # Resume: restore to running, keep the progress counter (PRD §6.1)
         task.status = "running"
         task.error_msg = None
         session.commit()
         session.refresh(task)
 
-        assert task.last_note_index == 15
+        assert task.actual_count == 15
         assert task.status == "running"
 
 

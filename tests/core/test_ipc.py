@@ -712,7 +712,7 @@ def test_reap_stale_running_task_flips_to_paused(db_session, tmp_data_dir):
     from semilabs_hone.core.models.task import CollectionTask
     from semilabs_hone.core.ipc.watchdog import reap_stale_running_task
 
-    task = CollectionTask(account_id=1, platform="xiaohongshu", status="running")
+    task = CollectionTask(platform="xiaohongshu", status="running")
     db_session.add(task)
     db_session.commit()
 
@@ -725,7 +725,7 @@ def test_reap_stale_running_task_flips_to_paused(db_session, tmp_data_dir):
     assert event["task_id"] == task.id
     db_session.refresh(task)
     assert task.status == "paused"
-    assert task.error_category == "HeartbeatStale"
+    assert task.error_msg.startswith("HeartbeatStale")
 
 
 def test_reap_fresh_heartbeat_no_op(db_session, tmp_data_dir):
@@ -733,7 +733,7 @@ def test_reap_fresh_heartbeat_no_op(db_session, tmp_data_dir):
     from semilabs_hone.core.models.task import CollectionTask
     from semilabs_hone.core.ipc.watchdog import reap_stale_running_task
 
-    task = CollectionTask(account_id=1, platform="xiaohongshu", status="running")
+    task = CollectionTask(platform="xiaohongshu", status="running")
     db_session.add(task)
     db_session.commit()
 

@@ -131,6 +131,11 @@ class TestScenario72RandomDelay:
         """
         from semilabs_hone.modules.collection.scheduler import rhythm
 
+        # The autouse no_rhythm_sleep fixture no-ops note_delay; take back the
+        # real implementation via its `.original` handle (conftest contract).
+        real_note_delay = getattr(rhythm.note_delay, "original", rhythm.note_delay)
+        monkeypatch.setattr(rhythm, "note_delay", real_note_delay)
+
         recorded: list[float] = []
 
         async def fake_sleep(seconds):
