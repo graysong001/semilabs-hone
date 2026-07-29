@@ -75,11 +75,11 @@ def test_get_dashboard_returns_200(client: TestClient):
 
 @pytest.mark.no_seed_account
 def test_get_dashboard_empty_shows_guidance(client: TestClient):
-    """Empty DB should show the 'no accounts' guidance card."""
+    """Empty DB 的 v2 任务大厅应显示空态引导行。"""
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert "开始使用" in html or "尚未添加" in html
+    assert "暂无任务" in html
 
 
 # ---------------------------------------------------------------------------
@@ -348,19 +348,19 @@ def _make_task(client: TestClient, target_value="alpha", status="pending"):
 
 
 def test_status_badge_need_human_blinks(client: TestClient):
-    """T31: need_human → red blink badge + 人工文案."""
+    """T31: need_human → 红色脉冲 badge + 人工文案 (v2 暗色)."""
     task_id, _ = _make_task(client, status="need_human")
     resp = client.get(f"/api/tasks/{task_id}/status")
     assert resp.status_code == 200
-    assert "blink" in resp.text
-    assert "需人工处理验证码" in resp.text
+    assert "animate-pulse" in resp.text
+    assert "需人工处理" in resp.text
 
 
 def test_status_badge_completed_success(client: TestClient):
-    """T31: completed → success badge."""
+    """T31: completed → 绿色 badge (v2 暗色)."""
     task_id, _ = _make_task(client, status="completed")
     resp = client.get(f"/api/tasks/{task_id}/status")
-    assert "success" in resp.text
+    assert "text-green-400" in resp.text
     assert "已完成" in resp.text
 
 
@@ -379,8 +379,8 @@ def test_status_badge_night_sleep_transient(client: TestClient):
          "data": {"wakeup": "08:00"}, "updated_at": 0},
     )
     resp = client.get(f"/api/tasks/{task_id}/status")
-    assert "night-sleep" in resp.text
-    assert "07:00" in resp.text
+    assert "夜间休眠" in resp.text
+    assert "🌙" in resp.text
 
 
 def test_task_detail_renders_badge(client: TestClient):
@@ -531,14 +531,14 @@ def test_posts_page_has_master_detail_toggle(client: TestClient):
 # --- T35 heartbeat indicator ------------------------------------------------
 
 def test_heartbeat_fresh_green(client: TestClient, tmp_data_dir):
-    """T35: fresh heartbeat → green + 引擎运行中."""
+    """T35: fresh heartbeat → 绿点 + Engine Online (v2 顶栏 Tailwind 片段)."""
     import time
     from semilabs_hone.core.ipc import paths as ipc_paths
     ipc_paths.write_heartbeat(now=time.time())
     resp = client.get("/api/heartbeat")
     assert resp.status_code == 200
-    assert "green" in resp.text
-    assert "引擎运行中" in resp.text
+    assert "bg-green-500" in resp.text
+    assert "Engine Online" in resp.text
 
 
 def test_heartbeat_stale_red(client: TestClient, tmp_data_dir):
@@ -547,16 +547,16 @@ def test_heartbeat_stale_red(client: TestClient, tmp_data_dir):
     from semilabs_hone.core.ipc import paths as ipc_paths
     ipc_paths.write_heartbeat(now=time.time() - 60)
     resp = client.get("/api/heartbeat")
-    assert "red" in resp.text
-    assert "离线" in resp.text
+    assert "bg-red-500" in resp.text
+    assert "Engine Offline" in resp.text
 
 
 def test_heartbeat_absent_red(client: TestClient, tmp_data_dir):
     """T35: no heartbeat file → red + 离线文案."""
     # tmp_data_dir creates an empty ipc/progress/ — no heartbeat.json written.
     resp = client.get("/api/heartbeat")
-    assert "red" in resp.text
-    assert "离线" in resp.text
+    assert "bg-red-500" in resp.text
+    assert "Engine Offline" in resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -615,18 +615,20 @@ def test_task_actions_fragment_running(client: TestClient):
 
 
 def test_task_actions_fragment_need_human(client: TestClient):
-    """T38: need_human → 唤起浏览器 + 已处理，继续."""
+    """T38: need_human → 唤起浏览器 + 已处理 (v2 openRiskModal 风控弹窗)."""
     task_id, _ = _make_task(client, status="need_human")
     resp = client.get(f"/api/tasks/{task_id}/actions")
     assert "唤起浏览器" in resp.text
-    assert "已处理，继续" in resp.text
+    assert "已处理" in resp.text
+    assert "openRiskModal" in resp.text
 
 
 def test_task_actions_fragment_completed(client: TestClient):
-    """T38: completed → 导出 CSV."""
+    """T38: completed → 查看 + 导出 + 删除 (v2 图标按钮组)."""
     task_id, _ = _make_task(client, status="completed")
     resp = client.get(f"/api/tasks/{task_id}/actions")
-    assert "导出 CSV" in resp.text
+    assert "exportCsv" in resp.text
+    assert 'hx-delete="/api/tasks/' in resp.text
 
 
 def test_task_actions_fragment_pending_placeholder(client: TestClient):

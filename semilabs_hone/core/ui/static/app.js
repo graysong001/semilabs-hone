@@ -99,16 +99,24 @@
   });
 
   // 任务类型切换 (keyword_search / author_homepage)
+  // 两个字段同名 target_value：隐藏的那个必须 disabled，否则表单会带上两个
+  // 同名字段，starlette 取最后一个值导致选中的内容被空值覆盖。
   window.toggleTaskTypeFields = function() {
     var type = document.getElementById('task-type-select').value;
     var keywordField = document.getElementById('keyword-field');
     var urlField = document.getElementById('url-field');
+    var keywordInput = keywordField.querySelector('[name="target_value"]');
+    var urlInput = urlField.querySelector('[name="target_value"]');
     if (type === 'keyword_search') {
       keywordField.classList.remove('hidden');
       urlField.classList.add('hidden');
+      keywordInput.disabled = false;
+      urlInput.disabled = true;
     } else {
       keywordField.classList.add('hidden');
       urlField.classList.remove('hidden');
+      keywordInput.disabled = true;
+      urlInput.disabled = false;
     }
   };
 

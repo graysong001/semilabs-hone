@@ -1,0 +1,46 @@
+<!-- Block 5: Risk Control Modal (左右分栏全屏弹窗) -->
+<dialog id="risk-control-modal" class="bg-transparent p-0 w-[90%] max-w-[800px]">
+  <div class="bg-app-card rounded-xl border border-gray-700 shadow-2xl flex overflow-hidden" style="min-height: 400px;">
+    <!-- 左侧：操作区 -->
+    <div class="flex-1 p-8 flex flex-col justify-center">
+      <div class="mb-6">
+        <div class="inline-flex items-center gap-2 px-3 py-1 bg-red-500/10 border border-red-500/30 rounded-full text-red-400 text-xs font-medium mb-4">
+          <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+          安全接管模式
+        </div>
+        <h2 class="text-2xl font-bold text-white mb-3">系统检测到平台风控拦截</h2>
+        <p class="text-gray-400 text-sm leading-relaxed mb-6">
+          任务 <span class="text-white font-medium" id="risk-task-target">—</span> 在采集过程中触发了验证机制。<br>
+          请在弹出的浏览器中手动完成验证，完成后点击下方按钮继续。
+        </p>
+      </div>
+      <div class="space-y-3">
+        <button id="risk-activate-btn" class="w-full h-12 bg-brand hover:bg-brand-dark text-white rounded-lg font-medium flex items-center justify-center gap-2 transition-colors">
+          <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="3" width="20" height="14" rx="2"/>
+            <path d="M8 21h8M12 17v4"/>
+          </svg>
+          唤起 Chrome 浏览器
+        </button>
+        <button id="risk-resume-btn" class="w-full h-12 bg-green-500/15 hover:bg-green-500/25 text-green-400 border border-green-500/30 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors">
+          <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 3l14 9-14 9V3z"/>
+          </svg>
+          已完成验证，继续任务
+        </button>
+      </div>
+    </div>
+    <!-- 右侧：渐变警示区 -->
+    <div class="w-[280px] flex flex-col items-center justify-center p-8 text-white" style="background: linear-gradient(135deg, #FF6B35 0%, #FF4560 100%);">
+      <div class="text-6xl mb-4">🛡️</div>
+      <h3 class="text-xl font-bold mb-3 text-center">安全接管模式</h3>
+      <p class="text-white/80 text-sm text-center leading-relaxed mb-6">
+        人工验证不会泄露账号信息<br>
+        验证完成后系统将自动恢复采集
+      </p>
+      <div class="px-4 py-2 bg-white/10 backdrop-blur-sm rounded-lg border border-white/20">
+        <span class="text-white/90 text-xs">任务 ID: <span id="risk-task-id" class="font-mono">—</span></span>
+      </div>
+    </div>
+  </div>
+</dialog>
