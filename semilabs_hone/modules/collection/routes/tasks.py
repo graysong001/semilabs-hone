@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 router = APIRouter()
 
@@ -102,87 +102,14 @@ def _validate_new_task(sess, platform: str, account_id: int, targets: list[str])
 # Pages
 # ---------------------------------------------------------------------------
 
-@router.get("/tasks", response_class=HTMLResponse)
-async def page_tasks_list(request: Request) -> HTMLResponse:
-    """GET /tasks — task console list page (PRD §5.2).
+@router.get("/tasks")
+async def redirect_tasks_to_dashboard() -> RedirectResponse:
+    """GET /tasks -> / — 任务大厅已合并到首页 (ui_design_spec_v2 §6)。
 
-    Lists all tasks (newest first) with a polled status badge cell and a polled
-    actions cell. Empty state card when there are no tasks. Row click → detail.
+    独立的列表页/新建页/详情页已随 v2 任务大厅下线：建单走大厅弹窗，
+    状态/操作走 /api/tasks/{id}/status|actions|row 片段轮询。
     """
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import CollectionTask
-
-    sess = get_session()
-    try:
-        tasks = (
-            sess.query(CollectionTask)
-            .order_by(CollectionTask.created_at.desc())
-            .all()
-        )
-        rows = [_row_context(t) for t in tasks]
-    except Exception:
-        rows = []
-    finally:
-        sess.close()
-
-    t = _templates()
-    assert t is not None, "Templates not initialized"
-    return t.TemplateResponse(
-        request, "tasks_list.html",
-        {"rows": rows, "has_tasks": bool(rows)},
-    )
-
-
-@router.get("/tasks/new", response_class=HTMLResponse)
-async def page_new_task(request: Request) -> HTMLResponse:
-    """GET /tasks/new — create task page with platform/keyword form."""
-    from semilabs_hone.modules.collection.scrapers.registry import list_platforms
-
-    platforms = list_platforms()
-
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.account import Account
-
-    sess = get_session()
-    try:
-        accounts = sess.query(Account).order_by(Account.id.desc()).all()
-    except Exception:
-        accounts = []
-    finally:
-        sess.close()
-
-    t = _templates()
-    assert t is not None, "Templates not initialized"
-    return t.TemplateResponse(
-        request, "task_new.html",
-        {"platforms": platforms, "accounts": accounts},
-    )
-
-
-@router.get("/tasks/{task_id}", response_class=HTMLResponse)
-async def page_task_detail(request: Request, task_id: str) -> HTMLResponse:
-    """GET /tasks/{id} — task detail page with progress."""
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.task import CollectionTask
-
-    sess = get_session()
-    try:
-        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
-    except Exception:
-        task = None
-    finally:
-        sess.close()
-
-    if task is None:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    t = _templates()
-    assert t is not None, "Templates not initialized"
-    return t.TemplateResponse(
-        request, "task_detail.html",
-        {"task": task, "badge_html": _badge_html(task)},
-    )
+    return RedirectResponse("/", status_code=302)
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +317,7 @@ async def api_task_row(task_id: str) -> HTMLResponse:
 
     t = _templates()
     assert t is not None, "Templates not initialized"
-    html = t.env.get_template("_task_row.html").render(**_row_context(task))
+    html = t.env.get_template("partials/_task_row.html").render(**_row_context(task))
     return HTMLResponse(html)
 
 
@@ -785,3 +712,156 @@ async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
         "task_id": task_id,
         "status": "submitted",
     })
+
+
+# ---------------------------------------------------------------------------
+# Pause Task (v2 块3)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/tasks/{task_id}/pause")
+async def api_pause_task(task_id: str) -> JSONResponse:
+    """POST /api/tasks/{id}/pause — pause a running task.
+
+    Writes IPC control file with {action: pause} to signal worker to stop.
+    Updates task status to 'paused' in DB.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if not task:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+        if task.status != "running":
+            return JSONResponse({"ok": False, "error": "Task is not running"}, status_code=409)
+
+        task.status = "paused"
+        sess.commit()
+
+        # Write IPC control file to signal worker
+        if task.request_id:
+            from semilabs_hone.core.ipc.paths import atomic_write_json, control_path
+            atomic_write_json(control_path(task.request_id), {"action": "pause"})
+
+        return JSONResponse({
+            "ok": True,
+            "task_id": task_id,
+            "status": "paused",
+        })
+    except Exception as exc:
+        sess.rollback()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Delete Task (v2 块4)
+# ---------------------------------------------------------------------------
+
+@router.delete("/api/tasks/{task_id}")
+async def api_delete_task(task_id: str) -> JSONResponse:
+    """DELETE /api/tasks/{id} — delete a task and its associated data.
+
+    Only allows deleting completed/error/failed tasks. Running/pending tasks
+    cannot be deleted. Cascades to posts and comments via DB foreign key.
+    Also cleans up IPC control files if they exist.
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if not task:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+        if task.status in ("running", "pending"):
+            return JSONResponse(
+                {"ok": False, "error": "Cannot delete running or pending tasks"},
+                status_code=409
+            )
+
+        # Clean up IPC control file if exists
+        if task.request_id:
+            try:
+                from semilabs_hone.core.ipc.paths import control_path, burn
+                burn(control_path(task.request_id))
+            except Exception:
+                pass  # Ignore cleanup errors
+
+        # Delete task (cascades to posts and comments via DB foreign key)
+        sess.delete(task)
+        sess.commit()
+
+        return JSONResponse({"ok": True, "task_id": task_id})
+    except Exception as exc:
+        sess.rollback()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()
+
+
+# ---------------------------------------------------------------------------
+# Activate Browser (v2 块5, 风控弹窗唤起 worker Chrome)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/tasks/{task_id}/activate-browser")
+async def api_activate_browser(task_id: str) -> JSONResponse:
+    """POST /api/tasks/{id}/activate-browser — activate Chrome window for manual intervention.
+
+    Only allows for need_human tasks. Uses osascript to bring Chrome to front
+    on macOS. Non-macOS systems return an error.
+    """
+    import subprocess
+    import sys
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+
+    sess = get_session()
+    try:
+        task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if not task:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+        if task.status != "need_human":
+            return JSONResponse(
+                {"ok": False, "error": "Task is not in need_human status"},
+                status_code=409
+            )
+
+        # Check if running on macOS
+        if sys.platform != "darwin":
+            return JSONResponse(
+                {"ok": False, "error": "activate-browser only supported on macOS"},
+                status_code=501
+            )
+
+        # Use osascript to bring Chrome to front
+        try:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Google Chrome" to activate'],
+                timeout=5,
+                check=True
+            )
+            return JSONResponse({
+                "ok": True,
+                "task_id": task_id,
+                "message": "Chrome activated"
+            })
+        except subprocess.TimeoutExpired:
+            return JSONResponse(
+                {"ok": False, "error": "Chrome activation timed out"},
+                status_code=504
+            )
+        except subprocess.CalledProcessError as e:
+            return JSONResponse(
+                {"ok": False, "error": f"Chrome activation failed: {e}"},
+                status_code=500
+            )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        sess.close()

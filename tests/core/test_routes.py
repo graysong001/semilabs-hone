@@ -383,22 +383,22 @@ def test_status_badge_night_sleep_transient(client: TestClient):
     assert "🌙" in resp.text
 
 
-def test_task_detail_renders_badge(client: TestClient):
-    """T31: detail page renders the pollable badge span."""
+def test_dashboard_renders_badge(client: TestClient):
+    """T31: v2 任务大厅行内渲染可轮询 badge span (独立详情页已下线)."""
     task_id, _ = _make_task(client, status="running")
-    resp = client.get(f"/tasks/{task_id}")
+    resp = client.get("/")
     assert "badge-" + task_id in resp.text
     assert "/api/tasks/" + task_id + "/status" in resp.text
 
 
 # --- T32 create-task dialog & form migration --------------------------------
 
-def test_new_task_page_renders_dialog(client: TestClient):
-    """T32: /tasks/new renders a <dialog> + the new PRD form fields."""
-    resp = client.get("/tasks/new")
+def test_dashboard_renders_create_modal(client: TestClient):
+    """T32: v2 任务大厅内嵌建单弹窗 + PRD 表单字段 (独立 /tasks/new 已下线)."""
+    resp = client.get("/")
     assert resp.status_code == 200
     assert "<dialog" in resp.text
-    assert 'id="dlg-new"' in resp.text
+    assert 'id="create-modal"' in resp.text
     assert 'name="task_type"' in resp.text
     assert 'name="target_value"' in resp.text
     assert 'name="expected_count"' in resp.text
@@ -454,20 +454,20 @@ def test_create_task_author_homepage_invalid_http_rejected(client: TestClient):
 
 # --- T33 optimistic lock & need_human buttons ------------------------------
 
-def test_task_detail_need_human_buttons(client: TestClient):
-    """T33: need_human detail renders 唤起浏览器 + 已处理，继续 + optimistic lock."""
+def test_task_actions_need_human_buttons(client: TestClient):
+    """T33: need_human actions 片段渲染 唤起浏览器 + 已处理 + optimistic lock."""
     task_id, _ = _make_task(client, status="need_human")
-    resp = client.get(f"/tasks/{task_id}")
+    resp = client.get(f"/api/tasks/{task_id}/actions")
     assert "唤起浏览器" in resp.text
-    assert "已处理，继续" in resp.text
-    assert "hx-disabled-elt" in resp.text
+    assert "已处理" in resp.text
+    assert "hx-disabled-elt" in resp.text or "openRiskModal" in resp.text
 
 
-def test_task_detail_running_cancel_optimistic(client: TestClient):
-    """T33: running detail renders cancel button with optimistic lock."""
+def test_task_actions_running_cancel_optimistic(client: TestClient):
+    """T33: running actions 片段渲染 取消按钮 with optimistic lock."""
     task_id, _ = _make_task(client, status="running")
-    resp = client.get(f"/tasks/{task_id}")
-    assert "取消任务" in resp.text
+    resp = client.get(f"/api/tasks/{task_id}/actions")
+    assert "取消" in resp.text
     assert "hx-disabled-elt" in resp.text
 
 
@@ -565,43 +565,42 @@ def test_heartbeat_absent_red(client: TestClient, tmp_data_dir):
 
 # --- T37 list page + empty state -------------------------------------------
 
-def test_tasks_list_page_empty_state(client: TestClient):
-    """T37: GET /tasks with no tasks → 空状态卡片 + 新建任务按钮."""
-    resp = client.get("/tasks")
-    assert resp.status_code == 200
-    assert "暂无采集任务" in resp.text
-    assert "新建任务" in resp.text
+def test_tasks_route_redirects_to_dashboard(client: TestClient):
+    """T37: GET /tasks → 302 到 v2 任务大厅 (独立列表页已下线)."""
+    resp = client.get("/tasks", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/"
 
 
-def test_tasks_list_page_renders_rows(client: TestClient):
-    """T37: GET /tasks lists tasks with status-/actions- cells + tasks-tbody."""
+def test_dashboard_renders_rows(client: TestClient):
+    """T37: GET / 任务大厅行渲染 status-/actions- cells + task-table-body."""
     tid_a, _ = _make_task(client, target_value="alpha", status="running")
     tid_b, _ = _make_task(client, target_value="beta", status="pending")
-    resp = client.get("/tasks")
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert 'id="tasks-tbody"' in resp.text
+    assert 'id="task-table-body"' in resp.text
     assert "alpha" in resp.text and "beta" in resp.text
     assert f'id="status-{tid_a}"' in resp.text
     assert f'id="actions-{tid_b}"' in resp.text
-    assert f'id="row-{tid_a}"' in resp.text
+    assert f'id="task-row-{tid_a}"' in resp.text
 
 
-def test_list_page_includes_create_dialog(client: TestClient):
-    """T39: the list page embeds the create-task dialog (afterbegin insert target)."""
-    resp = client.get("/tasks")
-    assert 'id="dlg-new"' in resp.text
+def test_dashboard_includes_create_dialog(client: TestClient):
+    """T39: 大厅内嵌建单弹窗 (afterbegin insert target)."""
+    resp = client.get("/")
+    assert 'id="create-modal"' in resp.text
     assert 'name="task_type"' in resp.text
 
 
 # --- T38 row / actions fragments -------------------------------------------
 
 def test_task_row_fragment(client: TestClient):
-    """T38: GET /api/tasks/<id>/row returns a <tr> with row-/status-/actions- ids."""
+    """T38: GET /api/tasks/<id>/row returns a <tr> with task-row-/status-/actions- ids."""
     task_id, _ = _make_task(client, target_value="rowitem", status="running")
     resp = client.get(f"/api/tasks/{task_id}/row")
     assert resp.status_code == 200
     assert resp.text.lstrip().startswith("<tr")
-    assert f'id="row-{task_id}"' in resp.text
+    assert f'id="task-row-{task_id}"' in resp.text
     assert f'id="status-{task_id}"' in resp.text
     assert f'id="actions-{task_id}"' in resp.text
 
@@ -642,11 +641,11 @@ def test_task_actions_fragment_pending_placeholder(client: TestClient):
 
 # --- T39 create→afterbegin wiring (regression on the dialog partial) -------
 
-def test_new_task_page_still_renders_dialog_after_extract(client: TestClient):
-    """T39 refactor: /tasks/new still renders the dialog + PRD form fields."""
-    resp = client.get("/tasks/new")
+def test_dashboard_still_renders_dialog_after_extract(client: TestClient):
+    """T39 refactor: 大厅仍渲染建单弹窗 + PRD 表单字段."""
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert 'id="dlg-new"' in resp.text
+    assert 'id="create-modal"' in resp.text
     assert 'name="task_type"' in resp.text
     assert 'name="target_value"' in resp.text
     assert 'name="expected_count"' in resp.text

@@ -269,3 +269,76 @@ class TestTasksCancelResume:
         self._fake_tasks_ipc(monkeypatch)
         resp = client.post("/api/tasks/nonexistent/resume")
         assert resp.status_code == 404
+
+
+class TestTasksPauseDeleteActivate:
+    """v2 任务大厅新端点: pause / delete / activate-browser (Stage 3)."""
+
+    def _make_task(self, db_session, status="running"):
+        from semilabs_hone.core.models.task import CollectionTask
+        t = CollectionTask(platform="xiaohongshu",
+                           status=status, expected_count=10,
+                           request_id="req-pda")
+        db_session.add(t); db_session.commit()
+        return t.id
+
+    # --- pause ---
+    def test_pause_running_ok(self, client, db_session):
+        tid = self._make_task(db_session, status="running")
+        resp = client.post(f"/api/tasks/{tid}/pause")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "paused"
+        # control file written so the live worker stops at its next step boundary
+        from semilabs_hone.core.ipc import paths as ipc_paths
+        ctrl = ipc_paths.read_json_if_exists(ipc_paths.control_path("req-pda"))
+        assert ctrl == {"action": "pause"}
+
+    def test_pause_not_running_409(self, client, db_session):
+        tid = self._make_task(db_session, status="paused")
+        assert client.post(f"/api/tasks/{tid}/pause").status_code == 409
+
+    def test_pause_missing_404(self, client):
+        assert client.post("/api/tasks/nope/pause").status_code == 404
+
+    # --- delete ---
+    def test_delete_completed_ok(self, client, db_session):
+        tid = self._make_task(db_session, status="completed")
+        resp = client.delete(f"/api/tasks/{tid}")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        from semilabs_hone.core.models.task import CollectionTask
+        assert db_session.query(CollectionTask).filter(
+            CollectionTask.id == tid).first() is None
+
+    def test_delete_running_409(self, client, db_session):
+        tid = self._make_task(db_session, status="running")
+        assert client.delete(f"/api/tasks/{tid}").status_code == 409
+
+    def test_delete_missing_404(self, client):
+        assert client.delete("/api/tasks/nope").status_code == 404
+
+    # --- activate-browser ---
+    def test_activate_browser_missing_404(self, client):
+        assert client.post("/api/tasks/nope/activate-browser").status_code == 404
+
+    def test_activate_browser_not_need_human_409(self, client, db_session):
+        tid = self._make_task(db_session, status="running")
+        assert client.post(f"/api/tasks/{tid}/activate-browser").status_code == 409
+
+    def test_activate_browser_macos_ok(self, client, db_session, monkeypatch):
+        import subprocess as sp
+        import sys
+        monkeypatch.setattr(sp, "run", lambda *a, **k: None)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        tid = self._make_task(db_session, status="need_human")
+        resp = client.post(f"/api/tasks/{tid}/activate-browser")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_activate_browser_non_macos_501(self, client, db_session, monkeypatch):
+        import sys
+        monkeypatch.setattr(sys, "platform", "linux")
+        tid = self._make_task(db_session, status="need_human")
+        resp = client.post(f"/api/tasks/{tid}/activate-browser")
+        assert resp.status_code == 501
+        assert resp.json()["ok"] is False
