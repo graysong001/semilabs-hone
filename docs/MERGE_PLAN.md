@@ -114,10 +114,12 @@ git cherry-pick d810008 e8e027c f8881a5 7e5051a
 
 | # | 任务 | 要点 |
 |---|---|---|
-| 7.1 | `app.js` 合并 | feat 版为底（exportCsv/HTMX 错误 Toast/showToast 暴露），补 fix 的 `ws:message` DOM 事件派发、`data-progress-for` 进度选择器、`session_status` case |
-| 7.2 | `base.html` 合并 | feat 版为底；CDN 的 pico/htmx 换成 **vendor 本地引用**（工作区 vendor/ 已存在，本地工具不依赖外网）；导航用 fix 的 manifest NAV 循环（模块自声明页面） |
-| 7.3 | `style.css` 合并 | feat 195 行版为底，从 stash 的 447 行工作区版补缺（以模板实际引用的 class 为准逐个核对，不整段搬） |
+| 7.1 ✅ | `app.js` 合并 | feat 版为底保留（exportCsv/HTMX 错误 Toast/showToast/`msg.duration`），补 fix 三件套：`ws:message` DOM 事件派发（task_detail 的监听此前是死代码）、`data-progress-for` 进度选择器（替换无模板使用的 `progress-<id>` 死代码+重复的 `#task-log` 追加）、`session_status` case。提交 6e399ef |
+| 7.2 ✅ | `base.html` 合并 | feat 版为底；CDN 的 pico/htmx 换成 **vendor 本地引用**（vendor/ 已提交，本地工具不依赖外网）；导航用 fix 的 manifest NAV 循环（配套：manifest.py 加 NAV 三条 + app.py `_discover_modules` 带 `nav`；旧 `/{mid}` 链接无对应路由会 404）；保留 heartbeat 指示器（/api/heartbeat 端点在）。T30 断言改 vendor 路径。提交 7f40cde |
+| 7.3 ✅ | `style.css` 合并 | feat 195 行版为底，从 stash 447 行工作区版补缺（以模板实际引用的 class 逐个核对，不整段搬、不引 `--hone-*` 变量体系）：补 .logo/.badge.inactive/.badge.suspended/.progress-container/.progress-fill/#progress-text/.log-container/.task-log/.action-buttons/.notification-area/.alert-*/.task-result/.filter-form/.post-content/.comment-item/.pagination/.htmx-request。提交 39b1de3 |
 | 7.4 | （可选）模板落位模块目录（F8） | PRD 无要求、feat 集中式已接线，**默认不做**；仅当后续加站/加模块感到集中式混乱时再做 |
+
+**验证**：路由回归 78 绿；loop_gate 全绿（645 用例 + 覆盖率 85.08%）；TestClient 冒烟 `/ /accounts /tasks /posts` + 4 个静态资产全 200、NAV 循环渲染正确。
 
 **验收门**：人工走查 SOP 一遍（账号添加→登录→建任务→进度→导出 CSV→异常按钮），对照 docs/USER_SOP.md。
 
