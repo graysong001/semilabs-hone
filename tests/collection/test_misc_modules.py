@@ -19,56 +19,58 @@ import pytest
 # ─── warmup.random_browse ─────────────────────────────────────────────────
 
 class TestWarmupRandomBrowse:
-    async def test_human_branch_calls_human_random_browse(self, monkeypatch):
+    """fix-line warmup: goto-based browse, WARMUP_PAGES window, dwell via rhythm."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_dwell(self, monkeypatch):
         from semilabs_hone.modules.collection.scheduler import warmup
-        from semilabs_hone.modules.collection.anti_detect import human_behavior
+        monkeypatch.setattr(warmup, "_human_dwell", AsyncMock())
 
-        calls = {"n": 0}
-
-        async def fake_human_browse(page, timing):
-            calls["n"] += 1
-
-        monkeypatch.setattr(human_behavior, "random_browse", fake_human_browse)
-        monkeypatch.setattr(warmup.random, "randint", lambda a, b: 3)
-        monkeypatch.setattr(warmup.random, "sample", lambda pop, k: pop[:k])
-        monkeypatch.setattr(warmup.asyncio, "sleep", AsyncMock())
-
-        page = MagicMock()
-        await warmup.random_browse(page)
-        assert calls["n"] == 3  # one per selected URL
-
-    async def test_fallback_branch_uses_page_goto(self, monkeypatch):
+    async def test_browses_pages_from_config_window(self, monkeypatch):
+        import config
         from semilabs_hone.modules.collection.scheduler import warmup
-        import builtins
-        real_import = builtins.__import__
 
-        def fake_import(name, *a, **k):
-            if "human_behavior" in name:
-                raise ImportError("no module")
-            return real_import(name, *a, **k)
-        monkeypatch.setattr(builtins, "__import__", fake_import)
-        monkeypatch.setattr(warmup.random, "randint", lambda a, b: 2)
+        monkeypatch.setattr(config, "WARMUP_PAGES", (3, 3), raising=False)
         monkeypatch.setattr(warmup.random, "sample", lambda pop, k: pop[:k])
-        monkeypatch.setattr(warmup.asyncio, "sleep", AsyncMock())
 
         page = MagicMock()
         page.goto = AsyncMock()
         await warmup.random_browse(page)
-        assert page.goto.call_count == 2
+        assert page.goto.call_count == 3
+
+    async def test_disabled_when_warmup_pages_off(self, monkeypatch):
+        import config
+        from semilabs_hone.modules.collection.scheduler import warmup
+
+        monkeypatch.setattr(config, "WARMUP_PAGES", None, raising=False)
+        page = MagicMock()
+        page.goto = AsyncMock()
+        await warmup.random_browse(page)
+        assert page.goto.call_count == 0
+
+    async def test_urls_override_keeps_traffic_local(self, monkeypatch):
+        # E2E injects local-site urls so warmup never hits the public web.
+        import config
+        from semilabs_hone.modules.collection.scheduler import warmup
+
+        monkeypatch.setattr(config, "WARMUP_PAGES", (2, 2), raising=False)
+        monkeypatch.setattr(warmup.random, "sample", lambda pop, k: pop[:k])
+        page = MagicMock()
+        page.goto = AsyncMock()
+        await warmup.random_browse(page, urls=["http://127.0.0.1/a", "http://127.0.0.1/b"])
+        visited = [c.args[0] for c in page.goto.call_args_list]
+        assert visited == ["http://127.0.0.1/a", "http://127.0.0.1/b"]
 
     async def test_warmup_failure_is_non_critical(self, monkeypatch):
+        import config
         from semilabs_hone.modules.collection.scheduler import warmup
-        from semilabs_hone.modules.collection.anti_detect import human_behavior
 
-        async def failing(page, timing):
-            raise RuntimeError("warmup page failed")
-        monkeypatch.setattr(human_behavior, "random_browse", failing)
-        monkeypatch.setattr(warmup.random, "randint", lambda a, b: 2)
+        monkeypatch.setattr(config, "WARMUP_PAGES", (2, 2), raising=False)
         monkeypatch.setattr(warmup.random, "sample", lambda pop, k: pop[:k])
-        monkeypatch.setattr(warmup.asyncio, "sleep", AsyncMock())
-
+        page = MagicMock()
+        page.goto = AsyncMock(side_effect=RuntimeError("nav failed"))
         # Must not raise.
-        await warmup.random_browse(MagicMock())
+        await warmup.random_browse(page)
 
 
 # ─── manual_handler.request_manual_solve ──────────────────────────────────

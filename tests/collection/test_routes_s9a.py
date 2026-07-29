@@ -22,6 +22,10 @@ def tmp_data_dir(monkeypatch, tmp_path):
     for sub in ["logs", "ipc/requests", "ipc/results", "ipc/progress",
                 "ipc/control/cancel", "collection/profiles", "collection/debug"]:
         (td / sub).mkdir(parents=True, exist_ok=True)
+    # Point config at the tmp dir BEFORE reloading — reload without the env
+    # var silently rebinds every path back to the real data/ (progress files
+    # land in the real bus and db teardown drops the real tables).
+    monkeypatch.setenv("SEMILABS_DATA_DIR", str(td))
     import config
     importlib.reload(config)
     try:
