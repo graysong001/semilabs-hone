@@ -89,12 +89,12 @@ git cherry-pick d810008 e8e027c f8881a5 7e5051a
 
 | # | 任务 | 要点 |
 |---|---|---|
-| 5.1 | `handlers.py`：fix 采集管线移植到 feat 状态机骨架 | 移植（参照 fix 线）：带 sort 的 `_search_keyword`、`_fetch_detail`、`_fetch_top_comments`、图片下载、`_upsert_post` 完整字段（published_at/json 序列化）、`_upsert_comments`、断点去重（`_load_scraped_platform_ids`）、配额自增+跨天归零（G9）、三级会话恢复。**全部直接用 PRD 列名**（actual_count/error_msg 等），不再写 legacy 列。保留 feat 的 `_promote_to_running`/`_set_task_need_human`/`_await_resume`/`_night_sleep_if_quiet` 与 DailyLimitError→paused 接线（提交 4f1437e） |
-| 5.2 | `routes/accounts.py`：G2/G3/F6 移植 | G2 平台取账号的（修回 feat 的 xiaohongshu 硬编码）；G3 写操作返回 `_accounts_table` 片段（修回 303）；F6 建号即分配指纹+profile；保留 feat 的 worker_spawner 调用 |
-| 5.3 | `routes/tasks.py`：G8 前置校验移植 | 平台/账号存在/同平台/已登录/关键词非空/单任务在跑，4xx+fix_hint；适配 PRD TaskCreate（keywords 经 feat 已有 legacy 兼容层进 target_value）；F3 request_id 持久化、G6 progress 降级端点保留 |
-| 5.4 | `models/task.py`：legacy 列删除（feat S3 过渡收官） | 确认 5.1-5.3 无引用后，删 legacy 列（account_id 裸列/max_posts_per_keyword/posts_scraped/last_note_index/sort_type/download_images/collect_comments/error_message/error_category/started_at/completed_at）。**破坏性变更**：本地工具不写迁移脚本——引导用户「先 /api/export 导出备份 CSV，再删 data/factory.db 重启重建」。保留 db.py 的 `ensure_column` 工具供未来增量迁移 |
+| 5.1 ✅ | `handlers.py`：fix 采集管线移植到 feat 状态机骨架 | 移植（参照 fix 线）：带 sort 的 `_search_keyword`、`_fetch_detail`、`_fetch_top_comments`、图片下载、`_upsert_post` 完整字段（published_at/json 序列化）、`_upsert_comments`、断点去重（`_load_scraped_platform_ids`）、配额自增+跨天归零（G9）、三级会话恢复。**全部直接用 PRD 列名**（actual_count/error_msg 等），不再写 legacy 列。保留 feat 的 `_promote_to_running`/`_set_task_need_human`/`_await_resume`/`_night_sleep_if_quiet` 与 DailyLimitError→paused 接线（提交 4f1437e） |
+| 5.2 ✅ | `routes/accounts.py`：G2/G3/F6 移植 | G2 平台取账号的（修回 feat 的 xiaohongshu 硬编码）；G3 写操作返回 `_accounts_table` 片段（集中式 `core/ui/templates/_accounts_table.html`，页面 `{% include %}`）；F6 建号即分配指纹+profile；保留 feat 的 worker_spawner 调用（不用 fix 的 tracker，P0b 裁决已并入 ws relay）；login/validate/import-cookies 加 404+fix_hint + Cookie JSON 校验 |
+| 5.3 ✅ | `routes/tasks.py`：G8 前置校验移植 | 平台/账号存在/同平台/已登录/关键词非空校验，4xx+fix_hint；适配 PRD TaskCreate（target_value 进 DB，keywords 进 IPC payload）；F3 request_id 持久化、G6 progress 降级端点保留。**单任务锁裁决：PRD §2.2 场景1 「排队执行」优先**——已 running/pending 时新任务 pending 排队（不 409 拒绝），与 feat 原行为一致；resume Path B 补 task_type/target_value/keywords 进 payload + 写回新 request_id |
+| 5.4 ✅ | `models/task.py`：legacy 列删除（feat S3 过渡收官） | 确认 5.1-5.3 无引用后，删 legacy 列（account_id 裸列/max_posts_per_keyword/posts_scraped/last_note_index/sort_type/download_images/collect_comments/error_message/error_category/started_at/completed_at）。**破坏性变更**：本地工具不写迁移脚本——引导用户「先 /api/export 导出备份 CSV，再删 data/factory.db 重启重建」。watchdog/task_detail.html/contract 测试均已切到 PRD 列名 |
 
-**验收门**：`pytest tests/collection -q` 全绿；fix 线 `tests/collection/test_sop_routes.py`/`test_pipeline.py` 适配 PRD 模型（UUID task_id）移植后全绿。
+**验收门 ✅**：`pytest tests -p no:cov --ignore=tests/e2e` 634 全绿；BDD 16 场景全绿；`check_constraints.py` 通过。
 
 ---
 
