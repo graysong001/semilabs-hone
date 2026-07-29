@@ -7,19 +7,11 @@
 <div class="grid">
   <div>
     <p><strong>平台:</strong> {{ task.platform }}</p>
-    <p><strong>状态:</strong>
-      <span class="badge
-        {{ 'active' if task.status == 'running' else '' }}
-        {{ 'success' if task.status == 'completed' else '' }}
-        {{ 'error' if task.status in ('failed', 'error') else '' }}
-        {{ 'warning' if task.status == 'paused' else '' }}">
-        {{ task.status }}
-      </span>
-    </p>
+    <p><strong>状态:</strong> {{ badge_html|safe }}</p>
   </div>
   <div>
-    <p><strong>每关键词最大:</strong> {{ task.max_posts_per_keyword }}</p>
-    <p><strong>排序:</strong> {{ task.sort_type }}</p>
+    <p><strong>目标采集量:</strong> {{ task.expected_count }}</p>
+    <p><strong>类型:</strong> {{ task.task_type }}</p>
   </div>
 </div>
 
@@ -35,10 +27,10 @@
 <!-- Stats -->
 <div class="grid" id="stats-grid">
   <div>
-    <p><strong>已抓取:</strong> <span id="posts-scraped">{{ task.posts_scraped }}</span></p>
+    <p><strong>已抓取:</strong> <span id="posts-scraped">{{ task.actual_count }}</span></p>
   </div>
   <div>
-    <p><strong>断点索引:</strong> <span id="last-note-index">{{ task.last_note_index }}</span></p>
+    <p><strong>断点索引:</strong> <span id="last-note-index">-</span></p>
   </div>
 </div>
 
@@ -52,23 +44,38 @@
 <!-- Notifications -->
 <div id="notification-area" class="notification-area"></div>
 
-<!-- Action buttons -->
-<div class="action-buttons" style="margin-top: 1em;">
+<!-- Action buttons (PRD §5.2.3: 乐观锁 aria-busy+disabled; need_human 高亮唤起/已处理) -->
+<div id="actions-{{ task.id }}" class="action-buttons" style="margin-top: 1em;">
   {% if task.status == 'running' %}
-    <button id="btn-cancel" hx-post="/api/tasks/{{ task.id }}/cancel" hx-swap="none" class="secondary outline">
+    <button id="btn-cancel" hx-post="/api/tasks/{{ task.id }}/cancel" hx-swap="none"
+            hx-disabled-elt="this" class="secondary outline"
+            onclick="this.setAttribute('aria-busy','true')">
       取消任务
     </button>
   {% endif %}
 
+  {% if task.status == 'need_human' %}
+    <a href="/tasks/{{ task.id }}" class="button primary" role="button"
+       title="请切换到 worker Chrome 窗口完成扫码 / 验证码" aria-label="唤起浏览器">
+      唤起浏览器
+    </a>
+    <button id="btn-resume" hx-post="/api/tasks/{{ task.id }}/resume" hx-swap="none"
+            hx-disabled-elt="this" class="primary"
+            onclick="this.setAttribute('aria-busy','true')">
+      已处理，继续
+    </button>
+  {% endif %}
+
   {% if task.status in ('failed', 'error', 'paused') %}
-    <button id="btn-resume" hx-post="/api/tasks/{{ task.id }}/resume" hx-swap="none" class="primary">
+    <button id="btn-resume" hx-post="/api/tasks/{{ task.id }}/resume" hx-swap="none"
+            hx-disabled-elt="this" class="primary"
+            onclick="this.setAttribute('aria-busy','true')">
       继续任务
     </button>
   {% endif %}
 
   {% if task.status == 'completed' %}
-    <a href="/api/export?task_id={{ task.id }}&format=ai" class="button">导出 AI CSV</a>
-    <a href="/api/export?task_id={{ task.id }}&format=excel" class="button secondary">导出 Excel ZIP</a>
+    <button onclick="exportCsv('{{ task.id }}', this)" class="button">导出 CSV</button>
   {% endif %}
 </div>
 {% endblock %}
@@ -76,7 +83,7 @@
 {% block scripts %}
 <script>
 (function() {
-  var taskId = {{ task.id }};
+  var taskId = '{{ task.id }}';
   var logDiv = document.getElementById('task-log');
   var progressFill = document.getElementById('progress-fill');
   var progressText = document.getElementById('progress-text');

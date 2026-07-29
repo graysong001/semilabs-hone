@@ -2,7 +2,9 @@
  *
  * Manages a single WS connection to /ws with auto-reconnect.
  * Dispatches messages by msg.type: progress / warn / qr_ready /
- * captcha_required / error / disk_warn / task_completed / login_success.
+ * captcha_required / error / disk_warn / task_completed / login_success /
+ * session_status. Every message is also fanned out as a `ws:message`
+ * DOM CustomEvent for page-level scripts (task detail, accounts).
  */
 (function () {
   "use strict";
@@ -39,10 +41,59 @@
     container.appendChild(el);
     setTimeout(function () {
       if (el.parentNode) el.parentNode.removeChild(el);
-    }, 5000);
+    }, msg.duration || 5000);
   }
 
+  // Expose for inline scripts (e.g. task_new.html success toast).
+  window.showToast = showToast;
+
+  // CSV export via fetch (PRD §4.6): 200 → download blob; 400 (0 条) → Toast.
+  window.exportCsv = function (taskId, btn) {
+    var url = "/api/export" + (taskId ? "?task_id=" + encodeURIComponent(taskId) : "");
+    if (btn) { btn.setAttribute("aria-busy", "true"); btn.disabled = true; }
+    fetch(url)
+      .then(function (resp) {
+        if (!resp.ok) {
+          // 0 条 / 5xx → 拦截 + Toast (PRD §4.6)
+          return resp.json().catch(function () { return { error: "导出失败" }; })
+            .then(function (body) {
+              showToast({ severity: "warn", message: body.error || "暂无可导出的采集数据", duration: 3000 });
+              throw new Error("export-empty");
+            });
+        }
+        var disp = resp.headers.get("content-disposition") || "";
+        var m = disp.match(/filename="?([^"]+)"?/i);
+        var filename = m ? m[1] : "export.csv";
+        return resp.blob().then(function (blob) {
+          var a = document.createElement("a");
+          var objUrl = URL.createObjectURL(blob);
+          a.href = objUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(objUrl);
+        });
+      })
+      .catch(function (e) { /* empty/error already toasted */ })
+      .finally(function () {
+        if (btn) { btn.removeAttribute("aria-busy"); btn.disabled = false; }
+      });
+  };
+
+  // Global HTMX error Toast (PRD §5.1.2): responseError/sendError → 右上红 Toast 3s.
+  document.addEventListener("htmx:responseError", function () {
+    showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
+  });
+  document.addEventListener("htmx:sendError", function () {
+    showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
+  });
+
   function dispatch(msg) {
+    // Page-level scripts (task detail, accounts) listen for this event;
+    // app.js only owns the global toast/progress affordances.
+    document.dispatchEvent(new CustomEvent("ws:message", { detail: msg }));
+
     var type = msg.type;
     switch (type) {
       case "progress":
@@ -67,6 +118,12 @@
       case "login_success":
         showToast({ severity: "info", message: "登录成功" });
         break;
+      case "session_status":
+        showToast({
+          severity: msg.valid ? "info" : "warn",
+          message: msg.message || (msg.valid ? "会话有效" : "会话已失效"),
+        });
+        break;
       default:
         break;
     }
@@ -74,15 +131,13 @@
 
   function updateProgress(msg) {
     var data = msg.data || {};
-    var barId = "progress-" + (msg.task_id || msg.request_id || "");
-    var bar = document.getElementById(barId);
-    if (bar) {
-      var pct = data.percent || 0;
-      bar.style.width = pct + "%";
-    }
-    var log = document.getElementById("task-log");
-    if (log && msg.message) {
-      log.textContent += msg.message + "\n";
+    // Progress bars are marked with data-progress-for="<task_id|request_id>";
+    // page-level rich rendering (log lines, counters) happens via ws:message.
+    var key = msg.task_id || msg.request_id || "";
+    var bar = document.querySelector('[data-progress-for="' + key + '"]');
+    if (bar && typeof data.percent === "number") {
+      bar.style.width = data.percent + "%";
+      bar.setAttribute("aria-valuenow", data.percent);
     }
   }
 

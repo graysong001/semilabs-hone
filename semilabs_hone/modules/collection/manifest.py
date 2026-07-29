@@ -7,6 +7,13 @@ core/ui/app.py 启动时遍历 modules/*/manifest.py 注册路由。
 NAME = "Skim 采集"          # UI 展示名
 MODULE_ID = "collection"    # IPC module 字段
 
+# 导航入口 (core/ui 外壳渲染; 模块自己声明自己的页面)
+NAV = [
+    {"label": "账号", "url": "/accounts"},
+    {"label": "任务", "url": "/tasks"},
+    {"label": "素材", "url": "/posts"},
+]
+
 # 路由注册表 (core/ui 外壳挂载)
 ROUTES = [
     "semilabs_hone.modules.collection.routes.accounts",

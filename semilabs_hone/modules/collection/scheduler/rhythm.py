@@ -15,26 +15,77 @@ import config
 from semilabs_hone.core.utils.retry import DailyLimitError, QuietHoursError
 
 
-def check_quiet_hours(now: datetime | None = None) -> None:
-    """Check if current time is within quiet hours (22:00-07:00).
+def is_quiet_hours(now: datetime | None = None) -> bool:
+    """Whether the current local time is within the quiet window.
 
-    Args:
-        now: Current time (defaults to now). Useful for testing.
-
-    Raises:
-        QuietHoursError: If current hour is within the quiet period.
+    Handles both window shapes (PRD §4.5.1/§7.4):
+    - same-day window (start < end, e.g. 02:00-08:00): quiet iff start<=hour<end
+    - midnight-spanning window (start > end, e.g. 22:00-07:00): quiet iff
+      hour>=start or hour<end
+    Pure predicate; the main loop calls this before each request, and when
+    True enters night-sleep via sleep_until_wakeup() rather than throw-and-retry.
     """
     if now is None:
         now = datetime.now()
+    window = config.QUIET_HOURS
+    if window is None:  # SEMILABS_QUIET_HOURS=off — 本机演练/E2E 关闭静默窗口
+        return False
+    start, end = window
+    if start < end:
+        return start <= now.hour < end
+    if start > end:
+        return now.hour >= start or now.hour < end
+    return False  # start == end: degenerate, no quiet window
 
-    hour = now.hour
-    quiet_start, quiet_end = config.QUIET_HOURS  # (22, 7)
 
-    # Quiet hours span midnight: 22:00-07:00
-    # Inside if hour >= 22 OR hour < 7
-    if hour >= quiet_start or hour < quiet_end:
+def seconds_until_wakeup(now: datetime | None = None) -> float:
+    """Seconds from now until the next 07:00 local time boundary.
+
+    Quiet window is 22:00-07:00; wakeup is 07:00. If called outside quiet
+    hours returns 0. Deterministic & testable — no wall-clock side effects.
+    """
+    if now is None:
+        now = datetime.now()
+    if not is_quiet_hours(now):
+        return 0.0
+    quiet_end = config.QUIET_HOURS[1]  # e.g. 8
+    wakeup = now.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
+    # If now is before wakeup today (e.g. 03:00), wakeup is today 07:00.
+    # If now is after wakeup today but still quiet, that can't happen since
+    # quiet window is 22:00-07:00; >=22 means wakeup is next day 07:00.
+    if wakeup <= now:
+        # Push to next day
+        from datetime import timedelta
+
+        wakeup = wakeup + timedelta(days=1)
+    return (wakeup - now).total_seconds()
+
+
+async def sleep_until_wakeup(now: datetime | None = None) -> float:
+    """Long asyncio.sleep until 07:00 — PRD night-sleep mechanism.
+
+    Does NOT exit the worker process and issues NO network requests during
+    22:00-07:00 (PRD §7.4). Returns the seconds slept (for logging/tests).
+    """
+    secs = seconds_until_wakeup(now)
+    if secs > 0:
+        await asyncio.sleep(secs)
+    return secs
+
+
+def check_quiet_hours(now: datetime | None = None) -> None:
+    """Guard: raise QuietHoursError if within quiet hours.
+
+    Kept as a hard guard for call sites that must refuse to issue a request
+    during 22:00-07:00. The main loop prefers is_quiet_hours()+sleep_until_wakeup()
+    (PRD long-sleep mechanism); this guard remains for defense-in-depth.
+    """
+    if is_quiet_hours(now):
+        if now is None:
+            now = datetime.now()
+        quiet_start, quiet_end = config.QUIET_HOURS  # e.g. (2, 8)
         raise QuietHoursError(
-            f"Quiet hours active ({quiet_start}:00-{quiet_end}:00), current hour: {hour}"
+            f"Quiet hours active ({quiet_start}:00-{quiet_end}:00), current hour: {now.hour}"
         )
 
 
@@ -73,6 +124,12 @@ async def keyword_delay() -> None:
     low, high = config.KEYWORD_DELAY  # (60, 180)
     delay = random.uniform(low, high)
     await asyncio.sleep(delay)
+
+
+async def warmup_dwell() -> None:
+    """Random dwell time on one warmup page (config.WARMUP_DWELL)."""
+    low, high = config.WARMUP_DWELL  # (30, 90)
+    await asyncio.sleep(random.uniform(low, high))
 
 
 def should_pause_for_captcha(fail_count: int) -> bool:

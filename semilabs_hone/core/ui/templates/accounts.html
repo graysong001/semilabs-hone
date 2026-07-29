@@ -43,64 +43,7 @@
   </form>
 </section>
 
-<section id="accounts-list">
-  <h3>账号列表 ({{ accounts|length }})</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>平台</th>
-        <th>昵称</th>
-        <th>状态</th>
-        <th>最后登录</th>
-        <th>操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for acct in accounts %}
-      <tr>
-        <td>{{ acct.id }}</td>
-        <td>{{ acct.platform }}</td>
-        <td>{{ acct.nickname or "—" }}</td>
-        <td>
-          <span class="badge {{ 'active' if acct.status == 'active' else 'inactive' if acct.status == 'inactive' else 'suspended' if acct.status == 'suspended' else '' }}">
-            {{ acct.status }}
-          </span>
-        </td>
-        <td>{{ acct.last_login_at.strftime("%Y-%m-%d %H:%M") if acct.last_login_at else "—" }}</td>
-        <td>
-          <button hx-post="/api/accounts/{{ acct.id }}/login"
-                  hx-swap="none"
-                  class="secondary outline"
-                  title="登录">
-            登录
-          </button>
-          <button hx-post="/api/accounts/{{ acct.id }}/validate"
-                  hx-swap="none"
-                  class="secondary outline"
-                  title="验证">
-            验证
-          </button>
-          <button hx-delete="/api/accounts/{{ acct.id }}"
-                  hx-confirm="确定删除此账号？"
-                  hx-target="#accounts-list"
-                  hx-swap="outerHTML"
-                  class="outline"
-                  style="color: var(--pico-del-color)">
-            删除
-          </button>
-        </td>
-      </tr>
-      {% else %}
-      <tr>
-        <td colspan="6" style="text-align: center; color: var(--pico-muted-color);">
-          暂无账号，请添加或导入。
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
+{% include "_accounts_table.html" %}
 
 <!-- Notifications area -->
 <div id="notification-area" class="notification-area"></div>

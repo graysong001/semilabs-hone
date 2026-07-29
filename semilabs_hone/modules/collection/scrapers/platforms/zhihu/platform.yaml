@@ -1,0 +1,82 @@
+platform: zhihu
+display_name: 知乎
+base_url: https://www.zhihu.com
+
+# 验证码可选能力 (契约§5): 知乎是 account 站, 默认 manual 命中即转人工。
+risk_tier: account
+captcha_policy: manual
+
+login:
+  type: qrcode
+  login_url: /signin
+  success_detect: url_change
+  success_pattern: "^/(?!signin)"
+  timeout: 120
+
+# 🟡 T27 人工录制: 下列 search/detail/comments 三 flow 的 JSONPath maps 基于知乎
+# 已知 API v4 端点结构给出, 须经真实录制 (recorder + llm_mapper) 校准后替换。
+# 列表提取依赖 field_extract._find_list_root; 知乎 {"data":[...]} 形状若不被命中,
+# 录制侧需补 engine 兜底或改 map 加 [*]。当前仅保证 registry 加载结构合法。
+flows:
+  search:
+    steps:
+      - type: navigate
+        url: "/search?type=content&q={keyword}"
+      - type: wait_xhr
+        url_pattern: "/api/v4/search_v4"
+        method: GET
+        save_as: search_resp
+        timeout_ms: 15000
+      - type: extract
+        from: search_resp
+        group: ItemRef
+        map:
+          item_id: "$.object.id"
+          title: "$.object.question.title"
+          author_name: "$.object.author.member.name"
+          likes: "$.object.voteup_count"
+
+  detail:
+    steps:
+      - type: navigate
+        url: "/answer/{item_id}"
+      - type: wait_xhr
+        url_pattern: "/api/v4/answers/"
+        method: GET
+        save_as: answer_resp
+        timeout_ms: 15000
+      - type: extract
+        from: answer_resp
+        group: Post.body
+        map:
+          platform_id: "$.id"
+          title: "$.question.title"
+          content: "$.content"
+          author_name: "$.author.member.name"
+          publish_time: "$.created"
+      - type: extract
+        from: answer_resp
+        group: Post.interactions
+        map:
+          likes: "$.voteup_count"
+          comments_count: "$.comment_count"
+
+  comments:
+    steps:
+      - type: wait_xhr
+        url_pattern: "/api/v4/answers/.*/root_comments"
+        method: GET
+        save_as: cmt_resp
+        timeout_ms: 15000
+      - type: extract
+        from: cmt_resp
+        group: Comments
+        map:
+          platform_id: "$.id"
+          author_name: "$.author.member.name"
+          content: "$.content"
+          likes: "$.vote_count"
+
+sort_values:
+  general: general
+  time_descending: default

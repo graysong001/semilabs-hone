@@ -41,3 +41,22 @@ async def dashboard(request: Request) -> HTMLResponse:
         "dashboard.html",
         {"account_count": account_count},
     )
+
+
+@router.get("/api/heartbeat")
+async def api_heartbeat() -> HTMLResponse:
+    """GET /api/heartbeat — worker heartbeat indicator fragment (PRD §5.1.1).
+
+    Polled by HTMX every 10s from base.html. <30s since last heartbeat → green
+    dot + "引擎运行中"; ≥30s or absent → red dot + "后台引擎离线，请重启应用".
+    """
+    from semilabs_hone.core.ipc import paths as ipc_paths
+
+    age = ipc_paths.heartbeat_age()
+    if age is not None and age < 30:
+        return HTMLResponse(
+            '<span class="heartbeat-dot green"></span> 引擎运行中'
+        )
+    return HTMLResponse(
+        '<span class="heartbeat-dot red"></span> 后台引擎离线，请重启应用'
+    )

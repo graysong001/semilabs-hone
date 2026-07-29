@@ -1,6 +1,6 @@
 # semilabs-hone — 详细设计文档 (DESIGN.md)
 
-> 项目名 **semilabs-hone**（内容工厂）。本文档对 `skim.spec` 做架构级 review，并把整套设计定位为**多平台可扩展的内容工厂单体仓库**：信息采集（`modules/collection/`，UI 展示名 "Skim"）是第一个模块，后续扩展 `modules/analysis/`（AI 分析）、`modules/production/`（制作）、`modules/operations/`（运营）。本文档只到设计，不含实现代码。
+> 项目名 **semilabs-hone**（内容工厂）。本文档对 `skim.spec` 做架构级 review，并把整套设计定位为**多平台可扩展的内容工厂单体仓库**：信息采集（`modules/collection/`，UI 展示名 "Skim"）是第一个模块，后续扩展 `modules/analysis/`（AI 分析）、`modules/production/`（制作）、`modules/operations/`（运营）。本文档只到设计，不含实现代码。hone是一个本地桌面应用，信息采集负责从小红书、微信公众号、知乎等内容平台抓取内容素材（比如笔记+评论），存入 SQLite，支持 CSV 导出供 AI 分析和 Excel 筛选。AI分析负责将抓取的内容做意图挖掘、识别、热度评估、聚合等工作，根据我的选题方向以及内容平台上人们的关注度、关注点等形成内容话题提案，内容制作负责把确定的内容提案制作成图文、视频内容，内容运营负责内容分发、内容后续跟踪和数据分析，整套hone是面向内容创作者，解决手工刷平台搜索素材效率低下、目标不清晰、观点不显著等的问题。
 
 > **实施已切分为 12 个独立开发模块**，便于单会话按模块细化开发、控制上下文。跨会话先读 [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)，查 [DEV_PLAN.md](DEV_PLAN.md) 选模块，读 `modules/NN-*.md` 看 spec。
 
@@ -215,6 +215,8 @@ async def attach(port: int) -> tuple[Browser, BrowserContext]:
 - UA 默认 = 本机真实 Chrome UA（见 §5.3），不覆盖；
 - `--user-data-dir=data/collection/profiles/<account_id>/` 隔离 → Cookie/localStorage 自然持久化。
 
+**CDP attach 模式下的落地方式**（2026-07-28 review F6 固化）：`assign_fingerprint()` 每账号独立随机抽取（**非进程级单例**，多账号同指纹会关联封号）；viewport 用真实窗口**不覆盖**（CDP 接管的是用户真窗口，强改尺寸反而暴露）；timezone/locale/color-scheme 由 engine 在取得 page 后逐 page 经 CDP `Emulation.setTimezoneOverride/setLocaleOverride/setEmulatedMedia` 应用（`fingerprint.apply_to_page(page, fp)`，每 page 一次），不用 init_script 篡改 navigator。
+
 ### 4.4 最小化 Stealth 注入（Layer 3）
 
 移除 `playwright-stealth`。真 Chrome 的 navigator/WebGL/Canvas 已是真值，**伪造反而暴露**。只注入 `NOISE_ONLY_SCRIPT`：
@@ -317,6 +319,17 @@ class IPCResult(BaseModel):
 ### 6.5 D9 修复
 
 BrowserPool 概念消失：worker 全程持有 Chrome+ctx，不向 Web 暴露 page；scraper 在 worker 内直接用 `attach()` 的 ctx。
+
+### 6.6 worker 资源注入与生命周期契约（2026-07-28 review F1/F2/F11 固化）
+
+**问题**：§6.4 只说了"worker 启动资源 + 注册 handler"，但资源（browser ctx/account）如何流向 handler/engine 没有契约，曾导致 engine 拿不到 ctx 静默零抓取。固化如下：
+
+1. **资源注入**：worker `attach()` 后调模块的 `handlers.set_worker_resources(ctx=ctx, account=account)`（account 从 DB 读、detach）；`_get_engine()` 用注入资源构造 engine。handler 签名与 IPC 协议不变。
+2. **请求路由**：`serve_worker(module, account_id=N)` 按 `(module, account_id)` 匹配——请求的 `account_id` 为空或与 worker 绑定账号一致才被拾取；`account_id=None` 的 worker 是模块通用 worker。
+3. **取消即时化**：`progress_cb` 每次写 progress 前自检 cancel 哨兵，命中即抛内部 `_RequestCancelled` → 写 `cancelled` result（长任务取消粒度=单步）。
+4. **web 侧生命周期**：路由 submit 后调 `supervisor.ensure_worker(module, account_id)`（进程内 `{(module,account): Popen}` 注册表，按 manifest `WORKER_ENTRY` 拉起，死进程自动清理）+ `tracker.track_request(...)`（后台任务：轮询 progress→WS 广播；等 result→广播终态/ws_events→删 result 文件；worker 死/超时→广播 BrowserClosedError）。
+5. **总线卫生**：request 文件在写 result 时删除、result 文件在 web 侧读取后删除（consume-on-read）；worker 每 60 轮 poll gc 一次超 1h 的 results/progress/cancel 孤儿；`serve_worker` 空闲 `WORKER_IDLE_TIMEOUT`（600s）无匹配请求自动退出（下次 submit 由 supervisor 重生），退出前 worker_main `proc.terminate()` Chrome。
+6. **captcha 契约**：handler 抛 `CaptchaError`（category=captcha）→ server 写 `paused` result + `ws_events:[captcha_required]`；`handler_scrape_task` 抛出前先把 task 行置 `paused`，DB 与 IPC 不错位。
 
 ---
 
@@ -697,3 +710,58 @@ UI ◀──WS error(BrowserClosed)── web
 - **纯 SSR/无 XHR 站点**：`wait_selector`+`extract_dom` 走 HTML→LLM，成本高、降级路径，MVP 不优先；
 - **跨模块并发上限**：MVP 不做，待 analysis 上线时按"全厂 N 个 worker 上限"补；
 - **分析数据契约**：defer 到 analysis 立项。
+
+---
+
+## 22. SOP 推演回写（2026-07-29，USER_SOP G1–G33 固化）
+
+第二轮 review 从**用户操作 SOP**（选平台→登录→建任务→抓取→看数据→导出→异常恢复）逐步推演，
+用"真站点 + 真 Chrome + 真 worker"的 E2E 验证，共固化 33 项裁决（清单见 [USER_SOP.md](USER_SOP.md)）。
+以下是对本文档既有章节的补充契约。
+
+### 22.1 §5.2 API 拦截的真正时序（G23/G24/G25/G26）
+
+- **拦截必须先于触发**：响应监听在**取得 page 时**武装（`engine.ensure_page`），不是在 `wait_xhr` 时。
+  页面自身加载期发出的 XHR 早于任何 step，晚装监听等于永远抓不到。
+- 监听把响应体读出后放入**有界缓冲**（200 条）；`wait_xhr` 从缓冲里按 `url_pattern`(+method) 取最早未消费的一条。
+- **导航即清缓冲**：上一页的残留响应绝不能被下一页的 `wait_xhr` 误消费（同一 flow 抓多条笔记时会串号）。
+- step 里的 URL 一律先 `urljoin(spec.base_url, 渲染后的相对路径)`：录制产物是站内相对路径，浏览器无法直接导航。
+- 抽取支持两种响应形状：列表型（search/comments，逐项抽取）与**单对象型**（detail，map 作用于根）。
+- DOM 兜底只在 map 里含 `css:`/`xpath:` 时才有意义；JSONPath map 兜底会产出全 None 的假行，禁止入库。
+
+### 22.2 §6 worker 进程契约（G30/G31/G32/G33）
+
+- `worker_main` 必须能被 `python -m <WORKER_ENTRY>` 直接执行（`__main__` 块 → `sys.exit(main())`）——
+  supervisor 就是这么拉起它的；缺这一块整条 web→worker 链路是死的。
+- `attach()` 自带"等 CDP 端口就绪"重试（默认 30s）：刚 Popen 的 Chrome 必然还没监听。
+- worker 把 SIGTERM/SIGINT 转成正常 unwind，`finally` 里 `terminate()` Chrome，避免孤儿浏览器。
+- supervisor 用 `python -u` + `PYTHONUNBUFFERED=1` 拉起，保证被杀时日志尾巴不丢。
+
+### 22.3 §12 节律与安全红线（G9/G20/G21）
+
+- 日限（200/账号/天）要真的可判：每落库一条自增 `accounts.daily_scrape_count`，跨天按 `daily_count_date` 归零。
+- **节律异常必须外抛**：`QuietHoursError`/`DailyLimitError` 不允许被兜底 `except` 吞掉（只有账号查库失败才兜底）。
+- 预热是真导航 + 真停留（`rhythm.warmup_dwell`）；`config.WARMUP_PAGES=None` 关闭。
+- 延迟/安静时段/预热均可经环境变量覆盖，**默认值即安全基线**，调低的封号风险由使用者自担。
+
+### 22.4 §13 UI 契约（G3/G4/G5/G6/G7/G11/G22）
+
+- 写操作（建号/删号/导 Cookie）返回**账号表片段**，由 HTMX 原地替换；不要整页重定向。
+- worker 的关键 progress 消息映射为一等 WS 事件：`qr_ready`（带截图 base64）/`captcha_required`/`login_success`/`disk_warn`；
+  `validate` 的结果是 `session_status{valid}`（会话失效是答案，不是错误）。
+- `app.js` 把每条 WS 消息再派发为 DOM 事件 `ws:message`，页面脚本消费；进度条元素用 `data-progress-for="<task_id>"`。
+- progress 是**被覆写的快照 + 1Hz 轮询**，不是事件流；`GET /api/tasks/{id}/progress` 是 WS 断线时的降级通道。
+- 导航项由模块 manifest 的 `NAV` 声明，外壳渲染真实存在的页面。
+
+### 22.5 §19 用户录制平台的落地位置（G13）
+
+录制生成的 `platform.yaml` 属于**用户数据**，写入 `data/collection/platforms/<platform>/platform.yaml`；
+registry 同时扫包内 `platforms/` 与该用户目录，**同名时用户目录优先**。用户目录里的 spec 是纯声明式 YAML，
+不加载 `adapter.py`（不执行用户目录下的代码）。
+
+### 22.6 验收门升级（原 §20 第 12 条）
+
+`docs/DEV_PLAN.md` 的"真实链路冒烟"从人工门变为**自动门**：`tests/e2e/` 用 stdlib HTTP 起一个真站点、
+以产品自身的 `launch_real_chrome + connect_over_cdp` 起真 Chrome，跑真 handler / 真 worker 子进程，
+断言 SQLite 真有数据、`/posts` 与 `/api/export` 真读得到、取消真生效、`navigator.webdriver` 真是 undefined。
+没有 Chrome 的环境（CI）自动 skip。

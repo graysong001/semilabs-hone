@@ -6,12 +6,37 @@ playwright is lazy-imported inside attach().
 """
 from __future__ import annotations
 
+import asyncio
 import socket
 import subprocess
+import time
 
 from subprocess import DEVNULL
 
 import config
+
+# PRD §8.1 场景 1.2 — surfaced to the UI (via the heartbeat watchdog reaping
+# the zombie running task → paused + WS「引擎异常中断」) when the worker
+# cannot attach to Chrome because the debugging port is taken or connection
+# is refused. Distinct, message-carrying exception so worker_main can log the
+# exact user-facing hint.
+CDP_PORT_BUSY_HINT = "Chrome 调试端口被占用，请关闭所有 Chrome 窗口后重试"
+
+
+class CDPAttachError(Exception):
+    """Raised when connect_over_cdp fails (port busy / Chrome unreachable).
+
+    Carries the PRD §8.1 场景 1.2 user-facing hint so worker_main can surface it.
+    """
+
+    def __init__(self, message: str = CDP_PORT_BUSY_HINT) -> None:
+        super().__init__(message)
+        self.fix_hint = message
+
+
+#: How long to wait for a freshly launched Chrome to open its CDP port.
+ATTACH_TIMEOUT = 30.0
+_ATTACH_RETRY_INTERVAL = 0.3
 
 
 def launch_real_chrome(profile_dir: str, port: int) -> subprocess.Popen:
@@ -25,15 +50,34 @@ def launch_real_chrome(profile_dir: str, port: int) -> subprocess.Popen:
     return subprocess.Popen(args, stdout=DEVNULL, stderr=DEVNULL, start_new_session=True)
 
 
-async def attach(port: int) -> "tuple":
+async def attach(port: int, timeout: float = ATTACH_TIMEOUT) -> "tuple":
     """Connect over CDP and return (Browser, BrowserContext).
 
+    A just-launched Chrome needs a moment before its debugging port
+    listens, so the connection is retried until `timeout` (USER_SOP G32:
+    the worker used to die on the first ECONNREFUSED).
+
     Lazy import playwright so this module is importable without it installed.
+    Raises CDPAttachError (PRD §8.1 场景 1.2) when connect_over_cdp still fails
+    after the retry window — e.g. the debugging port is occupied by another
+    Chrome instance or Chrome did not come up in time — so worker_main can
+    surface the user-facing hint.
     """
     from playwright.async_api import async_playwright
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+    deadline = time.monotonic() + timeout
+    browser = None
+    while browser is None:  # deadline-bounded retry, not an unbounded loop
+        try:
+            browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        except Exception as exc:
+            if time.monotonic() >= deadline:
+                await pw.stop()
+                # Retry window exhausted — classify as a user-actionable CDP
+                # attach failure (PRD §8.1 场景 1.2).
+                raise CDPAttachError(f"{CDP_PORT_BUSY_HINT} ({exc})") from exc
+            await asyncio.sleep(_ATTACH_RETRY_INTERVAL)
     ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
     return browser, ctx
 

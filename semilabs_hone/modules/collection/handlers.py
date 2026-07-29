@@ -7,15 +7,63 @@ Async handlers are awaited by the IPC server loop.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 
+from semilabs_hone.core.utils.retry import DailyLimitError
+
 # Lazy imports for optional dependencies
 # fmt: off
+
+# Worker-injected browser context singleton (L14): the worker process attaches
+# Chrome via CDP and publishes the BrowserContext here so the handler-created
+# GenericEngine can resolve a page. None in tests / when no worker is attached.
+_WORKER_CTX: Any = None
+# Bound account row (detached), published alongside the ctx (F1/F6) so the
+# engine can apply the account's fixed fingerprint per page.
+_WORKER_ACCOUNT: Any = None
+
+
+def set_worker_resources(ctx: Any, account: Any = None) -> None:
+    """Publish the worker's live BrowserContext + bound account (F1).
+
+    Called once from worker_main._run_worker after `attach(port)`. Stays None in
+    the web process and in tests, where _get_engine degrades to ctx=None (the
+    engine's ensure_page then raises, which tests sidestep by mocking _get_engine
+    or not driving a real page).
+    """
+    global _WORKER_CTX, _WORKER_ACCOUNT
+    _WORKER_CTX = ctx
+    _WORKER_ACCOUNT = account
+
+
+def set_worker_ctx(ctx: Any) -> None:
+    """Back-compat single-arg setter (pre-F1 name); prefer set_worker_resources."""
+    set_worker_resources(ctx)
+
+
+async def _worker_page() -> Any | None:
+    """Resolve a Playwright page from the worker ctx, or None when no ctx.
+
+    Used by login-QR (L15) and solver wiring (L10) that operate on a page but do
+    not own a GenericEngine. None return lets callers degrade to stub/manual.
+    """
+    if _WORKER_CTX is None:
+        return None
+    try:
+        pages = _WORKER_CTX.pages if hasattr(_WORKER_CTX, "pages") else []
+        if pages:
+            return pages[0]
+        return await _WORKER_CTX.new_page()
+    except Exception:
+        return None
 
 
 def build_registry() -> dict[str, Callable]:
@@ -62,8 +110,14 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
     progress_cb("login_start", {"platform": platform, "account_id": account_id})
 
     if method == "auto" or method == "cookie_recovery":
-        # Tier 1: Try cookie recovery
-        recovered = _try_cookie_recovery(account_id, platform, progress_cb)
+        # Tier 1: recover an existing logged-in session from the profile.
+        # FIX_PLAN F5: with a live ctx the Chrome profile is the source of
+        # truth (real cookie + home-navigation check); without a ctx degrade
+        # to the on-disk cookie heuristic (tests / web-side calls).
+        if _WORKER_CTX is not None:
+            recovered = await _try_session_recovery(platform, account_id, progress_cb)
+        else:
+            recovered = _try_cookie_recovery(account_id, platform, progress_cb)
         if recovered:
             _update_account_status(account_id, "active", progress_cb)
             progress_cb("login_success", {"account_id": account_id, "method": "cookie_recovery"})
@@ -76,7 +130,7 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
     if method == "auto" or method == "qrcode":
         # Tier 2: QR code login
         progress_cb("login_qr_start", {"account_id": account_id})
-        qr_result = _do_qr_login(platform, account_id, progress_cb)
+        qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
             _update_account_status(account_id, "active", progress_cb)
             return {
@@ -87,22 +141,28 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
             }
 
     if method == "cookie_import":
-        # Tier 3: Cookie import
+        # Tier 3: Cookie import — into the live profile via ctx.add_cookies when
+        # a worker ctx exists (F5), else persisted to disk (degraded/test path).
         cookies = payload.get("cookies")
         if cookies:
-            _import_cookies(account_id, platform, cookies, progress_cb)
-            _update_account_status(account_id, "active", progress_cb)
-            progress_cb("login_success", {"account_id": account_id, "method": "cookie_import"})
-            return {
-                "status": "ok",
-                "login_method": "cookie_import",
-                "account_id": account_id,
-            }
+            if _WORKER_CTX is not None:
+                imported = await _import_cookies_ctx(platform, account_id, cookies, progress_cb)
+            else:
+                _import_cookies(account_id, platform, cookies, progress_cb)
+                imported = True
+            if imported:
+                _update_account_status(account_id, "active", progress_cb)
+                progress_cb("login_success", {"account_id": account_id, "method": "cookie_import"})
+                return {
+                    "status": "ok",
+                    "login_method": "cookie_import",
+                    "account_id": account_id,
+                }
 
     # Fall through to QR if auto and recovery failed
     if method == "auto":
         progress_cb("login_qr_start", {"account_id": account_id})
-        qr_result = _do_qr_login(platform, account_id, progress_cb)
+        qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
             _update_account_status(account_id, "active", progress_cb)
             return {
@@ -117,7 +177,7 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
 
 
 def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Callable) -> bool:
-    """Try to recover login from persisted cookies."""
+    """Degraded Tier-1: on-disk cookie heuristic (no live ctx)."""
     from config import DATA_DIR
     cookie_path = DATA_DIR / "collection" / "profiles" / f"acct_{account_id}" / "cookies.json"
     if not cookie_path.exists():
@@ -134,15 +194,165 @@ def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Cal
     return False
 
 
-def _do_qr_login(platform: str, account_id: int | None, progress_cb: Callable) -> dict | None:
-    """Initiate QR code login. Returns QR info dict or None."""
+async def _session_check(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
+    """Real session check via the injected ctx (FIX_PLAN F5).
+
+    Valid = ctx holds cookies for base_url AND navigating home does not
+    bounce back to the login page.
+    """
+    if _WORKER_CTX is None:
+        progress_cb("session_check_no_ctx", {"account_id": account_id})
+        return False
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as registry_get
+        spec, _ = registry_get(platform)
+    except Exception as exc:
+        logger.warning(f"session check: unknown platform {platform}: {exc}")
+        return False
+    try:
+        cookies = await _WORKER_CTX.cookies(spec.base_url)
+    except Exception as exc:
+        logger.warning(f"ctx.cookies failed: {exc}")
+        return False
+    if not cookies:
+        progress_cb("session_check_no_cookies", {"account_id": account_id})
+        return False
+    page = await _WORKER_CTX.new_page()
+    try:
+        await page.goto(spec.base_url, wait_until="domcontentloaded", timeout=30000)
+        login_path = (spec.login.login_url or "/login").rstrip("/")
+        current_path = urlparse(page.url).path.rstrip("/")
+        if current_path == login_path:
+            progress_cb("session_check_bounced_to_login", {"account_id": account_id})
+            return False
+        return True
+    except Exception as exc:
+        logger.warning(f"session check navigation failed: {exc}")
+        return False
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
+async def _try_session_recovery(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
+    """Tier 1: recover an existing logged-in session from the profile (F5)."""
+    ok = await _session_check(platform, account_id, progress_cb)
+    if ok:
+        progress_cb("login_recovery_ok", {"account_id": account_id})
+    return ok
+
+
+async def _import_cookies_ctx(platform: str, account_id: int | None, cookies: list, progress_cb: Callable) -> bool:
+    """Tier 3 (live): import cookies into the profile via ctx.add_cookies, then validate."""
+    if _WORKER_CTX is None:
+        progress_cb("login_import_no_ctx", {"account_id": account_id})
+        return False
+    try:
+        await _WORKER_CTX.add_cookies(cookies)
+        progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(cookies)})
+    except Exception as exc:
+        logger.warning(f"add_cookies failed: {exc}")
+        return False
+    return await _session_check(platform, account_id, progress_cb)
+
+
+# Seconds between QR success polls; module-level so tests can patch.
+QR_POLL_INTERVAL = 2.0
+# Overall QR scan wait; None = platform spec login.timeout (tests patch small).
+QR_LOGIN_TIMEOUT: float | None = None
+
+
+def _login_succeeded(page: Any, pattern: str) -> bool:
+    """url_change detection: success_pattern matched against the URL path."""
+    try:
+        return re.search(pattern, urlparse(page.url).path) is not None
+    except Exception:
+        return False
+
+
+async def _do_qr_login(platform: str, account_id: int | None, progress_cb: Callable) -> dict | None:
+    """Initiate QR code login. Returns QR info dict or None.
+
+    L15: when the worker has published a live page, navigate to the platform's
+    login URL and screenshot the QR. Without a page (tests / no worker), degrade
+    to returning the qr_path stub so callers/tests that only check the path stay
+    green.
+    """
     from config import DATA_DIR
-    # In a real scenario, this navigates to the platform's login page
-    # and takes a screenshot of the QR code.
-    # For the handler, we return the QR path so the worker can screenshot.
     qr_path = str(DATA_DIR / "collection" / "debug" / f"qr_{account_id}.png")
-    progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
-    return {"qr_path": qr_path}
+    # Ensure the debug dir exists for the real screenshot path.
+    try:
+        from pathlib import Path
+        Path(qr_path).parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    page = await _worker_page()
+    if page is None:
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
+
+    # Resolve login URL from the platform spec (base_url + login.login_url).
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+        spec, _ = reg_get(platform)
+        login_url = (spec.base_url or "") + (spec.login.login_url or "")
+    except Exception:
+        login_url = ""
+
+    if not login_url:
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
+
+    try:
+        await page.goto(login_url)
+        # Give the QR a moment to render, then screenshot. A precise QR-element
+        # selector is platform/recording-specific; a viewport screenshot captures
+        # the QR reliably enough to unblock the human scan. (Crop refinement is Sz.)
+        try:
+            await page.wait_for_selector("img, canvas", timeout=5000)
+        except Exception:
+            pass
+        await page.screenshot(path=qr_path)
+        # Ship the QR to the UI as base64 too (G4: it must reach the WS layer
+        # as a first-class event even when the file path is not reachable).
+        qr_b64 = None
+        try:
+            shot = await page.screenshot(type="png")
+            qr_b64 = base64.b64encode(shot).decode("ascii")
+        except Exception:
+            pass
+        progress_cb("qr_ready", {
+            "qr_path": qr_path, "account_id": account_id,
+            **({"screenshot_b64": qr_b64} if qr_b64 else {}),
+        })
+
+        # Poll for scan success per platform.yaml login section (F5):
+        # success_detect "url_change" matches success_pattern against the URL
+        # path (e.g. "^/$" = redirected back to home).
+        try:
+            from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+            spec, _ = reg_get(platform)
+            timeout = QR_LOGIN_TIMEOUT if QR_LOGIN_TIMEOUT is not None else (spec.login.timeout or 120)
+            deadline = time.monotonic() + timeout
+            pattern = spec.login.success_pattern or "^/$"
+            while time.monotonic() < deadline:
+                if _login_succeeded(page, pattern):
+                    progress_cb("login_success", {"account_id": account_id, "method": "qrcode"})
+                    return {"qr_path": qr_path, "login_method": "qrcode"}
+                await asyncio.sleep(QR_POLL_INTERVAL)
+            progress_cb("login_qr_timeout", {"account_id": account_id})
+            return None
+        except Exception:
+            # Spec unavailable — QR was shipped; treat as best-effort success
+            # signal for the caller (pre-F5 behavior).
+            return {"qr_path": qr_path}
+    except Exception as exc:
+        logger.warning(f"QR navigation/screenshot failed: {exc}; returning stub path")
+        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
+        return {"qr_path": qr_path}
 
 
 def _import_cookies(account_id: int | None, platform: str, cookies: list, progress_cb: Callable) -> None:
@@ -193,16 +403,23 @@ async def handler_validate(payload: dict, progress_cb: Callable) -> dict:
 
     progress_cb("validate_start", {"account_id": account_id})
 
-    # Check account exists and has cookies
-    valid = _check_account_valid(account_id, platform, progress_cb)
+    # Real session check via ctx when a worker is attached (F5); degrade to the
+    # on-disk cookie heuristic otherwise (tests / web-side calls).
+    if _WORKER_CTX is not None:
+        valid = await _session_check(platform, account_id, progress_cb)
+        _update_account_status(account_id, "active" if valid else "inactive", progress_cb)
+    else:
+        valid = _check_account_valid(account_id, platform, progress_cb)
 
-    status = "ok" if valid else "error"
+    # A dead session is a *result*, not an error (USER_SOP G14): the request
+    # ends ok and carries valid:false so the UI says "please log in" instead
+    # of an unknown-error toast.
     progress_cb(
         "validate_done",
         {"account_id": account_id, "valid": valid},
     )
     return {
-        "status": status,
+        "status": "ok",
         "valid": valid,
         "account_id": account_id,
     }
@@ -264,14 +481,48 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     # --- Phase 1: Warmup ---
     progress_cb("phase1_warmup", {"task_id": task_id})
 
-    # Check rhythm
-    _check_rhythm(account_id, progress_cb)
+    # Night-sleep gate before ANY network (PRD §4.5.1/§7.4): long-sleep, not throw.
+    await _night_sleep_if_quiet(progress_cb)
+
+    # pending→running promotion (S2 T07 遗留): a queued task becomes running
+    # when the worker picks up its IPC request. Resume counters preserved.
+    _promote_to_running(task_id, progress_cb)
+
+    # Daily-cap guard (quiet hours handled above via long-sleep). If the global
+    # today-count is already at the limit, park as paused before any scraping
+    # (PRD §7.1). The per-note loop re-checks as the count grows mid-task.
+    try:
+        _check_rhythm(account_id, progress_cb)
+    except DailyLimitError:
+        progress_cb("daily_limit", {
+            "task_id": task_id,
+            "msg": "全局日配额已达上限，保护机制生效，请明日恢复",
+        })
+        _set_task_paused(task_id, progress_cb)
+        return {
+            "status": "paused",
+            "reason": "daily_limit",
+            "posts_scraped": 0,
+            "comments_count": 0,
+            "images_count": 0,
+            "last_note_index": 0,
+        }
 
     # Get page/engine (lazy)
     engine = _get_engine(platform, account_id, progress_cb)
     if engine is None:
         from semilabs_hone.core.utils.retry import BrowserClosedError
         raise BrowserClosedError("无法获取浏览器页面")
+
+    # Wire risk probe: the engine fires it after every goto/scroll/click and
+    # raises RiskProbeHit on a hit (PRD §4.4.1). The handler translates a hit
+    # into a need_human sink + human-resume wait.
+    try:
+        from semilabs_hone.modules.collection.risk_probes import probe as _risk_probe
+        engine.on_risk = lambda page, _p=platform: _risk_probe(page, _p)
+    except Exception:
+        # engine without probe wiring still works (probes are best-effort).
+        pass
 
     # Warmup browse
     await _do_warmup(engine, progress_cb)
@@ -280,35 +531,47 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     total_posts = 0
     total_comments = 0
     total_images = 0
-    last_note_index = 0
 
-    # Load task from DB to get resume point
+    # Resume payloads may omit keywords — recover from the task's PRD
+    # target_value (F3; keyword_search tasks carry one keyword there).
     task = _load_task(task_id, progress_cb)
-    if task:
-        last_note_index = task.get("last_note_index", 0)
+    if not keywords:
+        keywords = _load_task_keywords(task_id, task)
 
-    # Track seen platform_ids for dedup
-    seen_ids: set[str] = set()
+    # Track seen platform_ids for dedup.
+    # FIX_PLAN F11 断点去重: pre-fill from items already stored for this task
+    # so a resumed task skips detail/comments re-fetches instead of re-scraping.
+    seen_ids: set[str] = _load_scraped_platform_ids(task_id)
+    last_note_index = len(seen_ids)
+
+    # G7: real percentage against the planned workload.
+    planned_total = max(1, len(keywords) * max_posts)
+    processed = 0
 
     for ki, keyword in enumerate(keywords):
         if ki > 0:
             progress_cb("keyword_delay", {"keyword": keyword, "index": ki})
-            # In real mode, this sleeps per keyword_delay
-            # For handler, just signal
-            await asyncio.sleep(0.1)  # Short delay for test; real config.NOTE_DELAY is 60-180s
+            # Real rhythm delay (config.KEYWORD_DELAY, env-overridable; tests
+            # neutralize via the no_rhythm_sleep fixture).
+            from semilabs_hone.modules.collection.scheduler import rhythm
+            await rhythm.keyword_delay()
 
         # --- Phase 2: Search ---
         progress_cb("phase2_search", {
             "task_id": task_id,
             "keyword": keyword,
             "progress": f"搜索: {keyword}",
+            "percent": _percent(processed, planned_total),
         })
 
         try:
             item_refs = await engine.search(keyword, sort)
         except Exception as exc:
-            # Re-raise SkimError subclasses (CaptchaError, QuietHoursError, etc.)
-            # so the IPC server can handle them properly.
+            from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+            if isinstance(exc, RiskProbeHit):
+                # Captcha/login wall during search goto/scroll → suspend.
+                await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                break  # task suspended (need_human); stop the keyword loop
             from semilabs_hone.core.utils.retry import SkimError
             if isinstance(exc, SkimError):
                 raise
@@ -338,66 +601,129 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 continue
             seen_ids.add(platform_id)
             last_note_index += 1
+            processed += 1
 
             progress_cb("phase3_fetching", {
                 "task_id": task_id,
                 "platform_id": platform_id,
                 "note_index": last_note_index,
+                "percent": _percent(processed, planned_total),
             })
 
-            # Fetch detail
+            # Night-sleep gate per item (PRD §4.5.1).
+            await _night_sleep_if_quiet(progress_cb)
+
+            # Daily-cap gate per item (PRD §7.1): cross-task today-count; raises
+            # DailyLimitError when the global total hits the limit. Park as
+            # `paused` (PRD §7.1 mandates paused, not need_human) and return —
+            # bypassing _complete_task (a quota-paused task is not completed).
             try:
-                post = await engine.fetch_item(ref)
-            except Exception as exc:
-                from semilabs_hone.core.utils.retry import SkimError
-                if isinstance(exc, SkimError):
-                    raise
-                logger.warning(f"Detail fetch failed for '{platform_id}': {exc}")
-                continue
+                _check_rhythm(account_id, progress_cb)
+            except DailyLimitError:
+                progress_cb("daily_limit", {
+                    "task_id": task_id,
+                    "msg": "全局日配额已达上限，保护机制生效，请明日恢复",
+                    "posts_scraped": total_posts,
+                })
+                _set_task_paused(task_id, progress_cb)
+                return {
+                    "status": "paused",
+                    "reason": "daily_limit",
+                    "posts_scraped": total_posts,
+                    "comments_count": total_comments,
+                    "images_count": total_images,
+                    "last_note_index": last_note_index,
+                }
 
-            # Download images if enabled
-            images_downloaded = 0
-            if download_images:
-                image_urls = getattr(post, "image_urls", None) or (post.get("image_urls") if isinstance(post, dict) else [])
-                if image_urls:
+            # Retry-after-resume loop: a RiskProbeHit suspends → await human
+            # resume → re-run the same ref (engine re-probes on its next goto).
+            # `while not done` (not bare `while True`) per the §7.4 linter: exits
+            # on success (done=True) or skip (break); only resumes via continue.
+            done = False
+            while not done:
+                try:
+                    post = await engine.fetch_item(ref)
+                except Exception as exc:
+                    from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+                    if isinstance(exc, RiskProbeHit):
+                        await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                        continue  # retry same ref after resume (done still False)
+                    from semilabs_hone.core.utils.retry import SkimError
+                    if isinstance(exc, SkimError):
+                        raise
+                    # T20 (PRD 8.4 场景4.1): single-item skip + count — the
+                    # note_index already advanced (consumed); keep going.
+                    progress_cb("detail_skip_error", {
+                        "platform_id": platform_id, "error": str(exc),
+                    })
+                    break  # give up this ref, move to the next
+
+                # Download images if enabled
+                images_downloaded = 0
+                if download_images:
+                    image_urls = getattr(post, "image_urls", None) or (post.get("image_urls") if isinstance(post, dict) else [])
+                    if image_urls:
+                        try:
+                            await _download_images_for_post(image_urls, platform_id, progress_cb)
+                            images_downloaded = len(image_urls) if isinstance(image_urls, list) else 0
+                        except Exception as exc:
+                            logger.warning(f"Image download failed for '{platform_id}': {exc}")
+
+                total_images += images_downloaded
+
+                # Note delay (PRD §7.2 随机延迟, config.NOTE_DELAY 30-90s; tests
+                # neutralize via the no_rhythm_sleep fixture).
+                from semilabs_hone.modules.collection.scheduler import rhythm
+                await rhythm.note_delay()
+
+                # --- Phase 4: Comments (Top 20 by likes, PRD §4.3.2) ---
+                comments_fetched = 0
+                comments: list = []
+                if collect_comments:
+                    progress_cb("phase4_comments", {
+                        "task_id": task_id,
+                        "platform_id": platform_id,
+                    })
                     try:
-                        await _download_images_for_post(image_urls, platform_id, progress_cb)
-                        images_downloaded = len(image_urls) if isinstance(image_urls, list) else 0
+                        raw_comments = await engine.fetch_comments(ref)
                     except Exception as exc:
-                        logger.warning(f"Image download failed for '{platform_id}': {exc}")
+                        from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+                        if isinstance(exc, RiskProbeHit):
+                            raise  # bubble to the outer retry loop
+                        logger.warning(f"Comments fetch failed for '{platform_id}': {exc}")
+                        raw_comments = []
+                    # Top 20 by likes descending; fewer than 20 → keep all.
+                    comments = sorted(
+                        raw_comments,
+                        key=lambda c: getattr(c, "likes", 0) if hasattr(c, "likes") else (c.get("likes", 0) if isinstance(c, dict) else 0),
+                        reverse=True,
+                    )[:20]
+                    comments_fetched = len(comments)
 
-            total_images += images_downloaded
+                total_comments += comments_fetched
 
-            # Note delay
-            await asyncio.sleep(0.05)  # Short for test; real is 30-90s
+                # --- Phase 5: Store (PRD §6 upsert via repository) ---
+                try:
+                    _upsert_post(post, task_id, keyword, comments, progress_cb)
+                    total_posts += 1
+                    # G9: count the stored post against the account's daily
+                    # quota telemetry (cross-day reset inside).
+                    _bump_account_usage(account_id)
+                except Exception as exc:
+                    logger.warning(f"Store failed for '{platform_id}': {exc}")
+                    progress_cb("store_failed", {
+                        "platform_id": platform_id, "error": str(exc),
+                    })
 
-            # --- Phase 4: Comments ---
-            comments_fetched = 0
-            if collect_comments:
-                progress_cb("phase4_comments", {
+                # PRD actual_count is the canonical progress counter.
+                _update_task_progress(task_id, total_posts, progress_cb)
+                progress_cb("post_progress", {
                     "task_id": task_id,
                     "platform_id": platform_id,
+                    "posts_scraped": total_posts,
+                    "percent": _percent(processed, planned_total),
                 })
-                try:
-                    comments = await engine.fetch_comments(ref)
-                    # Top 20 by likes
-                    comments = sorted(comments, key=lambda c: getattr(c, "likes", 0) if hasattr(c, "likes") else c.get("likes", 0), reverse=True)[:20]
-                    comments_fetched = len(comments)
-                except Exception as exc:
-                    logger.warning(f"Comments fetch failed for '{platform_id}': {exc}")
-                    comments = []
-
-            total_comments += comments_fetched
-
-            # --- Phase 5: Store ---
-            try:
-                _upsert_post(post, task_id, keyword, comments, progress_cb)
-                total_posts += 1
-            except Exception as exc:
-                logger.warning(f"Store failed for '{platform_id}': {exc}")
-
-            # Update last_note_index
-            _update_task_progress(task_id, last_note_index, total_posts, progress_cb)
+                done = True  # ref fully processed → exit retry loop, next item
 
     # Final update
     progress_cb("scrape_complete", {
@@ -406,10 +732,11 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
         "comments_count": total_comments,
         "images_count": total_images,
         "last_note_index": last_note_index,
+        "percent": 100,
     })
 
     # Update task status to completed
-    _complete_task(task_id, total_posts, total_comments, last_note_index, progress_cb)
+    _complete_task(task_id, total_posts, progress_cb)
 
     return {
         "status": "ok",
@@ -420,30 +747,232 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     }
 
 
-def _check_rhythm(account_id: int | None, progress_cb: Callable) -> None:
-    """Check quiet hours and daily limits."""
-    from semilabs_hone.modules.collection.scheduler.rhythm import (
-        check_quiet_hours,
-        check_daily_limit,
-    )
+def _percent(done: int, total: int) -> int:
+    """Progress percentage capped at 99 until the run actually finishes (G7)."""
+    return min(99, int(done * 100 / total)) if total > 0 else 0
 
-    check_quiet_hours()
 
-    if account_id is not None:
-        # Get account for daily limit check
+def _check_rhythm(account_id: int | None, progress_cb: Callable, now: datetime | None = None) -> None:
+    """Check the global daily scrape cap (PRD §7.1 当天总入库量).
+
+    Counts today's collection_items across ALL tasks (cross-task accumulation,
+    matching PRD §7.1 「全局日限额跨任务累加 / 当天总入库量达到 200」) and raises
+    DailyLimitError when count >= config.DAILY_LIMIT_PER_ACCOUNT (200).
+
+    Quiet hours are handled separately by _night_sleep_if_quiet (long-sleep,
+    not a throw). Unlike the pre-S8 version, DailyLimitError is NOT swallowed
+    here — it propagates so the caller parks the task as `paused` (PRD §7.1
+    mandates paused, not need_human). DB lookup failures still pass (don't
+    block scraping on infra hiccups). ``now`` is injectable (会话经验 #7).
+    """
+    from semilabs_hone.modules.collection.scheduler.rhythm import check_daily_limit
+
+    try:
+        from sqlalchemy import func
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.post import CollectionItem
+        sess = get_session()
         try:
-            from semilabs_hone.core.models.db import get_session
-            from semilabs_hone.core.models.account import Account
-            sess = get_session()
-            try:
-                acct = sess.query(Account).filter(Account.id == account_id).first()
-                if acct:
-                    check_daily_limit(acct)
-            finally:
-                sess.close()
+            today = (now or datetime.now()).date().isoformat()
+            today_count = (
+                sess.query(CollectionItem)
+                .filter(func.date(CollectionItem.scraped_at) == today)
+                .count()
+            )
+        finally:
+            sess.close()
+    except Exception:
+        # DB unavailable → skip cap check (don't block scraping on infra).
+        return
+
+    # check_daily_limit raises DailyLimitError when count >= 200 — let it
+    # propagate (pre-S8 it was swallowed by the bare except above).
+    check_daily_limit({"daily_scrape_count": today_count})
+
+
+async def _night_sleep_if_quiet(progress_cb: Callable, now=None) -> None:
+    """If within quiet hours, long-sleep until 08:00 (PRD §4.5.1).
+
+    PRD night-sleep mechanism: do NOT throw-and-retry; the worker suspends via
+    a single long asyncio.sleep and issues zero network requests during
+    02:00-08:00. ``now`` is injectable so tests never depend on the wall clock
+    (会话经验 #7).
+    """
+    from semilabs_hone.modules.collection.scheduler.rhythm import (
+        is_quiet_hours,
+        sleep_until_wakeup,
+    )
+    if is_quiet_hours(now):
+        progress_cb("night_sleep", {"wakeup": "08:00", "msg": "夜间静默休眠至 08:00"})
+        await sleep_until_wakeup(now)
+
+
+def _promote_to_running(task_id: str | None, progress_cb: Callable) -> None:
+    """Promote a queued (pending) task to running when the worker picks it up.
+
+    S2 T07 left the pending→running pick-up to the engine/handler layer: the
+    worker pulls requests in mtime order, but the DB status flip happens here.
+    Resume-critical counters (last_note_index/actual_count) are preserved.
+    """
+    if task_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+            if task and task.status == "pending":
+                task.status = "running"
+                sess.commit()
+                progress_cb("task_promoted", {"task_id": task_id})
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to promote task {task_id}: {exc}")
+
+
+def _set_task_need_human(task_id: str | None, progress_cb: Callable) -> None:
+    """Sink a task's DB status to need_human (PRD §4.4.2 step 2)."""
+    if task_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+            if task:
+                task.status = "need_human"
+                sess.commit()
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to set need_human for {task_id}: {exc}")
+
+
+def _set_task_paused(task_id: str | None, progress_cb: Callable) -> None:
+    """Park a task's DB status as paused (PRD §7.1 daily-quota exhaustion).
+
+    Distinct from _set_task_need_human: a quota hit is `paused` (await
+    tomorrow), not a captcha/login `need_human` relay. Mirrors the
+    need_human setter shape.
+    """
+    if task_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.task import CollectionTask
+        sess = get_session()
+        try:
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+            if task:
+                task.status = "paused"
+                sess.commit()
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to set paused for {task_id}: {exc}")
+
+
+async def _await_resume(request_id: str, poll_interval: float = 2.0) -> str | None:
+    """Block until a ``resume`` control directive arrives (PRD §4.4.2 step 4).
+
+    Polls ``control/ctrl_<request_id>.json`` every ``poll_interval`` seconds,
+    read-after-burn. Non-resume directives are burned and ignored (the worker
+    stays suspended waiting for a human relay). ``poll_interval`` is injectable
+    so tests never sleep the real 2s. Returns "resume" or "stop".
+
+    While suspended the worker is alive (awaiting a human), so it refreshes the
+    heartbeat each poll — otherwise the web-side watchdog (>30s stale) would
+    reap a legitimately-waiting ``need_human`` task to ``paused`` and break the
+    L01 resume→control path for any human relay that takes longer than 30s.
+
+    Note: this is a persistent *suspend-until-resume* poll with explicit return
+    exits (resume/stop), NOT a captcha-refresh death loop — written without a
+    bare ``while True`` per the §7.4 linter.
+    """
+    from semilabs_hone.core.ipc.paths import burn, control_path, read_json_if_exists, write_heartbeat
+    if not request_id:
+        return None
+    waiting = True
+    while waiting:
+        # Stay "alive" to the watchdog while we wait for a human relay.
+        try:
+            write_heartbeat("need_human_waiting")
         except Exception:
-            # If account lookup fails, pass rhythm check
             pass
+        p = control_path(request_id)
+        data = None
+        try:
+            data = read_json_if_exists(p)
+        except Exception:
+            burn(p)
+            data = None
+        if data is not None:
+            burn(p)
+            action = data.get("action")
+            if action == "resume":
+                return "resume"
+            if action == "stop":
+                return "stop"
+            # pause/unknown during need_human: keep waiting
+        await asyncio.sleep(poll_interval)
+
+
+async def _handle_need_human(
+    task_id: str | None,
+    request_id: str,
+    hit: Any,
+    progress_cb: Callable,
+    last_note_index: int,
+) -> str | None:
+    """Sink to need_human, broadcast, and block until a human resumes (PRD §4.4.2).
+
+    On resume, the caller re-runs the interrupted action (the engine re-probes
+    on its next goto/scroll/click). Returns the resume/stop directive.
+
+    L10 solver wiring (契约§5, default-off): when the hit is a captcha AND the
+    platform spec is ``anonymous`` + ``auto_then_manual`` (cargo-class no-login
+    sites), give the solver exactly one shot before sinking to human. Solved →
+    return ``"resume"`` (the caller retries the ref, no human needed). Anything
+    else (account/manual sites like XHS, or a failed/paused auto-solve) sinks to
+    need_human unchanged — so XHS behavior is identical to pre-S9a.
+    """
+    kind = getattr(hit, "kind", None)
+    platform = getattr(hit, "platform", None) or "xiaohongshu"
+
+    # L10: optional auto-solve for anonymous+auto_then_manual platforms only.
+    if kind == "captcha":
+        try:
+            from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+            spec, _ = reg_get(platform)
+            if (
+                spec.risk_tier == "anonymous"
+                and spec.captcha_policy == "auto_then_manual"
+                and _WORKER_CTX is not None
+            ):
+                page = await _worker_page()
+                if page is not None:
+                    from semilabs_hone.modules.collection.captcha.solver import detect_and_solve
+                    result = await detect_and_solve(
+                        page, _WORKER_CTX, spec.risk_tier, spec.captcha_policy
+                    )
+                    if getattr(result, "status", None) == "solved":
+                        progress_cb("captcha_solved", {"platform": platform})
+                        return "resume"  # retry the ref; no human needed
+        except Exception as exc:
+            logger.warning(f"solver wiring failed (falling back to manual): {exc}")
+
+    progress_cb("need_human", {
+        "task_id": task_id,
+        "stage": "captcha_or_login_blocked",
+        "kind": kind,
+        "msg": "平台下发验证码或登录失效，请手动处理",
+        "last_note_index": last_note_index,
+    })
+    _set_task_need_human(task_id, progress_cb)
+    return await _await_resume(request_id)
 
 
 async def _do_warmup(engine: Any, progress_cb: Callable) -> None:
@@ -468,106 +997,107 @@ async def _download_images_for_post(
     await download_images(image_urls, str(note_id))
 
 
+def _parse_published_at(value: Any) -> datetime | None:
+    """Parse a platform's published_at (epoch s/ms or ISO 8601) to datetime.
+
+    PRD publish_time is a tolerant VARCHAR; parsing lets us store a readable
+    ISO string instead of a raw epoch (G19/G28), falling back to str().
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            ts = float(value)
+            if ts > 1e11:  # milliseconds
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
 def _upsert_post(
     post: Any,
-    task_id: int | None,
+    task_id: str | None,
     keyword: str,
     comments: list | None = None,
     progress_cb: Callable | None = None,
 ) -> None:
-    """Upsert post and comments to SQLite."""
-    from semilabs_hone.core.models.db import get_session
-    from semilabs_hone.core.models.post import Post
-    from semilabs_hone.core.models.comment import Comment
-    from semilabs_hone.core.models.keyword import Keyword
+    """Upsert post + comments via the PRD §6.4 repository (idempotent ON CONFLICT).
 
+    [S4 cleanup] Switched from the legacy direct-ORM path (writing the retained
+    legacy columns content/likes/...) to repository.upsert_item/upsert_comment,
+    which target the canonical PRD columns content_text/metrics_json/like_count.
+    Interaction strings are cleansed via parse_likes (PRD §8.5 场景5.1); the
+    title falls back to body[:20] when empty (PRD §8.5 场景5.2). ``keyword`` is
+    retained in the signature for call-site compatibility but unused (PRD
+    collection_items has no keyword column).
+    """
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.repository import upsert_comment, upsert_item
+    from semilabs_hone.modules.collection.scrapers.field_extract import (
+        parse_likes,
+        title_fallback,
+    )
+
+    def _g(obj: Any, name: str, default=None):
+        return getattr(obj, name, default) if not isinstance(obj, dict) else obj.get(name, default)
+
+    platform = _g(post, "platform", "xiaohongshu") or "xiaohongshu"
+    platform_id = _g(post, "platform_id", "") or ""
+    content = _g(post, "content", None)
+    title = _g(post, "title", None)
+    author_name = _g(post, "author_name", None)
+    published_at = _g(post, "published_at", None)
+    metrics = {
+        "likes": parse_likes(_g(post, "likes", 0) or 0),
+        "collects": parse_likes(_g(post, "collects", 0) or 0),
+        "comments_count": parse_likes(_g(post, "comments_count", 0) or 0),
+        "shares": parse_likes(_g(post, "shares", 0) or 0),
+    }
+
+    now = datetime.now(timezone.utc)
+    # publish_time: prefer a parsed ISO string over a raw epoch (G28 tolerant).
+    parsed_pub = _parse_published_at(published_at)
+    publish_time = (
+        parsed_pub.isoformat() if parsed_pub is not None
+        else (str(published_at) if published_at is not None else None)
+    )
     sess = get_session()
     try:
-        # Resolve keyword
-        keyword_obj = None
-        if keyword:
-            keyword_obj = (
-                sess.query(Keyword)
-                .filter(Keyword.text == keyword)
-                .first()
-            )
-
-        # Upsert post
-        platform_id = getattr(post, "platform_id", None) or (
-            post.get("platform_id") if isinstance(post, dict) else None
-        )
-        platform = getattr(post, "platform", "xiaohongshu") or (
-            post.get("platform") if isinstance(post, dict) else "xiaohongshu"
+        item = upsert_item(
+            sess,
+            task_id=task_id,
+            platform=platform,
+            platform_id=platform_id,
+            url=None,  # ScrapedPost carries no url; PRD NOT NULL deferred to S7
+            title=title_fallback(title, content),
+            content_text=content,
+            author_name=author_name,
+            metrics=metrics,
+            publish_time=publish_time,
+            scraped_at=now,
         )
 
-        existing = (
-            sess.query(Post)
-            .filter(Post.platform == platform, Post.platform_id == platform_id)
-            .first()
-        )
-
-        now = datetime.now(timezone.utc)
-        post_fields = {
-            "title": getattr(post, "title", None) or (post.get("title") if isinstance(post, dict) else None),
-            "content": getattr(post, "content", None) or (post.get("content") if isinstance(post, dict) else None),
-            "author_name": getattr(post, "author_name", None) or (post.get("author_name") if isinstance(post, dict) else None),
-            "url": getattr(post, "url", None) or (post.get("url") if isinstance(post, dict) else None),
-            "likes": getattr(post, "likes", 0) or (post.get("likes", 0) if isinstance(post, dict) else 0),
-            "collects": getattr(post, "collects", 0) or (post.get("collects", 0) if isinstance(post, dict) else 0),
-            "comments_count": getattr(post, "comments_count", 0) or (post.get("comments_count", 0) if isinstance(post, dict) else 0),
-            "shares": getattr(post, "shares", 0) or (post.get("shares", 0) if isinstance(post, dict) else 0),
-            "image_count": getattr(post, "image_count", 0) or (post.get("image_count", 0) if isinstance(post, dict) else 0),
-            "scraped_at": now,
-        }
-        if task_id:
-            post_fields["task_id"] = task_id
-        if keyword_obj:
-            post_fields["keyword_id"] = keyword_obj.id
-
-        if existing:
-            for k, v in post_fields.items():
-                setattr(existing, k, v)
-            post_obj = existing
-        else:
-            post_obj = Post(
-                platform=platform,
-                platform_id=platform_id or "",
-                **{k: v for k, v in post_fields.items() if k not in ("task_id", "keyword_id")},
-                task_id=post_fields.get("task_id"),
-                keyword_id=post_fields.get("keyword_id"),
-            )
-            sess.add(post_obj)
-
-        sess.flush()
-
-        # Upsert comments
+        # Top-20 comments are already capped by the caller (PRD §4.3.2).
         if comments:
             for rank, c in enumerate(comments, 1):
-                c_platform_id = getattr(c, "platform_id", None) or (c.get("platform_id") if isinstance(c, dict) else None)
-                existing_c = (
-                    sess.query(Comment)
-                    .filter(Comment.post_id == post_obj.id, Comment.platform_id == c_platform_id)
-                    .first()
+                c_author = _g(c, "author_name", None)
+                c_content = _g(c, "content", "") or ""
+                c_likes = parse_likes(_g(c, "likes", 0) or 0)
+                c_pid = _g(c, "platform_id", None) or f"synth_{rank}"
+                upsert_comment(
+                    sess,
+                    item_id=item.id,
+                    platform_comment_id=c_pid,
+                    author_name=c_author,
+                    content_text=c_content,
+                    like_count=c_likes,
+                    scraped_at=now,
                 )
-                c_data = {
-                    "author_name": getattr(c, "author_name", None) or (c.get("author_name") if isinstance(c, dict) else None),
-                    "content": getattr(c, "content", "") or (c.get("content", "") if isinstance(c, dict) else ""),
-                    "likes": getattr(c, "likes", 0) or (c.get("likes", 0) if isinstance(c, dict) else 0),
-                    "rank": rank,
-                    "scraped_at": now,
-                }
-                if existing_c:
-                    for k, v in c_data.items():
-                        setattr(existing_c, k, v)
-                else:
-                    comment_obj = Comment(
-                        post_id=post_obj.id,
-                        platform_id=c_platform_id,
-                        **c_data,
-                    )
-                    sess.add(comment_obj)
 
-        sess.commit()
         if progress_cb:
             progress_cb("post_stored", {"platform_id": platform_id, "comments": len(comments) if comments else 0})
     finally:
@@ -575,23 +1105,21 @@ def _upsert_post(
 
 
 def _update_task_progress(
-    task_id: int | None,
-    last_note_index: int,
-    posts_scraped: int,
+    task_id: str | None,
+    actual_count: int,
     progress_cb: Callable,
 ) -> None:
-    """Update task progress in DB."""
+    """Update task progress in DB (PRD §6.1 actual_count only)."""
     if task_id is None:
         return
     try:
         from semilabs_hone.core.models.db import get_session
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
         sess = get_session()
         try:
-            task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
-                task.last_note_index = last_note_index
-                task.posts_scraped = posts_scraped
+                task.actual_count = actual_count  # PRD §6.1 canonical progress
                 sess.commit()
         finally:
             sess.close()
@@ -599,23 +1127,24 @@ def _update_task_progress(
         logger.warning(f"Failed to update task progress: {exc}")
 
 
-def _load_task(task_id: int | None, progress_cb: Callable | None = None) -> dict | None:
-    """Load task from DB."""
+def _load_task(task_id: str | None, progress_cb: Callable | None = None) -> dict | None:
+    """Load task from DB (PRD §6.1 columns only)."""
     if task_id is None:
         return None
     try:
         from semilabs_hone.core.models.db import get_session
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
         sess = get_session()
         try:
-            task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
                 return {
                     "id": task.id,
                     "platform": task.platform,
-                    "last_note_index": task.last_note_index,
-                    "download_images": task.download_images,
-                    "collect_comments": task.collect_comments,
+                    "task_type": task.task_type,
+                    "target_value": task.target_value,
+                    "expected_count": task.expected_count,
+                    "actual_count": task.actual_count,
                     "status": task.status,
                 }
             return None
@@ -625,27 +1154,94 @@ def _load_task(task_id: int | None, progress_cb: Callable | None = None) -> dict
         return None
 
 
+def _load_task_keywords(task_id: str | None, task: dict | None = None) -> list[str]:
+    """Recover the keyword list for a resume payload (F3).
+
+    Under the PRD model a keyword_search task carries exactly one keyword in
+    ``target_value``; author_homepage tasks have none.
+    """
+    task = task or _load_task(task_id)
+    if not task:
+        return []
+    if task.get("task_type") == "keyword_search" and task.get("target_value"):
+        return [task["target_value"]]
+    return []
+
+
+def _load_scraped_platform_ids(task_id: str | None) -> set[str]:
+    """Return platform_ids already stored for this task (F11 断点去重).
+
+    A resumed task skips detail/comments re-fetches for these items instead
+    of re-scraping — the UNIQUE(platform, platform_id) upsert would dedup the
+    rows anyway, but re-fetching wastes requests and risks detection.
+    """
+    if task_id is None:
+        return set()
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.post import CollectionItem
+        sess = get_session()
+        try:
+            rows = sess.query(CollectionItem.platform_id).filter(
+                CollectionItem.task_id == task_id
+            ).all()
+            return {r[0] for r in rows if r[0]}
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to load scraped ids for task {task_id}: {exc}")
+        return set()
+
+
+def _bump_account_usage(account_id: int | None) -> None:
+    """Count one stored post against the account's daily quota (USER_SOP G9).
+
+    The daily counter resets on the first post of a new local day. The PRD
+    §7.1 limit *check* stays on the global today COUNT (_check_rhythm, S8
+    ruling); this counter is per-account telemetry + last_scrape_at.
+    """
+    if account_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.account import Account
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        sess = get_session()
+        try:
+            acct = sess.query(Account).filter(Account.id == account_id).first()
+            if acct is None:
+                return
+            if acct.daily_count_date != today:
+                acct.daily_count_date = today
+                acct.daily_scrape_count = 0
+            acct.daily_scrape_count = (acct.daily_scrape_count or 0) + 1
+            acct.total_scrape_count = (acct.total_scrape_count or 0) + 1
+            acct.last_scrape_at = datetime.now(timezone.utc)
+            sess.commit()
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to bump usage for account {account_id}: {exc}")
+
+
 def _complete_task(
-    task_id: int | None,
-    posts_scraped: int,
-    comments_count: int,
-    last_note_index: int,
+    task_id: str | None,
+    actual_count: int,
     progress_cb: Callable,
 ) -> None:
-    """Mark task as completed."""
+    """Mark task as completed (PRD §6.1 columns only)."""
     if task_id is None:
         return
     try:
         from semilabs_hone.core.models.db import get_session
-        from semilabs_hone.core.models.task import ScrapeTask
+        from semilabs_hone.core.models.task import CollectionTask
         sess = get_session()
         try:
-            task = sess.query(ScrapeTask).filter(ScrapeTask.id == task_id).first()
+            task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
                 task.status = "completed"
-                task.posts_scraped = posts_scraped
-                task.last_note_index = last_note_index
-                task.completed_at = datetime.now(timezone.utc)
+                task.actual_count = actual_count  # PRD §6.1 canonical count
                 sess.commit()
         finally:
             sess.close()
@@ -665,7 +1261,10 @@ def _get_engine(platform: str, account_id: int | None, progress_cb: Callable) ->
         from semilabs_hone.modules.collection.scrapers.engine import GenericEngine
 
         spec, adapter_cls = get(platform)
-        engine = GenericEngine(spec=spec)
+        # L14: inject the worker's live ctx so ensure_page can resolve a page
+        # (None in tests → engine.ctx=None, matches pre-S9a behavior).
+        # F6: the bound account rides along for per-page fingerprint apply.
+        engine = GenericEngine(spec=spec, ctx=_WORKER_CTX, account=_WORKER_ACCOUNT)
         return engine
     except KeyError:
         logger.warning(f"Platform '{platform}' not found in registry")

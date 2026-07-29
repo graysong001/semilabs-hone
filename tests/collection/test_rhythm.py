@@ -16,9 +16,12 @@ from semilabs_hone.core.utils.retry import DailyLimitError, QuietHoursError
 from semilabs_hone.modules.collection.scheduler.rhythm import (
     check_daily_limit,
     check_quiet_hours,
+    is_quiet_hours,
     keyword_delay,
     note_delay,
+    seconds_until_wakeup,
     should_pause_for_captcha,
+    sleep_until_wakeup,
 )
 
 
@@ -26,40 +29,40 @@ from semilabs_hone.modules.collection.scheduler.rhythm import (
 
 
 class TestCheckQuietHours:
-    """Tests for check_quiet_hours."""
+    """Tests for check_quiet_hours. Quiet window = 02:00-08:00 (契约变更)."""
 
-    def test_check_quiet_hours_at_22_raises(self):
-        """22:00 is within quiet hours (22:00-07:00) → QuietHoursError."""
-        now = datetime(2026, 1, 1, 22, 0, 0)
-        with pytest.raises(QuietHoursError):
-            check_quiet_hours(now=now)
-
-    def test_check_quiet_hours_at_23_raises(self):
-        """23:00 is within quiet hours → QuietHoursError."""
-        now = datetime(2026, 1, 1, 23, 30, 0)
+    def test_check_quiet_hours_at_02_raises(self):
+        """02:00 is within quiet hours (02:00-08:00) → QuietHoursError."""
+        now = datetime(2026, 1, 1, 2, 0, 0)
         with pytest.raises(QuietHoursError):
             check_quiet_hours(now=now)
 
     def test_check_quiet_hours_at_03_raises(self):
         """03:00 is within quiet hours → QuietHoursError."""
-        now = datetime(2026, 1, 1, 3, 0, 0)
+        now = datetime(2026, 1, 1, 3, 30, 0)
         with pytest.raises(QuietHoursError):
             check_quiet_hours(now=now)
 
-    def test_check_quiet_hours_at_06_raises(self):
-        """06:00 is within quiet hours → QuietHoursError."""
-        now = datetime(2026, 1, 1, 6, 59, 0)
-        with pytest.raises(QuietHoursError):
-            check_quiet_hours(now=now)
-
-    def test_check_quiet_hours_at_07_passes(self):
-        """07:00 is at the boundary (exclusive end) → no error."""
+    def test_check_quiet_hours_at_07_raises(self):
+        """07:00 is within quiet hours (wakeup is 08:00) → QuietHoursError."""
         now = datetime(2026, 1, 1, 7, 0, 0)
-        check_quiet_hours(now=now)  # Should not raise
+        with pytest.raises(QuietHoursError):
+            check_quiet_hours(now=now)
+
+    def test_check_quiet_hours_at_0759_raises(self):
+        """07:59 is within quiet hours → QuietHoursError."""
+        now = datetime(2026, 1, 1, 7, 59, 0)
+        with pytest.raises(QuietHoursError):
+            check_quiet_hours(now=now)
 
     def test_check_quiet_hours_at_08_passes(self):
-        """08:00 is outside quiet hours → no error."""
+        """08:00 is the wakeup boundary (exclusive end) → no error."""
         now = datetime(2026, 1, 1, 8, 0, 0)
+        check_quiet_hours(now=now)  # Should not raise
+
+    def test_check_quiet_hours_at_01_passes(self):
+        """01:00 is just before quiet hours → no error."""
+        now = datetime(2026, 1, 1, 1, 59, 0)
         check_quiet_hours(now=now)  # Should not raise
 
     def test_check_quiet_hours_at_12_passes(self):
@@ -67,10 +70,91 @@ class TestCheckQuietHours:
         now = datetime(2026, 1, 1, 12, 0, 0)
         check_quiet_hours(now=now)  # Should not raise
 
-    def test_check_quiet_hours_at_21_passes(self):
-        """21:00 is just before quiet hours → no error."""
-        now = datetime(2026, 1, 1, 21, 59, 0)
+    def test_check_quiet_hours_at_22_passes(self):
+        """22:00 is outside quiet hours (window is 02:00-08:00) → no error."""
+        now = datetime(2026, 1, 1, 22, 0, 0)
         check_quiet_hours(now=now)  # Should not raise
+
+
+# ─── is_quiet_hours (PRD §4.5.1/§7.4 night-sleep predicate) ────────────────
+
+
+class TestIsQuietHours:
+    """Tests for is_quiet_hours predicate. Window = 02:00-08:00."""
+
+    def test_is_quiet_hours_at_03_true(self):
+        assert is_quiet_hours(datetime(2026, 1, 1, 3, 0, 0)) is True
+
+    def test_is_quiet_hours_at_07_true(self):
+        """07:00 is within window (wakeup 08:00) → quiet."""
+        assert is_quiet_hours(datetime(2026, 1, 1, 7, 0, 0)) is True
+
+    def test_is_quiet_hours_at_02_true(self):
+        """02:00 boundary start → quiet."""
+        assert is_quiet_hours(datetime(2026, 1, 1, 2, 0, 0)) is True
+
+    def test_is_quiet_hours_at_12_false(self):
+        assert is_quiet_hours(datetime(2026, 1, 1, 12, 0, 0)) is False
+
+    def test_is_quiet_hours_at_08_false(self):
+        """08:00 boundary is wakeup time → not quiet."""
+        assert is_quiet_hours(datetime(2026, 1, 1, 8, 0, 0)) is False
+
+    def test_is_quiet_hours_at_22_false(self):
+        """22:00 is outside the 02:00-08:00 window → not quiet."""
+        assert is_quiet_hours(datetime(2026, 1, 1, 22, 0, 0)) is False
+
+
+# ─── seconds_until_wakeup / sleep_until_wakeup ─────────────────────────────
+
+
+class TestNightSleep:
+    """PRD: worker must sleep until 08:00, not throw-and-retry. Window 02:00-08:00."""
+
+    def test_seconds_until_wakeup_before_dawn(self):
+        """03:00 → 5 hours = 18000s until 08:00."""
+        secs = seconds_until_wakeup(datetime(2026, 1, 1, 3, 0, 0))
+        assert secs == 5 * 3600
+
+    def test_seconds_until_wakeup_just_after_start(self):
+        """02:30 → 5.5 hours until 08:00."""
+        secs = seconds_until_wakeup(datetime(2026, 1, 1, 2, 30, 0))
+        assert secs == 5.5 * 3600
+
+    def test_seconds_until_wakeup_outside_quiet_zero(self):
+        """Noon → 0s (not in quiet hours)."""
+        assert seconds_until_wakeup(datetime(2026, 1, 1, 12, 0, 0)) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_sleep_until_wakeup_sleeps_until_dawn(self, monkeypatch):
+        """sleep_until_wakeup must asyncio.sleep for the computed seconds."""
+        slept = []
+
+        async def fake_sleep(secs):
+            slept.append(secs)
+
+        monkeypatch.setattr(
+            "semilabs_hone.modules.collection.scheduler.rhythm.asyncio.sleep", fake_sleep
+        )
+        now = datetime(2026, 1, 1, 3, 0, 0)
+        ret = await sleep_until_wakeup(now)
+        assert ret == 5 * 3600
+        assert slept == [5 * 3600]
+
+    @pytest.mark.asyncio
+    async def test_sleep_until_wakeup_no_sleep_outside_quiet(self, monkeypatch):
+        """Outside quiet hours, sleep_until_wakeup must NOT sleep (PRD: no idle blocking)."""
+        called = []
+
+        async def fake_sleep(secs):
+            called.append(secs)
+
+        monkeypatch.setattr(
+            "semilabs_hone.modules.collection.scheduler.rhythm.asyncio.sleep", fake_sleep
+        )
+        ret = await sleep_until_wakeup(datetime(2026, 1, 1, 12, 0, 0))
+        assert ret == 0.0
+        assert called == []
 
 
 # ─── check_daily_limit ───────────────────────────────────────────────────────

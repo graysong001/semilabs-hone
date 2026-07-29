@@ -9,6 +9,7 @@ Design: docs/skim_design.md §13.1.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 from pathlib import Path
 
@@ -55,12 +56,14 @@ def _discover_modules() -> list[dict]:
         module_id = getattr(manifest, "MODULE_ID", mod_dir.name)
         routes = getattr(manifest, "ROUTES", [])
         worker_entry = getattr(manifest, "WORKER_ENTRY", None)
+        nav = getattr(manifest, "NAV", [])
 
         results.append({
             "name": name,
             "module_id": module_id,
             "routes": routes,
             "worker_entry": worker_entry,
+            "nav": nav,
         })
 
     return results
@@ -103,6 +106,45 @@ def create_app() -> FastAPI:
         modules = _discover_modules()
         _register_routes(app, modules)
         logger.info(f"Discovered {len(modules)} modules: {[m['name'] for m in modules]}")
+
+        # L13: on-demand worker spawner. Attached only when config.WORKER_AUTOSPAWN
+        # is on (the `serve` CLI command flips it); tests build create_app() with
+        # it off, so route handlers skip spawning (no real Chrome in CI).
+        if getattr(__import__("config"), "WORKER_AUTOSPAWN", False):
+            from semilabs_hone.core.ipc.worker_spawner import make_default_spawner
+            app.state.worker_spawner = make_default_spawner()
+            logger.info("Worker auto-spawn enabled (config.WORKER_AUTOSPAWN=1)")
+
+        # Launch the heartbeat watchdog (PRD §3.3): reaps zombie `running`
+        # tasks whose worker heartbeat has gone stale (>30s) → paused + WS.
+        from semilabs_hone.core.ipc.watchdog import run_heartbeat_watchdog
+        app.state.watchdog_task = asyncio.create_task(
+            run_heartbeat_watchdog()
+        )
+
+        # L16: relay worker progress/results files → WS broadcast. No-op when the
+        # progress dir is empty (tests); cancelled on shutdown alongside watchdog.
+        from semilabs_hone.core.ui.ws import run_progress_relay
+        app.state.relay_task = asyncio.create_task(run_progress_relay())
+
+    @app.on_event("shutdown")
+    async def _shutdown() -> None:
+        for attr in ("watchdog_task", "relay_task"):
+            task = getattr(app.state, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        # G12: web exit must not leave orphan Chrome — terminate every worker
+        # registered by the spawner (workers turn SIGTERM into a normal unwind
+        # and tear down their own Chrome, USER_SOP G30).
+        try:
+            from semilabs_hone.core.ipc.worker_spawner import shutdown_all
+            shutdown_all()
+        except Exception:
+            logger.warning("worker spawner shutdown_all failed")
 
     # Mount static files
     static_dir = Path(__file__).resolve().parent / "static"

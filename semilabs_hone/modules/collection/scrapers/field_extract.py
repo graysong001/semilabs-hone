@@ -2,10 +2,64 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from jsonpath_ng.ext import parse as jsonpath_parse
 from selectolax.parser import HTMLParser
+
+
+# ---------------------------------------------------------------------------
+# Cleansing helpers (PRD §8.5 场景5.1 — interaction-string normalization)
+# ---------------------------------------------------------------------------
+
+# Match a leading number (int or decimal) optionally followed by a CN/EN unit.
+_LIKE_RE = re.compile(r"\s*(\d+(?:\.\d+)?)\s*(万|w|k|千)?", re.IGNORECASE)
+
+
+def parse_likes(raw: Any) -> int:
+    """Normalize a platform interaction string into an int (PRD §8.5 场景5.1).
+
+    "1.2w"/"1.5万" → 12000/15000; "赞"/""/None/hidden → 0; plain "1234" → 1234.
+    Never raises — a missing/unparseable like count is recorded as 0 and the
+    worker keeps parsing the next field (PRD §4.3.1 fallback redline).
+    """
+    if raw is None:
+        return 0
+    # bool is an int subclass; treat True/False as "no real count" → 0.
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    s = str(raw).strip()
+    if not s:
+        return 0
+    m = _LIKE_RE.match(s)
+    if not m or m.group(1) is None:
+        return 0
+    try:
+        num = float(m.group(1))
+    except (TypeError, ValueError):
+        return 0
+    unit = (m.group(2) or "").lower()
+    if unit in ("万", "w"):
+        num *= 10000
+    elif unit in ("k", "千"):
+        num *= 1000
+    return int(num)
+
+
+def title_fallback(title: Any, content: Any) -> str:
+    """Return the title, or the first 20 chars of the body when the title is
+    empty (PRD §8.5 场景5.2). Never raises; empty everywhere → "".
+    """
+    t = title if isinstance(title, str) else ("" if title is None else str(title))
+    if t.strip():
+        return t.strip()
+    c = content if isinstance(content, str) else ("" if content is None else str(content))
+    return c[:20]
 
 
 def render_template(tpl: str, **vars: Any) -> str:
@@ -38,6 +92,18 @@ def _find_list_root(data: dict) -> list:
     return []
 
 
+def _extract_row(obj: Any, field_map: dict[str, str]) -> dict:
+    """Evaluate every JSONPath in `field_map` against one object."""
+    row: dict[str, Any] = {}
+    for field_name, expr in field_map.items():
+        try:
+            matches = jsonpath_parse(expr).find(obj)
+            row[field_name] = matches[0].value if matches else None
+        except Exception:
+            row[field_name] = None
+    return row
+
+
 def extract_api(
     sample_json: dict,
     group: str,
@@ -52,6 +118,10 @@ def extract_api(
 
     Returns:
         List of dicts with extracted fields.  Missing fields get None.
+        List-shaped responses (search, comments) yield one dict per item;
+        single-object responses (a note detail) yield exactly one dict with
+        the map applied to the root (USER_SOP G25: detail responses used to
+        extract nothing because no list could be found).
         Empty/deformed JSON returns [] without crashing.
     """
     if not sample_json or not isinstance(sample_json, dict):
@@ -80,21 +150,11 @@ def extract_api(
         items = _find_list_root(sample_json)
 
     if not items:
-        return []
+        # Single-object response: the map addresses the document root.
+        row = _extract_row(sample_json, field_map)
+        return [row] if any(value is not None for value in row.values()) else []
 
-    results = []
-    for item in items:
-        row: dict[str, Any] = {}
-        for field_name, expr in field_map.items():
-            try:
-                jp = jsonpath_parse(expr)
-                matches = jp.find(item)
-                row[field_name] = matches[0].value if matches else None
-            except Exception:
-                row[field_name] = None
-        results.append(row)
-
-    return results
+    return [_extract_row(item, field_map) for item in items]
 
 
 def extract_dom(
@@ -152,4 +212,5 @@ def extract_dom(
         except Exception:
             row[field_name] = None
 
-    return [row] if any(v is not None for v in row.values()) else [row]
+    # All-None row would be a fake record (USER_SOP G26): never emit it.
+    return [row] if any(v is not None for v in row.values()) else []

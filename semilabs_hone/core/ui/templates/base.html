@@ -4,8 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}semilabs-hone{% endblock %}</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <!-- Vendored locally: a local-first tool must not depend on a CDN at runtime. -->
+  <link rel="stylesheet" href="/static/vendor/pico.min.css">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
 </head>
 <body>
   <nav class="container-fluid">
@@ -15,13 +17,21 @@
     <ul class="nav-tabs">
       {% set mods = get_modules() %}
       {% for mid, mod in mods.items() %}
-      <li><a href="/{{ mid }}" class="nav-tab">{{ mod.name }}</a></li>
+        {% for entry in mod.nav or [] %}
+        <li><a href="{{ entry.url }}" class="nav-tab">{{ mod.name }} · {{ entry.label }}</a></li>
+        {% endfor %}
       {% endfor %}
     </ul>
     <ul>
       <li>
         <span id="ws-status" class="ws-indicator" title="WebSocket 连接状态">
           <span class="ws-dot"></span> WS
+        </span>
+      </li>
+      <li>
+        <span id="heartbeat-indicator" class="heartbeat-indicator" title="Worker 心跳 (10s 轮询)"
+              hx-get="/api/heartbeat" hx-trigger="load, every 10s" hx-swap="innerHTML">
+          <span class="heartbeat-dot"></span> 检测中…
         </span>
       </li>
     </ul>

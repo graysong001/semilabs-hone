@@ -2,18 +2,24 @@ platform: xiaohongshu
 display_name: 小红书
 base_url: https://www.xiaohongshu.com
 
+# 验证码可选能力 (契约§5): XHS 是 account 站, 默认 manual 命中即转人工。
+risk_tier: account
+captcha_policy: manual
+
 login:
   type: qrcode
   login_url: /login
+  # url_change: success_pattern 对 URL path 做正则匹配；"^/$" = 扫码后跳回首页
   success_detect: url_change
-  success_pattern: "^/"
+  success_pattern: "^/$"
   timeout: 120
 
 flows:
   search:
     steps:
+      # sort 由 sort_values 映射后代入 (USER_SOP G16: 以前排序选了也不生效)
       - type: navigate
-        url: "/search_result?keyword={keyword}&source=web_search_result_notes"
+        url: "/search_result?keyword={keyword}&source=web_search_result_notes&sort={sort}"
       - type: wait_xhr
         url_pattern: "/api/sns/web/v1/search/notes"
         method: POST
@@ -58,6 +64,10 @@ flows:
 
   comments:
     steps:
+      # 评论是滚动懒加载的: 没有触发步时 wait_xhr 必超时 (USER_SOP G16)
+      - type: scroll
+        max_times: 2
+        wait_ms: 1200
       - type: wait_xhr
         url_pattern: "/api/sns/web/v2/comment/page"
         method: GET
