@@ -61,13 +61,13 @@ git cherry-pick d810008 e8e027c f8881a5 7e5051a
 
 | # | 任务 | fix 线参照 | 要点 |
 |---|---|---|---|
-| 3.1 | `browser/cdp.py`：attach 30s 重试（G32） | 同路径 | 真机首连必 ECONNREFUSED，重试不可少；重试耗尽后抛 feat 已有的 `CDPAttachError`（PRD §8.1 场景 1.2），不要抛 TimeoutError |
-| 3.2 | `platforms/xiaohongshu/platform.yaml`：修回 sort 映射 + comments scroll 触发步（G16） | 同路径 | feat 删掉了属回退（不 sort 排序不生效、不 scroll 评论 XHR 永不触发）；保留 feat 的 `risk_tier`/`captcha_policy` 字段 |
-| 3.3 | `scrapers/field_extract.py`：单对象响应回退（G25） | 同路径 | detail 型响应无列表时 map 作用于根对象；并入 feat 版（保留其 `parse_likes`/`title_fallback`）；复核 feat 版 `extract_dom` 尾部 `else [row]` 是否制造全 None 假行 |
-| 3.4 | `scrapers/engine.py`：七项修回 | 同路径 | F7 platform 全组注入（feat 回退成只注 ItemRef，**必须修回**，否则 Post/Comment 跨平台串号）、F10/G26 DOM 兜底（仅 css:/xpath: 时）、G24 XHR 有界缓冲(200)+导航清缓冲、G22 urljoin 导航、F12 `_llm_model()` 读 config、G27 无凭证跳过 LLM。保留 feat 的 RiskProbeHit 探针与 `_scroll_collect` |
-| 3.5 | `scheduler/rhythm.py`：补回 `warmup_dwell` | 同路径 | feat 删除了但 handlers 预热在用；feat 的 `is_quiet_hours`/`sleep_until_wakeup` 保持不动 |
+| 3.1 ✅ | `browser/cdp.py`：attach 30s 重试（G32） | 同路径 | 真机首连必 ECONNREFUSED，重试不可少；重试耗尽后抛 feat 已有的 `CDPAttachError`（PRD §8.1 场景 1.2），不要抛 TimeoutError |
+| 3.2 ✅ | `platforms/xiaohongshu/platform.yaml`：修回 sort 映射 + comments scroll 触发步（G16） | 同路径 | feat 删掉了属回退（不 sort 排序不生效、不 scroll 评论 XHR 永不触发）；保留 feat 的 `risk_tier`/`captcha_policy` 字段；顺带 login success_pattern "^/"→"^/$"（"^/" 匹配一切 path，登录必误判成功） |
+| 3.3 ✅ | `scrapers/field_extract.py`：单对象响应回退（G25） | 同路径 | detail 型响应无列表时 map 作用于根对象；已并入 feat 版（保留 `parse_likes`/`title_fallback`）；`extract_dom` 尾部 `else [row]` 已修为 `else []`（G26 禁全 None 假行） |
+| 3.4 ✅ | `scrapers/engine.py`：七项修回 | 同路径 | F7 platform 全组注入、F10/G26 DOM 兜底（仅 css:/xpath:）、G24 XHR 有界缓冲(200)+导航清缓冲+ensure_page 时武装、G22 urljoin 导航、F12 `_llm_model()` 读 config、G27 无凭证跳过 LLM、G29 fetch_item 多组合并。RiskProbeHit 探针与 `_scroll_collect` 已保留；顺带 F6：`ensure_page` 公开化(G10)+`_apply_fingerprint_once`（fingerprint.py 采 fix 版：per-account 随机抽取+CDP Emulation apply_to_page，废弃 init-script 注入，服从零注入红线） |
+| 3.5 ✅ | `scheduler/rhythm.py`：补回 `warmup_dwell` | 同路径 | 已补；`is_quiet_hours`/`sleep_until_wakeup` 保持不动，仅加 `QUIET_HOURS=None`(off) 容错；config.py 同步合并环境变量覆盖（默认 (2,8) 不变，裁决 1）+ `ensure_data_dirs`(G34) |
 
-**验收门**：`pytest tests/collection/test_engine.py tests/collection/test_field_extract.py tests/collection/test_rhythm.py -q` 全绿（测试随实现适配）。
+**验收门：✅**（2026-07-29：门内 117 用例全绿；防回归扩跑 tests/collection + tests/prd_bdd 共 447 全绿；linter 绿。提交 0e1bbaf/a6c8760/65e893e）
 
 ---
 
