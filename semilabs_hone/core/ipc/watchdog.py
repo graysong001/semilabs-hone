@@ -47,7 +47,7 @@ def reap_stale_running_task(session, now: float | None = None, threshold: float 
     """Flip a stale `running` task to `paused`; return a WS event or None.
 
     Scans DB for tasks with status='running'; for the first one whose
-    heartbeat is stale, sets status='paused' + error_message and returns a
+    heartbeat is stale, sets status='paused' + error_msg and returns a
     ProgressMessage-shaped dict for ws_manager.broadcast. Returns None when
     no stale running task is found.
     """
@@ -62,8 +62,7 @@ def reap_stale_running_task(session, now: float | None = None, threshold: float 
         return None
 
     task.status = "paused"
-    task.error_message = message
-    task.error_category = "HeartbeatStale"
+    task.error_msg = f"HeartbeatStale: {message}"
     session.commit()
 
     event = {

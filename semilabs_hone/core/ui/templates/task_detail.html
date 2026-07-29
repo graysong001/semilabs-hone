@@ -10,8 +10,8 @@
     <p><strong>状态:</strong> {{ badge_html|safe }}</p>
   </div>
   <div>
-    <p><strong>每关键词最大:</strong> {{ task.max_posts_per_keyword }}</p>
-    <p><strong>排序:</strong> {{ task.sort_type }}</p>
+    <p><strong>目标采集量:</strong> {{ task.expected_count }}</p>
+    <p><strong>类型:</strong> {{ task.task_type }}</p>
   </div>
 </div>
 
@@ -27,10 +27,10 @@
 <!-- Stats -->
 <div class="grid" id="stats-grid">
   <div>
-    <p><strong>已抓取:</strong> <span id="posts-scraped">{{ task.posts_scraped }}</span></p>
+    <p><strong>已抓取:</strong> <span id="posts-scraped">{{ task.actual_count }}</span></p>
   </div>
   <div>
-    <p><strong>断点索引:</strong> <span id="last-note-index">{{ task.last_note_index }}</span></p>
+    <p><strong>断点索引:</strong> <span id="last-note-index">-</span></p>
   </div>
 </div>
 
@@ -83,7 +83,7 @@
 {% block scripts %}
 <script>
 (function() {
-  var taskId = {{ task.id }};
+  var taskId = '{{ task.id }}';
   var logDiv = document.getElementById('task-log');
   var progressFill = document.getElementById('progress-fill');
   var progressText = document.getElementById('progress-text');

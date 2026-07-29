@@ -28,6 +28,9 @@ class Account(Base):
     last_login_at = Column(DateTime, nullable=True)
     last_scrape_at = Column(DateTime, nullable=True)
     daily_scrape_count = Column(Integer, nullable=False, default=0)
+    # USER_SOP G9: local date ("YYYY-MM-DD") the daily counter belongs to;
+    # the counter resets on the first stored post of a new day (additive).
+    daily_count_date = Column(String(10), nullable=True)
     total_scrape_count = Column(Integer, nullable=False, default=0)
     fail_count = Column(Integer, nullable=False, default=0)
     notes = Column(Text, nullable=True)

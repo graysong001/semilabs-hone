@@ -4,18 +4,18 @@ PRD §6.1 — canonical task table:
     id(UUID v4 str36) PK · platform · task_type · target_value · status
     · expected_count · actual_count · error_msg · created_at · updated_at
 
-[契约变更 2026-07-10] S3 原地改表过渡：上 PRD §6 新列 + UUID PK，同时
-**保留**旧 ScrapeTask 字段（account_id/max_posts_per_keyword/posts_scraped/
-last_note_index/sort_type/download_images/collect_comments/error_message/
-error_category/started_at/completed_at），供 handlers/routes/csv/tests 等
-S4/S6/S7 消费者继续使用，零逻辑改动。旧列在 S4/S6/S7 重写各自消费者时
-切到 PRD 列名并从模型删除（create_all 重建即生效）。account_id 的旧 FK
-已移除（PRD collection_tasks 无 account_id），仅保留裸列。
+[契约变更 2026-07-29] 主线合并收官：S3 过渡保留的旧 ScrapeTask 列
+（account_id/max_posts_per_keyword/posts_scraped/last_note_index/sort_type/
+download_images/collect_comments/error_message/error_category/started_at/
+completed_at）已全部删除——handlers/routes/watchdog/模板消费者均已切到
+PRD 列名。任务→账号关联不再落库（PRD §6.1 无此列）；worker 账号由 IPC
+payload 携带、resume 时按平台解析 active 账号。本地工具无迁移脚本：
+先 /api/export 备份 CSV，再删 data/factory.db 重启重建。
 """
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey, PrimaryKeyConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, PrimaryKeyConstraint
 
 from semilabs_hone.core.models.db import Base
 
@@ -47,19 +47,6 @@ class CollectionTask(Base):
     #     future resume→control/ctrl_<rid>.json wiring, PRD §4.4.3). Nullable so
     #     legacy seedings / pre-S6 rows stay valid. ---
     request_id = Column(String(12), nullable=True)
-
-    # --- Legacy columns retained for S4/S6/S7 consumers (to be dropped later) ---
-    account_id = Column(Integer, nullable=True)  # FK dropped (PRD has no account_id)
-    max_posts_per_keyword = Column(Integer, nullable=False, default=20)
-    posts_scraped = Column(Integer, nullable=False, default=0)
-    last_note_index = Column(Integer, nullable=False, default=0)
-    sort_type = Column(String(30), nullable=False, default="general")
-    download_images = Column(Boolean, nullable=False, default=True)
-    collect_comments = Column(Boolean, nullable=False, default=True)
-    error_message = Column(Text, nullable=True)
-    error_category = Column(String(30), nullable=True)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
 
     def __repr__(self):
         return f"<CollectionTask id={self.id} status={self.status}>"

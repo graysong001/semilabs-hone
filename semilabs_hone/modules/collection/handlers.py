@@ -7,10 +7,13 @@ Async handlers are awaited by the IPC server loop.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urljoin, urlparse
 
 from loguru import logger
 
@@ -107,8 +110,14 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
     progress_cb("login_start", {"platform": platform, "account_id": account_id})
 
     if method == "auto" or method == "cookie_recovery":
-        # Tier 1: Try cookie recovery
-        recovered = _try_cookie_recovery(account_id, platform, progress_cb)
+        # Tier 1: recover an existing logged-in session from the profile.
+        # FIX_PLAN F5: with a live ctx the Chrome profile is the source of
+        # truth (real cookie + home-navigation check); without a ctx degrade
+        # to the on-disk cookie heuristic (tests / web-side calls).
+        if _WORKER_CTX is not None:
+            recovered = await _try_session_recovery(platform, account_id, progress_cb)
+        else:
+            recovered = _try_cookie_recovery(account_id, platform, progress_cb)
         if recovered:
             _update_account_status(account_id, "active", progress_cb)
             progress_cb("login_success", {"account_id": account_id, "method": "cookie_recovery"})
@@ -132,17 +141,23 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
             }
 
     if method == "cookie_import":
-        # Tier 3: Cookie import
+        # Tier 3: Cookie import — into the live profile via ctx.add_cookies when
+        # a worker ctx exists (F5), else persisted to disk (degraded/test path).
         cookies = payload.get("cookies")
         if cookies:
-            _import_cookies(account_id, platform, cookies, progress_cb)
-            _update_account_status(account_id, "active", progress_cb)
-            progress_cb("login_success", {"account_id": account_id, "method": "cookie_import"})
-            return {
-                "status": "ok",
-                "login_method": "cookie_import",
-                "account_id": account_id,
-            }
+            if _WORKER_CTX is not None:
+                imported = await _import_cookies_ctx(platform, account_id, cookies, progress_cb)
+            else:
+                _import_cookies(account_id, platform, cookies, progress_cb)
+                imported = True
+            if imported:
+                _update_account_status(account_id, "active", progress_cb)
+                progress_cb("login_success", {"account_id": account_id, "method": "cookie_import"})
+                return {
+                    "status": "ok",
+                    "login_method": "cookie_import",
+                    "account_id": account_id,
+                }
 
     # Fall through to QR if auto and recovery failed
     if method == "auto":
@@ -162,7 +177,7 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
 
 
 def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Callable) -> bool:
-    """Try to recover login from persisted cookies."""
+    """Degraded Tier-1: on-disk cookie heuristic (no live ctx)."""
     from config import DATA_DIR
     cookie_path = DATA_DIR / "collection" / "profiles" / f"acct_{account_id}" / "cookies.json"
     if not cookie_path.exists():
@@ -177,6 +192,84 @@ def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Cal
     except Exception:
         pass
     return False
+
+
+async def _session_check(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
+    """Real session check via the injected ctx (FIX_PLAN F5).
+
+    Valid = ctx holds cookies for base_url AND navigating home does not
+    bounce back to the login page.
+    """
+    if _WORKER_CTX is None:
+        progress_cb("session_check_no_ctx", {"account_id": account_id})
+        return False
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as registry_get
+        spec, _ = registry_get(platform)
+    except Exception as exc:
+        logger.warning(f"session check: unknown platform {platform}: {exc}")
+        return False
+    try:
+        cookies = await _WORKER_CTX.cookies(spec.base_url)
+    except Exception as exc:
+        logger.warning(f"ctx.cookies failed: {exc}")
+        return False
+    if not cookies:
+        progress_cb("session_check_no_cookies", {"account_id": account_id})
+        return False
+    page = await _WORKER_CTX.new_page()
+    try:
+        await page.goto(spec.base_url, wait_until="domcontentloaded", timeout=30000)
+        login_path = (spec.login.login_url or "/login").rstrip("/")
+        current_path = urlparse(page.url).path.rstrip("/")
+        if current_path == login_path:
+            progress_cb("session_check_bounced_to_login", {"account_id": account_id})
+            return False
+        return True
+    except Exception as exc:
+        logger.warning(f"session check navigation failed: {exc}")
+        return False
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
+async def _try_session_recovery(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
+    """Tier 1: recover an existing logged-in session from the profile (F5)."""
+    ok = await _session_check(platform, account_id, progress_cb)
+    if ok:
+        progress_cb("login_recovery_ok", {"account_id": account_id})
+    return ok
+
+
+async def _import_cookies_ctx(platform: str, account_id: int | None, cookies: list, progress_cb: Callable) -> bool:
+    """Tier 3 (live): import cookies into the profile via ctx.add_cookies, then validate."""
+    if _WORKER_CTX is None:
+        progress_cb("login_import_no_ctx", {"account_id": account_id})
+        return False
+    try:
+        await _WORKER_CTX.add_cookies(cookies)
+        progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(cookies)})
+    except Exception as exc:
+        logger.warning(f"add_cookies failed: {exc}")
+        return False
+    return await _session_check(platform, account_id, progress_cb)
+
+
+# Seconds between QR success polls; module-level so tests can patch.
+QR_POLL_INTERVAL = 2.0
+# Overall QR scan wait; None = platform spec login.timeout (tests patch small).
+QR_LOGIN_TIMEOUT: float | None = None
+
+
+def _login_succeeded(page: Any, pattern: str) -> bool:
+    """url_change detection: success_pattern matched against the URL path."""
+    try:
+        return re.search(pattern, urlparse(page.url).path) is not None
+    except Exception:
+        return False
 
 
 async def _do_qr_login(platform: str, account_id: int | None, progress_cb: Callable) -> dict | None:
@@ -223,8 +316,39 @@ async def _do_qr_login(platform: str, account_id: int | None, progress_cb: Calla
         except Exception:
             pass
         await page.screenshot(path=qr_path)
-        progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
-        return {"qr_path": qr_path}
+        # Ship the QR to the UI as base64 too (G4: it must reach the WS layer
+        # as a first-class event even when the file path is not reachable).
+        qr_b64 = None
+        try:
+            shot = await page.screenshot(type="png")
+            qr_b64 = base64.b64encode(shot).decode("ascii")
+        except Exception:
+            pass
+        progress_cb("qr_ready", {
+            "qr_path": qr_path, "account_id": account_id,
+            **({"screenshot_b64": qr_b64} if qr_b64 else {}),
+        })
+
+        # Poll for scan success per platform.yaml login section (F5):
+        # success_detect "url_change" matches success_pattern against the URL
+        # path (e.g. "^/$" = redirected back to home).
+        try:
+            from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+            spec, _ = reg_get(platform)
+            timeout = QR_LOGIN_TIMEOUT if QR_LOGIN_TIMEOUT is not None else (spec.login.timeout or 120)
+            deadline = time.monotonic() + timeout
+            pattern = spec.login.success_pattern or "^/$"
+            while time.monotonic() < deadline:
+                if _login_succeeded(page, pattern):
+                    progress_cb("login_success", {"account_id": account_id, "method": "qrcode"})
+                    return {"qr_path": qr_path, "login_method": "qrcode"}
+                await asyncio.sleep(QR_POLL_INTERVAL)
+            progress_cb("login_qr_timeout", {"account_id": account_id})
+            return None
+        except Exception:
+            # Spec unavailable — QR was shipped; treat as best-effort success
+            # signal for the caller (pre-F5 behavior).
+            return {"qr_path": qr_path}
     except Exception as exc:
         logger.warning(f"QR navigation/screenshot failed: {exc}; returning stub path")
         progress_cb("qr_ready", {"qr_path": qr_path, "account_id": account_id})
@@ -279,16 +403,23 @@ async def handler_validate(payload: dict, progress_cb: Callable) -> dict:
 
     progress_cb("validate_start", {"account_id": account_id})
 
-    # Check account exists and has cookies
-    valid = _check_account_valid(account_id, platform, progress_cb)
+    # Real session check via ctx when a worker is attached (F5); degrade to the
+    # on-disk cookie heuristic otherwise (tests / web-side calls).
+    if _WORKER_CTX is not None:
+        valid = await _session_check(platform, account_id, progress_cb)
+        _update_account_status(account_id, "active" if valid else "inactive", progress_cb)
+    else:
+        valid = _check_account_valid(account_id, platform, progress_cb)
 
-    status = "ok" if valid else "error"
+    # A dead session is a *result*, not an error (USER_SOP G14): the request
+    # ends ok and carries valid:false so the UI says "please log in" instead
+    # of an unknown-error toast.
     progress_cb(
         "validate_done",
         {"account_id": account_id, "valid": valid},
     )
     return {
-        "status": status,
+        "status": "ok",
         "valid": valid,
         "account_id": account_id,
     }
@@ -400,28 +531,37 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     total_posts = 0
     total_comments = 0
     total_images = 0
-    last_note_index = 0
 
-    # Load task from DB to get resume point
+    # Resume payloads may omit keywords — recover from the task's PRD
+    # target_value (F3; keyword_search tasks carry one keyword there).
     task = _load_task(task_id, progress_cb)
-    if task:
-        last_note_index = task.get("last_note_index", 0)
+    if not keywords:
+        keywords = _load_task_keywords(task_id, task)
 
-    # Track seen platform_ids for dedup
-    seen_ids: set[str] = set()
+    # Track seen platform_ids for dedup.
+    # FIX_PLAN F11 断点去重: pre-fill from items already stored for this task
+    # so a resumed task skips detail/comments re-fetches instead of re-scraping.
+    seen_ids: set[str] = _load_scraped_platform_ids(task_id)
+    last_note_index = len(seen_ids)
+
+    # G7: real percentage against the planned workload.
+    planned_total = max(1, len(keywords) * max_posts)
+    processed = 0
 
     for ki, keyword in enumerate(keywords):
         if ki > 0:
             progress_cb("keyword_delay", {"keyword": keyword, "index": ki})
-            # In real mode, this sleeps per keyword_delay
-            # For handler, just signal
-            await asyncio.sleep(0.1)  # Short delay for test; real config.KEYWORD_DELAY is 60-180s
+            # Real rhythm delay (config.KEYWORD_DELAY, env-overridable; tests
+            # neutralize via the no_rhythm_sleep fixture).
+            from semilabs_hone.modules.collection.scheduler import rhythm
+            await rhythm.keyword_delay()
 
         # --- Phase 2: Search ---
         progress_cb("phase2_search", {
             "task_id": task_id,
             "keyword": keyword,
             "progress": f"搜索: {keyword}",
+            "percent": _percent(processed, planned_total),
         })
 
         try:
@@ -461,11 +601,13 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 continue
             seen_ids.add(platform_id)
             last_note_index += 1
+            processed += 1
 
             progress_cb("phase3_fetching", {
                 "task_id": task_id,
                 "platform_id": platform_id,
                 "note_index": last_note_index,
+                "percent": _percent(processed, planned_total),
             })
 
             # Night-sleep gate per item (PRD §4.5.1).
@@ -529,8 +671,10 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
 
                 total_images += images_downloaded
 
-                # Note delay (PRD §4.5.2: 30-90s warmup dwell; test short).
-                await asyncio.sleep(0.05)
+                # Note delay (PRD §7.2 随机延迟, config.NOTE_DELAY 30-90s; tests
+                # neutralize via the no_rhythm_sleep fixture).
+                from semilabs_hone.modules.collection.scheduler import rhythm
+                await rhythm.note_delay()
 
                 # --- Phase 4: Comments (Top 20 by likes, PRD §4.3.2) ---
                 comments_fetched = 0
@@ -562,14 +706,23 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 try:
                     _upsert_post(post, task_id, keyword, comments, progress_cb)
                     total_posts += 1
+                    # G9: count the stored post against the account's daily
+                    # quota telemetry (cross-day reset inside).
+                    _bump_account_usage(account_id)
                 except Exception as exc:
                     logger.warning(f"Store failed for '{platform_id}': {exc}")
                     progress_cb("store_failed", {
                         "platform_id": platform_id, "error": str(exc),
                     })
 
-                # Update last_note_index + actual_count
-                _update_task_progress(task_id, last_note_index, total_posts, progress_cb)
+                # PRD actual_count is the canonical progress counter.
+                _update_task_progress(task_id, total_posts, progress_cb)
+                progress_cb("post_progress", {
+                    "task_id": task_id,
+                    "platform_id": platform_id,
+                    "posts_scraped": total_posts,
+                    "percent": _percent(processed, planned_total),
+                })
                 done = True  # ref fully processed → exit retry loop, next item
 
     # Final update
@@ -579,10 +732,11 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
         "comments_count": total_comments,
         "images_count": total_images,
         "last_note_index": last_note_index,
+        "percent": 100,
     })
 
     # Update task status to completed
-    _complete_task(task_id, total_posts, total_comments, last_note_index, progress_cb)
+    _complete_task(task_id, total_posts, progress_cb)
 
     return {
         "status": "ok",
@@ -591,6 +745,11 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
         "images_count": total_images,
         "last_note_index": last_note_index,
     }
+
+
+def _percent(done: int, total: int) -> int:
+    """Progress percentage capped at 99 until the run actually finishes (G7)."""
+    return min(99, int(done * 100 / total)) if total > 0 else 0
 
 
 def _check_rhythm(account_id: int | None, progress_cb: Callable, now: datetime | None = None) -> None:
@@ -838,6 +997,27 @@ async def _download_images_for_post(
     await download_images(image_urls, str(note_id))
 
 
+def _parse_published_at(value: Any) -> datetime | None:
+    """Parse a platform's published_at (epoch s/ms or ISO 8601) to datetime.
+
+    PRD publish_time is a tolerant VARCHAR; parsing lets us store a readable
+    ISO string instead of a raw epoch (G19/G28), falling back to str().
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            ts = float(value)
+            if ts > 1e11:  # milliseconds
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
 def _upsert_post(
     post: Any,
     task_id: str | None,
@@ -879,6 +1059,12 @@ def _upsert_post(
     }
 
     now = datetime.now(timezone.utc)
+    # publish_time: prefer a parsed ISO string over a raw epoch (G28 tolerant).
+    parsed_pub = _parse_published_at(published_at)
+    publish_time = (
+        parsed_pub.isoformat() if parsed_pub is not None
+        else (str(published_at) if published_at is not None else None)
+    )
     sess = get_session()
     try:
         item = upsert_item(
@@ -891,7 +1077,7 @@ def _upsert_post(
             content_text=content,
             author_name=author_name,
             metrics=metrics,
-            publish_time=(str(published_at) if published_at is not None else None),
+            publish_time=publish_time,
             scraped_at=now,
         )
 
@@ -920,11 +1106,10 @@ def _upsert_post(
 
 def _update_task_progress(
     task_id: str | None,
-    last_note_index: int,
-    posts_scraped: int,
+    actual_count: int,
     progress_cb: Callable,
 ) -> None:
-    """Update task progress in DB (last_note_index + PRD actual_count)."""
+    """Update task progress in DB (PRD §6.1 actual_count only)."""
     if task_id is None:
         return
     try:
@@ -934,9 +1119,7 @@ def _update_task_progress(
         try:
             task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
-                task.last_note_index = last_note_index
-                task.posts_scraped = posts_scraped
-                task.actual_count = posts_scraped  # PRD §6.1 canonical progress
+                task.actual_count = actual_count  # PRD §6.1 canonical progress
                 sess.commit()
         finally:
             sess.close()
@@ -945,7 +1128,7 @@ def _update_task_progress(
 
 
 def _load_task(task_id: str | None, progress_cb: Callable | None = None) -> dict | None:
-    """Load task from DB."""
+    """Load task from DB (PRD §6.1 columns only)."""
     if task_id is None:
         return None
     try:
@@ -958,9 +1141,10 @@ def _load_task(task_id: str | None, progress_cb: Callable | None = None) -> dict
                 return {
                     "id": task.id,
                     "platform": task.platform,
-                    "last_note_index": task.last_note_index,
-                    "download_images": task.download_images,
-                    "collect_comments": task.collect_comments,
+                    "task_type": task.task_type,
+                    "target_value": task.target_value,
+                    "expected_count": task.expected_count,
+                    "actual_count": task.actual_count,
                     "status": task.status,
                 }
             return None
@@ -970,14 +1154,83 @@ def _load_task(task_id: str | None, progress_cb: Callable | None = None) -> dict
         return None
 
 
+def _load_task_keywords(task_id: str | None, task: dict | None = None) -> list[str]:
+    """Recover the keyword list for a resume payload (F3).
+
+    Under the PRD model a keyword_search task carries exactly one keyword in
+    ``target_value``; author_homepage tasks have none.
+    """
+    task = task or _load_task(task_id)
+    if not task:
+        return []
+    if task.get("task_type") == "keyword_search" and task.get("target_value"):
+        return [task["target_value"]]
+    return []
+
+
+def _load_scraped_platform_ids(task_id: str | None) -> set[str]:
+    """Return platform_ids already stored for this task (F11 断点去重).
+
+    A resumed task skips detail/comments re-fetches for these items instead
+    of re-scraping — the UNIQUE(platform, platform_id) upsert would dedup the
+    rows anyway, but re-fetching wastes requests and risks detection.
+    """
+    if task_id is None:
+        return set()
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.post import CollectionItem
+        sess = get_session()
+        try:
+            rows = sess.query(CollectionItem.platform_id).filter(
+                CollectionItem.task_id == task_id
+            ).all()
+            return {r[0] for r in rows if r[0]}
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to load scraped ids for task {task_id}: {exc}")
+        return set()
+
+
+def _bump_account_usage(account_id: int | None) -> None:
+    """Count one stored post against the account's daily quota (USER_SOP G9).
+
+    The daily counter resets on the first post of a new local day. The PRD
+    §7.1 limit *check* stays on the global today COUNT (_check_rhythm, S8
+    ruling); this counter is per-account telemetry + last_scrape_at.
+    """
+    if account_id is None:
+        return
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.account import Account
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        sess = get_session()
+        try:
+            acct = sess.query(Account).filter(Account.id == account_id).first()
+            if acct is None:
+                return
+            if acct.daily_count_date != today:
+                acct.daily_count_date = today
+                acct.daily_scrape_count = 0
+            acct.daily_scrape_count = (acct.daily_scrape_count or 0) + 1
+            acct.total_scrape_count = (acct.total_scrape_count or 0) + 1
+            acct.last_scrape_at = datetime.now(timezone.utc)
+            sess.commit()
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"Failed to bump usage for account {account_id}: {exc}")
+
+
 def _complete_task(
     task_id: str | None,
-    posts_scraped: int,
-    comments_count: int,
-    last_note_index: int,
+    actual_count: int,
     progress_cb: Callable,
 ) -> None:
-    """Mark task as completed."""
+    """Mark task as completed (PRD §6.1 columns only)."""
     if task_id is None:
         return
     try:
@@ -988,10 +1241,7 @@ def _complete_task(
             task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
                 task.status = "completed"
-                task.posts_scraped = posts_scraped
-                task.actual_count = posts_scraped  # PRD §6.1 canonical count
-                task.last_note_index = last_note_index
-                task.completed_at = datetime.now(timezone.utc)
+                task.actual_count = actual_count  # PRD §6.1 canonical count
                 sess.commit()
         finally:
             sess.close()

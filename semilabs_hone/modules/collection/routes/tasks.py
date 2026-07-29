@@ -21,6 +21,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 router = APIRouter()
 
+#: Task states that occupy the single-task-at-a-time slot (PRD §8.2 场景 2.2).
+ACTIVE_STATES = ("pending", "running")
+
 
 def _templates():
     """Get shared templates from dashboard module."""
@@ -32,6 +35,67 @@ def _ipc_client():
     from semilabs_hone.core.ipc.client import IPCClient
     from semilabs_hone.core.ipc.protocol import IPCRequest
     return IPCClient, IPCRequest
+
+
+def _error(message: str, fix_hint: str, status_code: int) -> JSONResponse:
+    """Uniform machine- and human-readable rejection (G8)."""
+    return JSONResponse(
+        {"ok": False, "error": message, "fix_hint": fix_hint}, status_code=status_code
+    )
+
+
+def _resolve_active_account_id(sess, platform: str) -> int | None:
+    """Most-recently-logged-in active account for a platform (PRD §6.1 has no
+    task→account FK; resume resolves the worker account from the platform)."""
+    from semilabs_hone.core.models.account import Account
+
+    acct = (
+        sess.query(Account)
+        .filter(Account.platform == platform, Account.status == "active")
+        .order_by(Account.last_login_at.desc().nullslast(), Account.id.desc())
+        .first()
+    )
+    return acct.id if acct else None
+
+
+def _validate_new_task(sess, platform: str, account_id: int, targets: list[str]):
+    """G8 pre-flight checks; return a JSONResponse on the first problem, else None.
+
+    Failing deep inside the worker leaves a zombie task and a confused user —
+    validate platform / keywords / account (exists, same platform, logged in)
+    and the single-task slot up front, answering 4xx with a fix_hint.
+    """
+    from semilabs_hone.core.models.account import Account
+    from semilabs_hone.core.models.task import CollectionTask
+    from semilabs_hone.modules.collection.scrapers.registry import list_platforms
+
+    known = list_platforms()
+    if platform not in known:
+        return _error(
+            f"未知平台 '{platform}'",
+            f"可用平台: {', '.join(known) or '（无）'}；新站点需先录制生成 platform.yaml",
+            400,
+        )
+
+    if not targets:
+        return _error("关键词/目标不能为空", "至少填一个关键词或主页链接，多个用逗号或换行分隔", 400)
+
+    account = sess.query(Account).filter(Account.id == account_id).first()
+    if account is None:
+        return _error(f"账号 {account_id} 不存在", "先到账号页添加并登录一个账号", 400)
+    if account.platform != platform:
+        return _error(
+            f"账号 #{account_id} 属于 {account.platform}，与所选平台 {platform} 不符",
+            "选择同平台的账号，或为该平台新建账号",
+            400,
+        )
+    if account.status != "active":
+        return _error(
+            f"账号 #{account_id} 未登录（状态 {account.status}）",
+            "先在账号页点『登录』完成扫码，再来建任务",
+            409,
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +241,7 @@ def _badge_html(task) -> str:
     elif status in _BADGE_MAP:
         cls, label = _BADGE_MAP[status]
         if status in ("error", "failed"):
-            label = task.error_msg or task.error_message or "error"
+            label = task.error_msg or "error"
     else:
         cls, label = ("muted", status)
     tid = task.id
@@ -346,7 +410,8 @@ async def api_create_task(
 
     The legacy TaskKeyword/Keyword link chain is dropped (contract §2 cleanup);
     the IPC payload still derives `keywords` from target_value so the S4 engine
-    is untouched (向后兼容). Single-running lock (PRD §8.2 场景 2.2) unchanged.
+    is untouched (向后兼容). Single-running lock (PRD §8.2 场景 2.2) enforced by
+    the G8 pre-flight checks (409 + fix_hint), not silent queueing.
 
     Returns {request_id, status, task_id}.
     """
@@ -380,18 +445,19 @@ async def api_create_task(
 
     sess = get_session()
     try:
+        # G8: fail fast with a fix_hint instead of deep inside the worker.
+        rejection = _validate_new_task(sess, platform, account_id, targets)
+        if rejection is not None:
+            return rejection
+
+        # PRD §2.2 场景1: multiple tasks queue (pending), one runs at a time.
         already_running = sess.query(CollectionTask).filter(
-            CollectionTask.status == "running"
+            CollectionTask.status.in_(ACTIVE_STATES)
         ).first() is not None
 
         task = CollectionTask(
-            account_id=account_id,
             platform=platform,
-            status="pending",
-            max_posts_per_keyword=expected_count,
-            sort_type=sort,
-            download_images=download_images,
-            collect_comments=collect_comments,
+            status="pending" if already_running else "running",
             task_type=task_type,
             target_value=stored_target,
             expected_count=expected_count,
@@ -399,11 +465,6 @@ async def api_create_task(
         sess.add(task)
         sess.flush()
         task_id = task.id
-
-        # Promote to running only when the single-running slot is free.
-        if not already_running:
-            task.status = "running"
-
         sess.commit()
     except Exception as exc:
         sess.rollback()
@@ -558,10 +619,13 @@ async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
             task.status == "need_human" and bool(task.request_id)
         )
 
-        # Flip to running + clear the error markers (both paths).
+        # Flip to running + clear the error marker (both paths).
         task.status = "running"
-        task.error_message = None
-        task.error_category = None
+        task.error_msg = None
+
+        # Resolve the worker account from the platform (PRD §6.1 has no
+        # task→account FK) BEFORE close (L12).
+        resume_account_id = _resolve_active_account_id(sess, task.platform)
         sess.commit()
 
         # Capture everything we need BEFORE close (L12). After commit, attributes
@@ -570,11 +634,11 @@ async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
             rid = task.request_id
         else:
             new_req_fields = {
-                "account_id": task.account_id,
+                "account_id": resume_account_id,
                 "platform": task.platform,
-                "max_posts_per_keyword": task.max_posts_per_keyword,
-                "download_images": task.download_images,
-                "collect_comments": task.collect_comments,
+                "task_type": task.task_type,
+                "target_value": task.target_value,
+                "expected_count": task.expected_count,
             }
     except Exception as exc:
         sess.rollback()
@@ -598,6 +662,22 @@ async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
     request_id = uuid.uuid4().hex[:12]
     account_id = new_req_fields.get("account_id")
 
+    # Persist the fresh request_id so badge↔progress correlation and a later
+    # cancel/resume address the live request (L01).
+    sess3 = get_session()
+    try:
+        t = sess3.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+        if t is not None:
+            t.request_id = request_id
+            sess3.commit()
+    except Exception:
+        sess3.rollback()
+    finally:
+        sess3.close()
+
+    task_type = new_req_fields.get("task_type") or "keyword_search"
+    target_value = new_req_fields.get("target_value") or ""
+
     req = IPCRequest(
         request_id=request_id,
         module="collection",
@@ -606,11 +686,15 @@ async def api_resume_task(request: Request, task_id: str) -> JSONResponse:
         payload={
             "task_id": task_id,
             "platform": new_req_fields.get("platform", "xiaohongshu"),
+            "task_type": task_type,
+            "target_value": target_value,
+            "keywords": [target_value] if task_type == "keyword_search" and target_value else [],
+            "sort": "general",
             "account_id": account_id,
             "request_id": request_id,
-            "max_posts_per_keyword": new_req_fields.get("max_posts_per_keyword", 20),
-            "download_images": new_req_fields.get("download_images", True),
-            "collect_comments": new_req_fields.get("collect_comments", True),
+            "max_posts_per_keyword": new_req_fields.get("expected_count", 20),
+            "download_images": True,
+            "collect_comments": True,
             "resume": True,
         },
     )

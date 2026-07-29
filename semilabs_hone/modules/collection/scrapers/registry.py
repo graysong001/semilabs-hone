@@ -24,16 +24,42 @@ def _scrapers_dir() -> Path:
     return Path(__file__).parent
 
 
+def _builtin_platform_files() -> list[str]:
+    """platform.yaml files shipped inside the package."""
+    return sorted(glob.glob(str(_scrapers_dir() / "platforms" / "*" / "platform.yaml")))
+
+
+def user_platforms_dir() -> Path:
+    """Where recorded platforms live: ``data/collection/platforms/``.
+
+    Recording a new site produces user data, not package code, so generated
+    specs land under DATA_DIR and are discovered from there (USER_SOP G13,
+    design §19). Config is read lazily so tests can redirect DATA_DIR.
+    """
+    import config
+
+    return config.DATA_DIR / "collection" / "platforms"
+
+
+def _user_platform_files() -> list[str]:
+    """platform.yaml files recorded by the user."""
+    try:
+        return sorted(glob.glob(str(user_platforms_dir() / "*" / "platform.yaml")))
+    except Exception as exc:  # unreadable DATA_DIR must not kill the registry
+        logger.warning("Cannot scan user platforms dir: %s", exc)
+        return []
+
+
 def load_registry(
     force: bool = False,
 ) -> dict[str, tuple[PlatformSpec, type[BasePlatformScraper] | None]]:
-    """Load all platform.yaml files from platforms/*/platform.yaml.
+    """Load every platform.yaml, built-in first and user-recorded second.
 
     Returns:
         {platform_name: (PlatformSpec, adapter_class_or_None)}
 
-    Scans platforms/*/platform.yaml, validates each against PlatformSpec,
-    and optionally loads adapter.py from each platform directory.
+    A user-recorded spec with the same platform name overrides the built-in
+    one, so a hand-tuned recording wins over the shipped default.
     """
     global _registry_cache
 
@@ -41,11 +67,8 @@ def load_registry(
         return _registry_cache
 
     registry: dict[str, tuple[PlatformSpec, type[BasePlatformScraper] | None]] = {}
-    base = _scrapers_dir()
-    pattern = str(base / "platforms" / "*" / "platform.yaml")
-    yaml_files = glob.glob(pattern)
 
-    for yaml_path in yaml_files:
+    for yaml_path in _builtin_platform_files() + _user_platform_files():
         try:
             with open(yaml_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
@@ -53,13 +76,8 @@ def load_registry(
                 continue
 
             spec = PlatformSpec(**data)
-            platform_name = spec.platform
-
-            # Try to load adapter.py from the same directory
-            adapter_cls = _load_adapter(yaml_path)
-
-            registry[platform_name] = (spec, adapter_cls)
-            logger.info("Registered platform: %s (%s)", platform_name, spec.display_name)
+            registry[spec.platform] = (spec, _load_adapter(yaml_path))
+            logger.info("Registered platform: %s (%s)", spec.platform, spec.display_name)
         except Exception as e:
             logger.warning("Failed to load platform from %s: %s", yaml_path, e)
 
@@ -67,25 +85,32 @@ def load_registry(
     return registry
 
 
-def _load_adapter(yaml_path: str) -> type[BasePlatformScraper] | None:
-    """Try to load adapter.py from the platform directory.
+def reset_cache() -> None:
+    """Forget the loaded registry (after recording a new platform, or in tests)."""
+    global _registry_cache
+    _registry_cache = None
 
-    Returns the adapter class if found, None otherwise.
+
+def _load_adapter(yaml_path: str) -> type[BasePlatformScraper] | None:
+    """Load adapter.py sitting next to a built-in platform.yaml, if any.
+
+    Only package-local platforms can carry an adapter: user-recorded specs
+    live under data/ and are pure declarative YAML (no code execution).
     """
     platform_dir = Path(yaml_path).parent
     adapter_file = platform_dir / "adapter.py"
 
     if not adapter_file.exists():
         return None
+    try:
+        rel = adapter_file.relative_to(_scrapers_dir())
+    except ValueError:
+        logger.warning("Ignoring adapter.py outside the package: %s", adapter_file)
+        return None
 
     try:
-        module_name = adapter_file.stem
-        # Construct a module path relative to the scrapers package
-        rel = adapter_file.relative_to(_scrapers_dir())
         full_module = "semilabs_hone.modules.collection.scrapers." + str(rel).replace("/", ".")[:-3]
-
         mod = importlib.import_module(full_module)
-        # Look for a class named <PlatformName>Scraper or Adapter
         for attr_name in dir(mod):
             attr = getattr(mod, attr_name)
             if (
