@@ -311,9 +311,9 @@ def test_base_includes_htmx_script(client: TestClient):
 
 
 def test_base_has_heartbeat_indicator(client: TestClient):
-    """T35: base.html nav has the heartbeat indicator polling /api/heartbeat."""
+    """T35: base.html 顶栏心跳 pill 轮询 /api/heartbeat (v2 暗色版 hx-get 模式)。"""
     resp = client.get("/")
-    assert "heartbeat-indicator" in resp.text
+    assert 'hx-get="/api/heartbeat"' in resp.text
     assert "/api/heartbeat" in resp.text
 
 
