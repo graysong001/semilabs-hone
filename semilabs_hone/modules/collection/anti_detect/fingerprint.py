@@ -1,26 +1,19 @@
 """Layer 2 — one-account-one-fixed fingerprint.
 
-Fingerprint is assigned once (randomly) and then permanently fixed.
-Load reads from the accounts table; apply sets viewport/color-scheme/locale/timezone.
-Does NOT set UA (UA is handled separately via ua_pool.get_ua).
+A fingerprint is drawn randomly once per account at account-creation time and
+persisted on the accounts table (viewport_w/h, color_scheme, timezone, locale).
+load_fingerprint rebuilds it from the account row; apply_to_page applies it
+per page via CDP Emulation overrides (CDP attach mode, design §4.3).
 
-Lazy playwright import for importability without playwright.
+Does NOT set UA (read from the real Chrome at runtime, §5.3) and does NOT
+override viewport (CDP attach mode keeps the real window size, by design).
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import random
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import BaseModel
-
-if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext
-
-# In-memory cache for assigned fingerprint
-_assigned_fingerprint: "Fingerprint | None" = None
 
 # Available options for fingerprint generation
 _VIEWPORTS = [
@@ -52,118 +45,55 @@ class Fingerprint(BaseModel):
     locale: str
 
 
-def _get_fingerprint_file() -> Path:
-    """Return the path to the persistent fingerprint store."""
-    try:
-        from semilabs_hone.core.config import DATA_DIR
-    except ImportError:
-        from config import DATA_DIR
-    return DATA_DIR / "collection" / "assigned_fingerprint.json"
-
-
 def assign_fingerprint() -> Fingerprint:
-    """Assign a fingerprint once and permanently fix it.
+    """Draw a new random fingerprint.
 
-    If a fingerprint has already been assigned, return the same one
-    (one-account-one-fixed invariant).
+    Called once per account at creation time; the result is persisted on the
+    accounts table. Never a process-wide singleton — every account gets its
+    own independent draw (shared fingerprints across accounts invite
+    correlation bans).
     """
-    global _assigned_fingerprint
-
-    if _assigned_fingerprint is not None:
-        return _assigned_fingerprint
-
-    # Try to load from persistent store
-    fp_file = _get_fingerprint_file()
-    if fp_file.exists():
-        try:
-            data = json.loads(fp_file.read_text(encoding="utf-8"))
-            _assigned_fingerprint = Fingerprint(**data)
-            return _assigned_fingerprint
-        except (json.JSONDecodeError, Exception):
-            pass  # Fall through to generate new
-
-    # Generate a new random fingerprint
-    _assigned_fingerprint = Fingerprint(
+    return Fingerprint(
         viewport=random.choice(_VIEWPORTS),
         color_scheme=random.choice(_COLOR_SCHEMES),
         timezone=random.choice(_TIMEZONES),
         locale=random.choice(_LOCALES),
     )
 
-    # Persist to disk
-    fp_file.parent.mkdir(parents=True, exist_ok=True)
-    fp_file.write_text(
-        json.dumps(_assigned_fingerprint.model_dump(), ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    return _assigned_fingerprint
-
 
 def load_fingerprint(account: Any) -> Fingerprint:
-    """Load fingerprint from the accounts table.
+    """Rebuild the fixed fingerprint from an account row or dict.
 
-    The account object should have attributes: color_scheme, timezone, locale.
-    Returns a Fingerprint from the DB values.
+    Reads viewport_w/viewport_h/color_scheme/timezone/locale; missing fields
+    fall back to the accounts-table defaults.
     """
-    # Extract fields from account (could be ORM object, dict, or pydantic model)
-    if hasattr(account, "color_scheme"):
-        color_scheme = getattr(account, "color_scheme", "light")
-        timezone = getattr(account, "timezone", "Asia/Shanghai")
-        locale = getattr(account, "locale", "zh-CN")
-    elif isinstance(account, dict):
-        color_scheme = account.get("color_scheme", "light")
-        timezone = account.get("timezone", "Asia/Shanghai")
-        locale = account.get("locale", "zh-CN")
+    if isinstance(account, dict):
+        getter = account.get
     else:
-        color_scheme = "light"
-        timezone = "Asia/Shanghai"
-        locale = "zh-CN"
+        def getter(key: str, default: Any = None) -> Any:
+            return getattr(account, key, default)
 
-    # Use assigned fingerprint viewport, or assign one
-    fp = assign_fingerprint()
-
+    viewport_w = getter("viewport_w", 1920) or 1920
+    viewport_h = getter("viewport_h", 1080) or 1080
     return Fingerprint(
-        viewport=fp.viewport,
-        color_scheme=color_scheme,
-        timezone=timezone,
-        locale=locale,
+        viewport={"width": viewport_w, "height": viewport_h},
+        color_scheme=getter("color_scheme", "light") or "light",
+        timezone=getter("timezone", "Asia/Shanghai") or "Asia/Shanghai",
+        locale=getter("locale", "zh-CN") or "zh-CN",
     )
 
 
-async def apply_fingerprint(ctx: "BrowserContext", fp: Fingerprint) -> None:
-    """Apply the fingerprint to a BrowserContext.
+async def apply_to_page(page: Any, fp: Fingerprint) -> None:
+    """Apply the fingerprint to a page via CDP Emulation overrides.
 
-    Sets viewport, color-scheme, locale, timezone via init scripts.
-    Does NOT set UA (handled by ua_pool.get_ua).
+    CDP attach mode (design §4.3): viewport uses the real window and is NOT
+    overridden; timezone/locale/color-scheme are applied per page through a
+    CDP session so no init-script tampering shows up in the page.
     """
-    # Locale + timezone injection
-    locale_tz_script = f"""
-        Object.defineProperty(navigator, 'language', {{
-            value: '{fp.locale}', writable: false, configurable: false,
-        }});
-        Object.defineProperty(navigator, 'languages', {{
-            value: ['{fp.locale}', 'en-US'], writable: false, configurable: false,
-        }});
-        Intl._origDateTimeFormat = Intl.DateTimeFormat;
-        Intl.DateTimeFormat = function(locales, options) {{
-            options = options || {{}};
-            options.timeZone = '{fp.timezone}';
-            return new Intl._origDateTimeFormat('{fp.locale}', options);
-        }};
-    """
-    await ctx.add_init_script(locale_tz_script)
-
-    # Color-scheme injection
-    cs_script = f"""
-        var style = document.createElement('style');
-        style.textContent = ':root {{ color-scheme: {fp.color_scheme}; }}';
-        document.head.appendChild(style);
-    """
-    await ctx.add_init_script(cs_script)
-
-
-def reset_assigned() -> None:
-    """Reset the in-memory assigned fingerprint (for testing only)."""
-    global _assigned_fingerprint
-    _assigned_fingerprint = None
+    session = await page.context.new_cdp_session(page)
+    await session.send("Emulation.setTimezoneOverride", {"timezoneId": fp.timezone})
+    await session.send("Emulation.setLocaleOverride", {"locale": fp.locale})
+    await session.send(
+        "Emulation.setEmulatedMedia",
+        {"features": [{"name": "color-scheme", "value": fp.color_scheme}]},
+    )

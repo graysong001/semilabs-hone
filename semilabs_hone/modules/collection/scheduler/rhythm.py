@@ -27,7 +27,10 @@ def is_quiet_hours(now: datetime | None = None) -> bool:
     """
     if now is None:
         now = datetime.now()
-    start, end = config.QUIET_HOURS
+    window = config.QUIET_HOURS
+    if window is None:  # SEMILABS_QUIET_HOURS=off — 本机演练/E2E 关闭静默窗口
+        return False
+    start, end = window
     if start < end:
         return start <= now.hour < end
     if start > end:
@@ -43,10 +46,10 @@ def seconds_until_wakeup(now: datetime | None = None) -> float:
     """
     if now is None:
         now = datetime.now()
-    quiet_end = config.QUIET_HOURS[1]  # 7
-    wakeup = now.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
     if not is_quiet_hours(now):
         return 0.0
+    quiet_end = config.QUIET_HOURS[1]  # e.g. 8
+    wakeup = now.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
     # If now is before wakeup today (e.g. 03:00), wakeup is today 07:00.
     # If now is after wakeup today but still quiet, that can't happen since
     # quiet window is 22:00-07:00; >=22 means wakeup is next day 07:00.
@@ -80,7 +83,7 @@ def check_quiet_hours(now: datetime | None = None) -> None:
     if is_quiet_hours(now):
         if now is None:
             now = datetime.now()
-        quiet_start, quiet_end = config.QUIET_HOURS  # (22, 7)
+        quiet_start, quiet_end = config.QUIET_HOURS  # e.g. (2, 8)
         raise QuietHoursError(
             f"Quiet hours active ({quiet_start}:00-{quiet_end}:00), current hour: {now.hour}"
         )
@@ -121,6 +124,12 @@ async def keyword_delay() -> None:
     low, high = config.KEYWORD_DELAY  # (60, 180)
     delay = random.uniform(low, high)
     await asyncio.sleep(delay)
+
+
+async def warmup_dwell() -> None:
+    """Random dwell time on one warmup page (config.WARMUP_DWELL)."""
+    low, high = config.WARMUP_DWELL  # (30, 90)
+    await asyncio.sleep(random.uniform(low, high))
 
 
 def should_pause_for_captcha(fail_count: int) -> bool:

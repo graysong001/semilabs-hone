@@ -2,7 +2,7 @@
 
 from semilabs_hone.modules.collection.anti_detect.fingerprint import (
     Fingerprint,
-    apply_fingerprint,
+    apply_to_page,
     assign_fingerprint,
     load_fingerprint,
 )
@@ -22,7 +22,7 @@ from semilabs_hone.modules.collection.anti_detect.ua_pool import get_ua
 
 __all__ = [
     "Fingerprint",
-    "apply_fingerprint",
+    "apply_to_page",
     "assign_fingerprint",
     "load_fingerprint",
     "generate_slide_track",

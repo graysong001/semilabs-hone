@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable
+from urllib.parse import urljoin
 
 from pydantic import ValidationError
 
@@ -17,10 +19,19 @@ from semilabs_hone.modules.collection.scrapers.base import (
     GROUP_POST_INTERACTIONS,
     BasePlatformScraper,
 )
-from semilabs_hone.modules.collection.scrapers.field_extract import extract_api, render_template
+from semilabs_hone.modules.collection.scrapers.field_extract import (
+    extract_api,
+    extract_dom,
+    render_template,
+)
 from semilabs_hone.modules.collection.scrapers.spec import PlatformSpec
 
 logger = logging.getLogger(__name__)
+
+#: How often the step loop checks the interception buffer.
+_XHR_POLL_INTERVAL = 0.05
+#: Keep the buffer bounded on long-running sessions.
+_XHR_BUFFER_LIMIT = 200
 
 
 # Map group strings to their Pydantic models
@@ -64,13 +75,22 @@ class GenericEngine(BasePlatformScraper):
         self.page: Any = None
         self._llm_fail_count = 0
         self._llm_fail_threshold = 3
+        self._fp_applied = False
+        self._armed_page: Any = None
+        self._xhr_buffer: list[dict] = []
         # Optional risk-probe callback set by the handler: async (page) -> hit|None.
         # When set, run_flow fires it after navigate/scroll/scroll_collect/click
         # and raises RiskProbeHit on a hit (PRD §4.4.1).
         self.on_risk: Callable[[Any], Awaitable[Any]] | None = None
 
-    async def _ensure_page(self) -> Any:
-        """Get or create a page from context. Mockable."""
+    async def ensure_page(self) -> Any:
+        """Return the working page, creating it from the context on first use.
+
+        Public because callers outside a flow need the same page the flow
+        will use (e.g. the warmup browse before scraping, design Layer 4).
+        Arms XHR interception on acquisition: a page's own load-time requests
+        fire before any step runs (USER_SOP G24).
+        """
         if self.page is None and self.ctx is not None:
             try:
                 pages = self.ctx.pages if hasattr(self.ctx, "pages") else []
@@ -79,7 +99,27 @@ class GenericEngine(BasePlatformScraper):
                 pass
         if self.page is None:
             raise RuntimeError("No page available; provide a context or set engine.page")
+        await self._apply_fingerprint_once()
+        self._arm_interception(self.page)
         return self.page
+
+    async def _apply_fingerprint_once(self) -> None:
+        """Apply the account's fixed fingerprint via CDP Emulation (once per page).
+
+        Layer 2 wiring (FIX_PLAN F6): no-op without an account; failures are
+        logged and swallowed so scraping is never blocked by fingerprinting.
+        """
+        if self._fp_applied or self.account is None:
+            return
+        self._fp_applied = True
+        try:
+            from semilabs_hone.modules.collection.anti_detect.fingerprint import (
+                apply_to_page,
+                load_fingerprint,
+            )
+            await apply_to_page(self.page, load_fingerprint(self.account))
+        except Exception as exc:
+            logger.warning("fingerprint apply failed (continuing without): %s", exc)
 
     async def run_flow(self, flow_name: str, **vars: Any) -> list:
         """Replay a flow's step chain and return extracted items."""
@@ -90,13 +130,16 @@ class GenericEngine(BasePlatformScraper):
 
         saved: dict[str, Any] = {}
         out: list = []
-        page = await self._ensure_page()
+        page = await self.ensure_page()
 
         for step in flow.steps:
             match step.type:
                 case "navigate":
-                    url = render_template(step.url or "", **vars)
-                    await page.goto(url)
+                    # A navigation invalidates everything captured so far:
+                    # leftovers from the previous page would otherwise be
+                    # consumed by this page's wait_xhr (USER_SOP G24).
+                    self._xhr_buffer.clear()
+                    await page.goto(self._absolute_url(step.url or "", **vars))
                     await self._probe(page)
 
                 case "input":
@@ -138,8 +181,12 @@ class GenericEngine(BasePlatformScraper):
 
                 case "extract":
                     resp = saved.get(step.from_ or "")
-                    if resp is not None and step.group and step.map:
-                        items = extract_api(resp, step.group, step.map)
+                    if step.group and step.map:
+                        items = extract_api(resp, step.group, step.map) if resp else []
+                        if not items:
+                            # Layer 5 (FIX_PLAN F10): XHR interception first;
+                            # empty/timed-out capture falls back to DOM extraction.
+                            items = await self._extract_dom_fallback(page, step.group, step.map)
                         validated = await self._validate_group(items, step.group)
                         out.extend(validated)
 
@@ -151,6 +198,39 @@ class GenericEngine(BasePlatformScraper):
                             logger.warning("Selector not found: %s", step.selector)
 
         return out
+
+    def _absolute_url(self, template: str, **vars: Any) -> str:
+        """Render a step URL template and resolve it against the platform base.
+
+        Recorded flows store site-relative paths ("/search?kw={keyword}");
+        a browser cannot navigate to those, so they are joined with
+        ``spec.base_url`` here — the single place navigation happens (G22).
+        """
+        rendered = render_template(template, **vars)
+        return urljoin(self.spec.base_url, rendered)
+
+    async def _extract_dom_fallback(self, page: Any, group: str, field_map: dict) -> list[dict]:
+        """DOM extraction fallback for an empty XHR capture (Layer 5).
+
+        Only selector maps (``css:``/``xpath:``) can be read from the DOM;
+        a JSONPath-only map has nothing to offer here and must not fabricate
+        an all-None row (USER_SOP G26). extract_dom is a pure HTML->dicts
+        function; the page IO lives here so the extractor stays sync.
+        """
+        if not any(str(expr).startswith(("css:", "xpath:")) for expr in field_map.values()):
+            logger.warning(
+                "No DOM selectors for group '%s'; cannot fall back (re-record the flow)",
+                group,
+            )
+            return []
+        try:
+            html = await page.content()
+        except Exception as exc:
+            logger.warning("DOM fallback: page.content() failed: %s", exc)
+            return []
+        if not isinstance(html, str) or not html:
+            return []
+        return extract_dom(html, group, field_map)
 
     async def _probe(self, page: Any) -> None:
         """Fire the risk probe if wired; raise RiskProbeHit on a hit.
@@ -242,7 +322,8 @@ class GenericEngine(BasePlatformScraper):
     async def _validate_group(self, items: list[dict], group: str) -> list:
         """Validate items against the Pydantic model for the group.
 
-        Injects `platform` from spec into ItemRef items.
+        Injects `platform` from spec into every group (ItemRef/Post/Comment)
+        so multi-platform rows never cross-tag (FIX_PLAN F7).
         On failure: try LLM fallback for individual items.
         """
         model = _GROUP_MODEL_MAP.get(group)
@@ -251,9 +332,8 @@ class GenericEngine(BasePlatformScraper):
 
         validated = []
         for item in items:
-            # Inject platform from spec for ItemRef
-            if group == GROUP_ITEM_REF:
-                item = {**item, "platform": self.spec.platform}
+            # Inject platform from spec for every group
+            item = {**item, "platform": self.spec.platform}
             try:
                 validated.append(model(**{k: v for k, v in item.items() if k in model.model_fields}))
             except (ValidationError, TypeError):
@@ -266,13 +346,32 @@ class GenericEngine(BasePlatformScraper):
 
         return validated
 
+    @staticmethod
+    def _llm_model() -> str:
+        """Lazy-read config.LLM_MODEL — single source of truth (FIX_PLAN F12)."""
+        try:
+            import config
+            return config.LLM_MODEL
+        except Exception:
+            return "claude-haiku-4-5-20251001"
+
     async def _llm_fallback(self, item: dict, group: str):
-        """Light LLM fallback — lazy import anthropic."""
+        """Light LLM fallback — lazy import anthropic.
+
+        Skipped when no credentials are configured: a scrape loop must not
+        fire unauthenticated API calls per item (USER_SOP G27).
+        """
         if self._llm_fail_count >= self._llm_fail_threshold:
             logger.warning(
                 "LLM fallback threshold reached (%d); suggest re-recording flow",
                 self._llm_fail_count,
             )
+            return None
+
+        import os
+
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            logger.debug("LLM fallback skipped: ANTHROPIC_API_KEY not set")
             return None
 
         try:
@@ -289,7 +388,7 @@ class GenericEngine(BasePlatformScraper):
                 f"Use null for missing fields.\n\nJSON:\n{json.dumps(item, ensure_ascii=False)}"
             )
             resp = await client.messages.create(
-                model="claude-haiku-4-5-20250414",
+                model=self._llm_model(),
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -351,54 +450,76 @@ class GenericEngine(BasePlatformScraper):
         method: str | None = None,
         timeout_ms: int = 15000,
     ) -> dict:
-        """Wait for an XHR response matching url_pattern.
+        """Return the body of an intercepted XHR matching `url_pattern`.
 
-        Uses page.on('response') + Future + wait_for timeout,
-        then falls back to DOM extraction.
+        Interception is armed when the page is acquired, not here: a page's
+        own load-time requests fire before any step runs, so a listener
+        attached at wait time would always miss them (USER_SOP G24). This
+        drains the buffer that the listener fills; an empty return means the
+        response never came and the caller should fall back to the DOM.
         """
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
+        self._arm_interception(page)
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:  # deadline-bounded poll
+            captured = self._take_captured(url_pattern, method)
+            if captured is not None:
+                return captured
+            await asyncio.sleep(_XHR_POLL_INTERVAL)
+        captured = self._take_captured(url_pattern, method)
+        if captured is not None:
+            return captured
+        logger.warning("XHR timeout for pattern '%s', falling back to DOM", url_pattern)
+        return {}
 
-        def _capture(response: Any) -> None:
-            try:
-                resp_url = response.url if hasattr(response, "url") else ""
-                resp_method = response.request.method if hasattr(response, "request") and hasattr(response.request, "method") else ""
-                logger.debug("_wait_xhr._capture: url=%s pattern_match=%s method=%s",
-                             resp_url[:60], url_pattern in resp_url, resp_method)
-                if url_pattern in resp_url:
-                    if method is None or resp_method.upper() == method.upper():
-                        if not fut.done():
-                            logger.debug("_wait_xhr._capture: setting future result")
-                            fut.set_result(response)
-            except Exception as e:
-                logger.warning("_wait_xhr._capture exception: %s", e)
-
-        page.on("response", _capture)
-        logger.debug("_wait_xhr: waiting for pattern '%s' (timeout=%dms)", url_pattern, timeout_ms)
+    def _arm_interception(self, page: Any) -> None:
+        """Start recording responses of `page` (idempotent per page)."""
+        if self._armed_page is page:
+            return
         try:
-            response = await asyncio.wait_for(
-                asyncio.shield(fut),
-                timeout=timeout_ms / 1000.0,
-            )
-            try:
-                return await response.json()
-            except Exception:
-                text = await response.text()
-                try:
-                    return json.loads(text)
-                except Exception:
-                    return {"raw": text}
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            logger.warning(
-                "XHR timeout for pattern '%s', falling back to DOM",
-                url_pattern,
-            )
-            return {}
-        finally:
-            try:
-                page.remove_listener("response", _capture)
-            except Exception:
-                pass
+            page.on("response", self._capture_response)
+        except Exception as exc:
+            logger.warning("Cannot listen for responses: %s", exc)
+            return
+        self._armed_page = page
+        self._xhr_buffer = []
+
+    def _capture_response(self, response: Any) -> None:
+        """Response listener: read the body off the event loop, then buffer it."""
+        try:
+            asyncio.get_running_loop().create_task(self._buffer_response(response))
+        except RuntimeError:  # no running loop (listener fired after teardown)
+            pass
+
+    async def _buffer_response(self, response: Any) -> None:
+        try:
+            url = response.url
+            body = await response.text()
+        except Exception as exc:
+            logger.debug("Skipping unreadable response: %s", exc)
+            return
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError):
+            data = {"raw": body}
+        request = getattr(response, "request", None)
+        self._xhr_buffer.append({
+            "url": url,
+            "method": (getattr(request, "method", "") or "").upper(),
+            "data": data,
+        })
+        if len(self._xhr_buffer) > _XHR_BUFFER_LIMIT:
+            del self._xhr_buffer[:-_XHR_BUFFER_LIMIT]
+
+    def _take_captured(self, url_pattern: str, method: str | None) -> dict | None:
+        """Pop the oldest buffered response matching pattern (+ method)."""
+        for index, entry in enumerate(self._xhr_buffer):
+            if url_pattern and url_pattern not in entry["url"]:
+                continue
+            if method and entry["method"] and entry["method"] != method.upper():
+                continue
+            self._xhr_buffer.pop(index)
+            return entry["data"]
+        return None
 
     def _locator_to_css(self, locator) -> str | None:
         """Convert a Locator to a CSS selector string."""
@@ -428,15 +549,24 @@ class GenericEngine(BasePlatformScraper):
         return result
 
     async def fetch_item(self, ref: ItemRef) -> ScrapedPost:
-        """Run detail flow and return a ScrapedPost."""
+        """Run the detail flow and return one merged ScrapedPost.
+
+        A recorded detail flow usually extracts several groups from the same
+        response (Post.body and Post.interactions); they describe the *same*
+        post, so they are merged instead of keeping only the first one
+        (USER_SOP G29: interaction counts used to be discarded).
+        """
         items = await self.run_flow("detail", item_id=ref.item_id)
-        if items:
-            item = items[0]
-            if isinstance(item, ScrapedPost):
-                return item
-            if isinstance(item, dict):
-                return ScrapedPost(**{k: v for k, v in item.items() if k in ScrapedPost.model_fields})
-        return ScrapedPost(platform_id=ref.item_id)
+        merged: dict[str, Any] = {"platform": self.spec.platform, "platform_id": ref.item_id}
+        for item in items:
+            fields = item.model_dump() if isinstance(item, ScrapedPost) else item
+            if not isinstance(fields, dict):
+                continue
+            merged.update({
+                key: value for key, value in fields.items()
+                if value not in (None, [], "") and key in ScrapedPost.model_fields
+            })
+        return ScrapedPost(**merged)
 
     async def fetch_comments(self, ref: ItemRef) -> list[ScrapedComment]:
         """Run comments flow and return list of ScrapedComment."""
