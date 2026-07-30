@@ -317,6 +317,22 @@ def test_base_has_heartbeat_indicator(client: TestClient):
     assert "/api/heartbeat" in resp.text
 
 
+def test_dashboard_db_error_renders_zero(client: TestClient, monkeypatch):
+    """dashboard.py: DB 异常 → 指标全零兑底渲染 200 (except Exception 分支覆盖)."""
+    import semilabs_hone.core.models.db as db_mod
+
+    class _BoomSession:
+        def query(self, *a, **k):
+            raise RuntimeError("db boom")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(db_mod, "get_session", lambda: _BoomSession())
+    resp = client.get("/")
+    assert resp.status_code == 200
+
+
 def test_app_js_has_htmx_error_listeners(client: TestClient):
     """T36: app.js registers htmx:responseError + htmx:sendError → red Toast."""
     resp = client.get("/static/app.js")
@@ -623,11 +639,11 @@ def test_task_actions_fragment_need_human(client: TestClient):
 
 
 def test_task_actions_fragment_completed(client: TestClient):
-    """T38: completed → 查看 + 导出 + 删除 (v2 图标按钮组)."""
+    """T38: completed → 查看 + 导出 + 删除 (v2 图标按钮组, 统一确认弹窗)."""
     task_id, _ = _make_task(client, status="completed")
     resp = client.get(f"/api/tasks/{task_id}/actions")
     assert "exportCsv" in resp.text
-    assert 'hx-delete="/api/tasks/' in resp.text
+    assert "confirmDeleteTask" in resp.text
 
 
 def test_task_actions_fragment_pending_placeholder(client: TestClient):

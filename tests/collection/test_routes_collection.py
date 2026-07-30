@@ -198,6 +198,87 @@ class TestPostsRoutes:
         resp = client.get("/posts/nonexistent-uuid")
         assert resp.status_code == 404
 
+    def test_item_detail_fragment_drawer_mode(self, client, db_session):
+        """GET /api/items/{id}/detail — 抽屉片段: in_drawer 关闭条 + 内容卡 (统一交互范式)."""
+        item = _seed_item(db_session, platform_id="d2", title="抽屉标题")
+        resp = client.get(f"/api/items/{item.id}/detail")
+        assert resp.status_code == 200
+        assert "抽屉标题" in resp.text
+        assert "closeDrawer" in resp.text  # 抽屉吸顶关闭条
+        assert "返回列表" not in resp.text  # 整页专属元素不应出现在片段里
+
+    def test_item_detail_fragment_404(self, client):
+        resp = client.get("/api/items/nonexistent-uuid/detail")
+        assert resp.status_code == 404
+
+
+# ─── 路由层容错分支 (except Exception 兜底) + 过滤参数覆盖 ─────────────────
+
+class _BoomSession:
+    """get_session 注入器: query 即抛, 覆盖路由层 except Exception 兜底."""
+
+    def query(self, *args, **kwargs):
+        raise RuntimeError("db boom")
+
+    def close(self):
+        pass
+
+
+class TestRoutesFaultTolerance:
+    def test_posts_filter_by_task_id(self, client, db_session):
+        """posts.py: ?task_id= 过滤分支."""
+        _seed_item(db_session, platform_id="tf1", title="任务过滤", task_id="task-abc")
+        resp = client.get("/posts?task_id=task-abc")
+        assert resp.status_code == 200
+        assert "任务过滤" in resp.text
+
+    def test_posts_list_db_error_renders_empty(self, client, monkeypatch):
+        """posts.py: 主查询异常 → items=[] 兜底 (running_count 走选择性 mock)."""
+        import semilabs_hone.core.models.db as db_mod
+        from semilabs_hone.core.models.task import CollectionTask
+
+        class _CountQuery:
+            def filter(self, *a, **k):
+                return self
+
+            def count(self):
+                return 0
+
+        class _SelectiveBoom:
+            def query(self, model):
+                if model is CollectionTask:
+                    return _CountQuery()
+                raise RuntimeError("db boom")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(db_mod, "get_session", lambda: _SelectiveBoom())
+        resp = client.get("/posts")
+        assert resp.status_code == 200
+
+    def test_post_detail_db_error_renders_fallback(self, client, monkeypatch):
+        """posts.py: detail 查询异常 → post=None 兜底渲染 200."""
+        import semilabs_hone.core.models.db as db_mod
+        monkeypatch.setattr(db_mod, "get_session", lambda: _BoomSession())
+        resp = client.get("/posts/any-id")
+        assert resp.status_code == 200
+        assert "无标题" in resp.text
+
+    def test_comments_fragment_db_error_returns_empty(self, client, monkeypatch):
+        """posts.py: _comments_fragment 查询异常 → 空评论置灰行."""
+        import semilabs_hone.core.models.db as db_mod
+        from semilabs_hone.modules.collection.routes import posts as posts_mod
+        monkeypatch.setattr(db_mod, "get_session", lambda: _BoomSession())
+        html = posts_mod._comments_fragment("any-id")
+        assert "暂无评论" in html
+
+    def test_export_unknown_task_400(self, client):
+        """export.py: 无数据任务导出 → EmptyExportError → 400 JSON (PRD §4.6)."""
+        resp = client.get("/api/export?task_id=nonexistent-task")
+        assert resp.status_code == 400
+        assert resp.json()["ok"] is False
+
 
 # ─── tasks helpers + endpoints ───────────────────────────────────────────
 
