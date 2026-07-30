@@ -1,10 +1,13 @@
 <!-- 侧边栏: 四大业务板块 (ui_design_spec_v2 §5) -->
 <aside class="w-[240px] bg-app border-r border-gray-700/60 flex flex-col fixed top-0 left-0 bottom-0 z-50">
-  <div class="h-[60px] flex items-center px-5 border-b border-gray-700/50">
-    <!-- 品牌区: 图片 logo (透明底，深色字形已提亮为白适配暗色侧栏，渐变线/紫点保留原色) —
-         图片方案同时绕开 vendored 字体无中文字形的渲染割裂问题 -->
-    <img src="/static/img/logo.png" alt="SemiLabs 内容工厂"
-         class="h-9 w-auto select-none" draggable="false">
+  <div class="h-[60px] flex items-center px-4 border-b border-gray-700/50">
+    <!-- 品牌区: 终端卡片风 — 常驻品牌色淡底+圆角边框，与菜单项(无底色, hover 才亮)形成明确层级;
+         CLI 文字 logo 保留 ❯ 提示符 + 闪烁光标 (vendored 字体无中文字形, font-mono 等宽栈混排) -->
+    <div class="w-full flex items-center px-3 py-1.5 rounded-md bg-brand/10 border border-brand/25 select-none">
+      <span class="font-mono text-sm font-bold text-white tracking-wider">
+        <span class="text-success">❯</span> SemiLabs-内容工厂<span class="text-brand animate-pulse">_</span>
+      </span>
+    </div>
   </div>
   <nav class="flex-1 py-4 overflow-y-auto">
     <!-- 模块一：素材抓取 -->
