@@ -15,7 +15,9 @@ python3 scripts/check_constraints.py
 
 echo "=== 2/2 全量回归 pytest + 覆盖率门 (≥85%) ==="
 # 显式拦截退出码: 覆盖率 FAIL 时绝不能滑到 ✅ (2026-07-29 实测漏拦)
-if ! python3 -m pytest -q --cov=semilabs_hone --cov-report=term-missing --cov-fail-under=85; then
+# --cov-precision=2 必传: 默认 precision=0 会把 84.53 round 成 85, 退出码判定
+# (round(total,0)<85→False) 与 FAIL 打印 (84.53<85→True) 不一致, 假绿放行。
+if ! python3 -m pytest -q --cov=semilabs_hone --cov-report=term-missing --cov-fail-under=85 --cov-precision=2; then
     echo "❌ loop_gate 失败: 测试或覆盖率门 (≥85%) 未过"
     exit 1
 fi

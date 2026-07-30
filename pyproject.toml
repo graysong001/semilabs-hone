@@ -57,3 +57,5 @@ omit = ["*/tests/*"]
 [tool.coverage.report]
 fail_under = 85
 show_missing = true
+# 两位精度: 默认 precision=0 会 round(84.53)→85 使 fail_under 判定假绿
+precision = 2
