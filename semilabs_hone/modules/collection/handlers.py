@@ -30,6 +30,27 @@ _WORKER_CTX: Any = None
 # engine can apply the account's fixed fingerprint per page.
 _WORKER_ACCOUNT: Any = None
 
+#: Bounded retry for transient network failures (goto timeout / connection
+#: reset): environmental jitter worth retrying — unlike risk-control signals
+#: (RiskProbeHit) and domain errors (SkimError), which must never be retried
+#: (account-protection redline). Tests zero the backoff via monkeypatch.
+_NETWORK_BACKOFF_S = (2.0, 4.0)
+_NETWORK_MAX_SEARCH_RETRIES = 2
+_NETWORK_MAX_DETAIL_RETRIES = 1
+
+
+def _is_transient_network_error(exc: Exception) -> bool:
+    """Classify transient network failures worth a bounded retry.
+
+    Covers builtin/asyncio timeouts and connection resets; Playwright's own
+    TimeoutError is matched by class name to avoid a hard playwright import
+    here. Anything risk-control-flavoured arrives as RiskProbeHit instead and
+    never reaches this classifier.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return True
+    return type(exc).__name__ == "TimeoutError"
+
 
 def set_worker_resources(ctx: Any, account: Any = None) -> None:
     """Publish the worker's live BrowserContext + bound account (F1).
@@ -725,6 +746,7 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
         # human-interrupted task completed.
         item_refs = []
         search_done = False
+        net_retries = 0
         while not search_done:
             try:
                 item_refs = await engine.search(keyword, sort)
@@ -752,6 +774,18 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 from semilabs_hone.core.utils.retry import SkimError
                 if isinstance(exc, SkimError):
                     raise
+                # Transient network jitter (goto timeout / conn reset): bounded
+                # retry with backoff before giving up the keyword (P1 修复:
+                # 网络类故障零重试白白损失成功率).
+                if _is_transient_network_error(exc) and net_retries < _NETWORK_MAX_SEARCH_RETRIES:
+                    net_retries += 1
+                    progress_cb("network_retry", {
+                        "task_id": task_id, "stage": "search",
+                        "keyword": keyword, "attempt": net_retries,
+                        "error": str(exc),
+                    })
+                    await asyncio.sleep(_NETWORK_BACKOFF_S[net_retries - 1])
+                    continue
                 logger.warning(f"Search failed for '{keyword}': {exc}")
                 item_refs = []
                 search_done = True  # non-risk failure → empty result, next keyword
@@ -818,6 +852,7 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
             # `while not done` (not bare `while True`) per the §7.4 linter: exits
             # on success (done=True) or skip (break); only resumes via continue.
             done = False
+            net_retries = 0
             while not done:
                 try:
                     post = await engine.fetch_item(ref)
@@ -843,6 +878,18 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                     from semilabs_hone.core.utils.retry import SkimError
                     if isinstance(exc, SkimError):
                         raise
+                    # Transient network jitter: one bounded retry before the
+                    # single-item skip (T20 keeps its meaning for persistent
+                    # failures).
+                    if _is_transient_network_error(exc) and net_retries < _NETWORK_MAX_DETAIL_RETRIES:
+                        net_retries += 1
+                        progress_cb("network_retry", {
+                            "task_id": task_id, "stage": "detail",
+                            "platform_id": platform_id, "attempt": net_retries,
+                            "error": str(exc),
+                        })
+                        await asyncio.sleep(_NETWORK_BACKOFF_S[0])
+                        continue
                     # T20 (PRD 8.4 场景4.1): single-item skip + count — the
                     # note_index already advanced (consumed); keep going.
                     progress_cb("detail_skip_error", {

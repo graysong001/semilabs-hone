@@ -359,7 +359,8 @@ class TestHandlerScrapeTaskSkipCount:
 
         async def mock_fetch_item(ref):
             call_count["n"] += 1
-            if call_count["n"] == 1:
+            # 持续失败的条目: 瞬时网络重试(1次)后仍失败 → 跳过 (T20 语义保留)
+            if ref.item_id == "bad":
                 raise TimeoutError("page.goto timed out")
             return ScrapedPost(platform_id=ref.item_id, title="ok",
                                content="c", author_name="A")
@@ -393,8 +394,167 @@ class TestHandlerScrapeTaskSkipCount:
             }, cap)
             assert result["status"] == "ok"
             assert result["posts_scraped"] == 1  # only the good ref stored
+            # bad 被重试 1 次后仍失败才跳过 (bad×2 + good×1)
+            assert call_count["n"] == 3
             # skip surfaced as a progress event (PRD 8.4 场景4.1)
             assert any(m == "detail_skip_error" for m, _ in progress)
+        finally:
+            _restore_handler_env(h_mod, orig)
+
+
+# ---------------------------------------------------------------------------
+# 网络类瞬时故障有限退避 (P1 修复: 网络抖动零重试白丢成功率)
+# ---------------------------------------------------------------------------
+
+class TestNetworkTransientRetry:
+    async def test_search_transient_timeout_retries_then_succeeds(self, db_session, tmp_data_dir, monkeypatch):
+        """search 首次 TimeoutError → 退避重试 → 成功 (不再直接空结果放过)."""
+        from semilabs_hone.core.models.schemas import ScrapedPost
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        monkeypatch.setattr(h_mod, "_NETWORK_BACKOFF_S", (0, 0))
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        search_calls = {"n": 0}
+
+        async def mock_search(keyword, sort):
+            search_calls["n"] += 1
+            if search_calls["n"] == 1:
+                raise TimeoutError("page.goto timed out")
+            return [FakeRef("n1")]
+
+        async def mock_fetch_item(ref):
+            return ScrapedPost(platform_id=ref.item_id, title="t", content="c")
+
+        async def mock_fetch_comments(ref):
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-net-retry",
+            }, cap)
+            assert result["status"] == "ok"
+            assert result["posts_scraped"] == 1
+            assert search_calls["n"] == 2
+            assert any(m == "network_retry" for m, _ in progress)
+        finally:
+            _restore_handler_env(h_mod, orig)
+
+    async def test_search_persistent_timeout_gives_up_after_cap(self, db_session, tmp_data_dir, monkeypatch):
+        """search 持续超时 → 重试 2 次后空结果放过 (有界, 不死循环)."""
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        monkeypatch.setattr(h_mod, "_NETWORK_BACKOFF_S", (0, 0))
+
+        search_calls = {"n": 0}
+
+        async def mock_search(keyword, sort):
+            search_calls["n"] += 1
+            raise ConnectionError("connection reset by peer")
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-net-cap",
+            }, cap)
+            assert result["status"] == "ok"
+            assert result["posts_scraped"] == 0
+            # 1 次原始 + 2 次重试 = 3 次调用
+            assert search_calls["n"] == 3
+            retries = [d for m, d in progress if m == "network_retry"]
+            assert len(retries) == 2
+        finally:
+            _restore_handler_env(h_mod, orig)
+
+    async def test_fetch_item_transient_error_retries_once(self, db_session, tmp_data_dir, monkeypatch):
+        """fetch_item 首次 ConnectionError → 重试 1 次成功 (不再直接跳过该条)."""
+        from semilabs_hone.core.models.schemas import ScrapedPost
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        monkeypatch.setattr(h_mod, "_NETWORK_BACKOFF_S", (0, 0))
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        fetch_calls = {"n": 0}
+
+        async def mock_fetch_item(ref):
+            fetch_calls["n"] += 1
+            if fetch_calls["n"] == 1:
+                raise ConnectionError("connection reset")
+            return ScrapedPost(platform_id=ref.item_id, title="t", content="c")
+
+        async def mock_search(keyword, sort):
+            return [FakeRef("n1")]
+
+        async def mock_fetch_comments(ref):
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-detail-retry",
+            }, cap)
+            assert result["status"] == "ok"
+            assert result["posts_scraped"] == 1
+            assert fetch_calls["n"] == 2
+            assert any(m == "network_retry" for m, _ in progress)
+            # 重试成功了 — 不发生 skip
+            assert not any(m == "detail_skip_error" for m, _ in progress)
         finally:
             _restore_handler_env(h_mod, orig)
 
