@@ -56,7 +56,7 @@ def _seed_active_account(request, client):
     sess = get_session()
     try:
         if sess.query(Account).filter(Account.id == 1).first() is None:
-            acct = Account(id=1, platform="xiaohongshu", nickname="t",
+            acct = Account(id=1, platform="xiaohongshu", remark="t",
                            status="active")
             sess.add(acct)
             sess.commit()

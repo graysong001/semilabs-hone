@@ -67,12 +67,21 @@ class Flow(BaseModel):
 
 
 class LoginSpec(BaseModel):
-    """Login configuration for a platform."""
+    """Login configuration for a platform.
+
+    [契约变更 2026-07-13 S10] 加 identity_api / identity_map 两字段（v2 移植）：
+    - identity_api: 提取平台真实身份的接口路径（GET，返回 JSON，需登录态）
+    - identity_map: 点分路径提取字典 {user_id: "...", nickname: "..."}
+    登录/cookie 验证成功后 handlers 用它们回写 Account.platform_user_id /
+    platform_nickname；未配置则跳过提取（不阻塞登录）。
+    """
     type: Literal["qrcode", "password", "sms", "oauth"] = "qrcode"
     login_url: str | None = None
     success_detect: str | None = None
     success_pattern: str | None = None
     timeout: int = 120
+    identity_api: str | None = None
+    identity_map: dict[str, str] | None = None
 
 
 class PlatformSpec(BaseModel):

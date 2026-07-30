@@ -119,7 +119,13 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
         else:
             recovered = _try_cookie_recovery(account_id, platform, progress_cb)
         if recovered:
-            _update_account_status(account_id, "active", progress_cb)
+            identity = await _extract_platform_identity(_WORKER_CTX, platform)
+            _update_account_status(
+                account_id, "active", progress_cb,
+                platform_user_id=(identity or {}).get("platform_user_id"),
+                platform_nickname=(identity or {}).get("platform_nickname"),
+                login_method="cookie_recovery",
+            )
             progress_cb("login_success", {"account_id": account_id, "method": "cookie_recovery"})
             return {
                 "status": "ok",
@@ -132,7 +138,13 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
         progress_cb("login_qr_start", {"account_id": account_id})
         qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
-            _update_account_status(account_id, "active", progress_cb)
+            identity = await _extract_platform_identity(_WORKER_CTX, platform)
+            _update_account_status(
+                account_id, "active", progress_cb,
+                platform_user_id=(identity or {}).get("platform_user_id"),
+                platform_nickname=(identity or {}).get("platform_nickname"),
+                login_method="qrcode",
+            )
             return {
                 "status": "ok",
                 "login_method": "qrcode",
@@ -151,7 +163,26 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
                 _import_cookies(account_id, platform, cookies, progress_cb)
                 imported = True
             if imported:
-                _update_account_status(account_id, "active", progress_cb)
+                identity = await _extract_platform_identity(_WORKER_CTX, platform)
+                # S10: 同平台身份已绑定其他账号 → 拒绝静默合并（WS 事件 + 失败）
+                if identity and identity.get("platform_user_id"):
+                    conflict_id = _find_conflicting_account(
+                        platform, identity["platform_user_id"], exclude_id=account_id)
+                    if conflict_id is not None:
+                        progress_cb("cookie_import_conflict", {
+                            "account_id": account_id,
+                            "existing_id": conflict_id,
+                            "platform_user_id": identity["platform_user_id"],
+                        })
+                        from semilabs_hone.core.utils.retry import LoginError
+                        raise LoginError(
+                            f"该平台身份已绑定账号 #{conflict_id}，请改用该账号或先删除它")
+                _update_account_status(
+                    account_id, "active", progress_cb,
+                    platform_user_id=(identity or {}).get("platform_user_id"),
+                    platform_nickname=(identity or {}).get("platform_nickname"),
+                    login_method="cookie_import",
+                )
                 progress_cb("login_success", {"account_id": account_id, "method": "cookie_import"})
                 return {
                     "status": "ok",
@@ -164,7 +195,13 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
         progress_cb("login_qr_start", {"account_id": account_id})
         qr_result = await _do_qr_login(platform, account_id, progress_cb)
         if qr_result:
-            _update_account_status(account_id, "active", progress_cb)
+            identity = await _extract_platform_identity(_WORKER_CTX, platform)
+            _update_account_status(
+                account_id, "active", progress_cb,
+                platform_user_id=(identity or {}).get("platform_user_id"),
+                platform_nickname=(identity or {}).get("platform_nickname"),
+                login_method="qrcode",
+            )
             return {
                 "status": "ok",
                 "login_method": "qrcode",
@@ -192,6 +229,93 @@ def _try_cookie_recovery(account_id: int | None, platform: str, progress_cb: Cal
     except Exception:
         pass
     return False
+
+
+async def _extract_platform_identity(ctx: Any, platform: str) -> dict | None:
+    """从平台 identity_api 提取 {platform_user_id, platform_nickname}（v2 S10 移植）。
+
+    登录/导入/验证成功后调用，回写 Account.platform_user_id /
+    platform_nickname（三标识中的平台真实身份，自动提取不可手改）。
+    返回 None 表示未配置 identity_api / 无 ctx / 提取失败——不阻塞登录成功，
+    只留空。
+    """
+    if ctx is None:
+        return None
+    try:
+        from semilabs_hone.modules.collection.scrapers.registry import get as reg_get
+        spec, _ = reg_get(platform)
+        identity_api = spec.login.identity_api
+        identity_map = spec.login.identity_map
+        if not identity_api or not identity_map:
+            return None
+        url = (spec.base_url or "") + identity_api
+        page = await _worker_page()
+        if page is None:
+            return None
+        body = await page.evaluate(
+            """async (url) => {
+                try {
+                    const r = await fetch(url, {credentials: 'include'});
+                    if (!r.ok) return null;
+                    return await r.json();
+                } catch (e) {
+                    return null;
+                }
+            }""",
+            url,
+        )
+        if not isinstance(body, dict):
+            return None
+
+        def _resolve(obj: Any, path: str) -> Any:
+            cur = obj
+            for p in path.split("."):
+                if cur is None:
+                    return None
+                if isinstance(cur, dict):
+                    cur = cur.get(p)
+                else:
+                    return None
+            return cur
+
+        out = {}
+        for key, path in identity_map.items():
+            out[key] = _resolve(body, path)
+        if not out.get("user_id"):
+            return None
+        return {
+            "platform_user_id": str(out["user_id"]),
+            "platform_nickname": str(out["nickname"]) if out.get("nickname") else None,
+        }
+    except Exception as exc:
+        logger.warning(f"identity extract failed: {exc}")
+        return None
+
+
+def _find_conflicting_account(platform: str, platform_user_id: str, exclude_id: int | None = None) -> int | None:
+    """检查同 platform+platform_user_id 是否已有其他账号（v2 S10 移植）。
+
+    返回冲突账号 id，无冲突返回 None。用于导入 cookie 时拒绝静默合并
+    （UNIQUE(platform, platform_user_id) 的应用层前置检查）。
+    """
+    try:
+        from semilabs_hone.core.models.db import get_session
+        from semilabs_hone.core.models.account import Account
+        sess = get_session()
+        try:
+            q = sess.query(Account).filter(
+                Account.platform == platform,
+                Account.platform_user_id == platform_user_id,
+            )
+            if exclude_id is not None:
+                q = q.filter(Account.id != exclude_id)
+            existing = q.first()
+            return existing.id if existing else None
+        finally:
+            sess.close()
+    except Exception as exc:
+        logger.warning(f"conflict check failed: {exc}")
+        return None
 
 
 async def _session_check(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
@@ -366,8 +490,19 @@ def _import_cookies(account_id: int | None, platform: str, cookies: list, progre
     progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(cookies)})
 
 
-def _update_account_status(account_id: int | None, status: str, progress_cb: Callable) -> None:
-    """Update account status in the database."""
+def _update_account_status(
+    account_id: int | None,
+    status: str,
+    progress_cb: Callable,
+    platform_user_id: str | None = None,
+    platform_nickname: str | None = None,
+    login_method: str | None = None,
+) -> None:
+    """Update account status in the database.
+
+    [v2 S10 移植] 可选回写平台身份（platform_user_id / platform_nickname）
+    与 login_method——登录/验证成功路径由 handler 提取后传入。
+    """
     try:
         from semilabs_hone.core.models.db import get_session
         from semilabs_hone.core.models.account import Account
@@ -377,8 +512,18 @@ def _update_account_status(account_id: int | None, status: str, progress_cb: Cal
             if acct:
                 acct.status = status
                 acct.last_login_at = datetime.now(timezone.utc)
+                if platform_user_id is not None:
+                    acct.platform_user_id = platform_user_id
+                if platform_nickname is not None:
+                    acct.platform_nickname = platform_nickname
+                if login_method is not None:
+                    acct.login_method = login_method
                 sess.commit()
-                progress_cb("account_status_updated", {"account_id": account_id, "status": status})
+                progress_cb("account_status_updated", {
+                    "account_id": account_id,
+                    "status": status,
+                    "platform_user_id": platform_user_id,
+                })
         finally:
             sess.close()
     except Exception as exc:
@@ -407,7 +552,16 @@ async def handler_validate(payload: dict, progress_cb: Callable) -> dict:
     # on-disk cookie heuristic otherwise (tests / web-side calls).
     if _WORKER_CTX is not None:
         valid = await _session_check(platform, account_id, progress_cb)
-        _update_account_status(account_id, "active" if valid else "inactive", progress_cb)
+        if valid:
+            # S10: 验证成功同样刷新平台身份（昵称可能已改）
+            identity = await _extract_platform_identity(_WORKER_CTX, platform)
+            _update_account_status(
+                account_id, "active", progress_cb,
+                platform_user_id=(identity or {}).get("platform_user_id"),
+                platform_nickname=(identity or {}).get("platform_nickname"),
+            )
+        else:
+            _update_account_status(account_id, "inactive", progress_cb)
     else:
         valid = _check_account_valid(account_id, platform, progress_cb)
 

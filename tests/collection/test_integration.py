@@ -216,7 +216,7 @@ class TestHandlerScrapeTask:
 
         # Create account
         from semilabs_hone.core.models.account import Account
-        acct = Account(platform="xiaohongshu", nickname="test")
+        acct = Account(platform="xiaohongshu", remark="test")
         db_session.add(acct)
         db_session.commit()
 
@@ -640,7 +640,8 @@ class TestHandlerLogin:
 
         h_mod._try_cookie_recovery = lambda *a: False
         h_mod._do_qr_login = _qr_stub
-        h_mod._update_account_status = lambda *a: None
+        # S10: 真实函数带 platform_user_id/login_method kwargs, stub 需吞掉
+        h_mod._update_account_status = lambda *a, **k: None
 
         try:
             result = await h_mod.handler_login(
@@ -686,18 +687,19 @@ class TestRoutesAccounts:
 
         resp = client.post(
             "/api/accounts",
-            data={"platform": "xiaohongshu", "nickname": "test_account"},
+            data={"platform": "xiaohongshu", "remark": "test_account"},
             follow_redirects=False,
         )
         assert resp.status_code in (200, 303, 307)
 
     def test_get_tasks_new_200(self, db_session, tmp_data_dir):
-        """GET /tasks/new returns 200."""
+        """GET /tasks/new 已随 v2 任务大厅下线（Stage 3）——独立建单页删除，
+        建单走大厅弹窗。此处断言路由确实不复存在（404）。"""
         app = _make_app()
         client = TestClient(app)
 
         resp = client.get("/tasks/new")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
 
     def test_get_posts_200(self, db_session, tmp_data_dir):
         """GET /posts returns 200."""

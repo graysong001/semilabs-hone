@@ -13,6 +13,11 @@ login:
   success_detect: url_change
   success_pattern: "^/$"
   timeout: 120
+  # [契约变更 2026-07-13 S10] 登录成功后提取平台真实身份（三标识）
+  identity_api: /api/sns/web/v1/user/selfinfo
+  identity_map:
+    user_id: "data.user.id"
+    nickname: "data.user.nickname"
 
 flows:
   search:

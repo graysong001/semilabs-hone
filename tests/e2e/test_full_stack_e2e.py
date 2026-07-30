@@ -60,7 +60,7 @@ def _active_account(db_session, platform: str) -> int:
 
     fp = assign_fingerprint()
     acct = Account(
-        platform=platform, nickname="fullstack", status="active",
+        platform=platform, remark="fullstack", status="active",
         viewport_w=fp.viewport["width"], viewport_h=fp.viewport["height"],
         color_scheme=fp.color_scheme, timezone=fp.timezone, locale=fp.locale,
     )

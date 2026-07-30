@@ -36,9 +36,9 @@ def _fake_ipc(monkeypatch):
     monkeypatch.setattr(acc, "_ipc", lambda: (_FakeClient, IPCRequest))
 
 
-def _seed_account(db_session, *, platform="xiaohongshu", nickname="acc"):
+def _seed_account(db_session, *, platform="xiaohongshu", remark="acc"):
     from semilabs_hone.core.models.account import Account
-    a = Account(platform=platform, nickname=nickname)
+    a = Account(platform=platform, remark=remark)
     db_session.add(a); db_session.commit()
     return a.id
 
@@ -50,21 +50,38 @@ class TestAccountsRoutes:
         resp = client.get("/accounts")
         assert resp.status_code == 200
 
-    def test_create_account_returns_table_fragment(self, client):
-        # G3: write ops answer with the accounts-table fragment for HTMX swap.
+    def test_create_account_redirects_and_shows_remark(self, client):
+        # v2 S10: create 是整页表单 → 303 重定向; remark 必填（原 nickname）。
         resp = client.post("/api/accounts",
-                           data={"platform": "xiaohongshu", "nickname": "n1"})
-        assert resp.status_code == 200
-        assert 'id="accounts-list"' in resp.text
-        assert "n1" in resp.text
+                           data={"platform": "xiaohongshu", "remark": "n1"},
+                           follow_redirects=False)
+        assert resp.status_code == 303
+        page = client.get("/accounts")
+        assert "n1" in page.text
+
+    def test_create_account_requires_remark(self, client):
+        resp = client.post("/api/accounts",
+                           data={"platform": "xiaohongshu"},
+                           follow_redirects=False)
+        assert resp.status_code == 303
+        assert "error=remark_required" in resp.headers["location"]
+
+    def test_create_account_legacy_nickname_field_compat(self, client):
+        # 兼容旧 form 的 nickname 字段（映射为 remark）。
+        resp = client.post("/api/accounts",
+                           data={"platform": "xiaohongshu", "nickname": "old"},
+                           follow_redirects=False)
+        assert resp.status_code == 303
+        assert "error" not in resp.headers.get("location", "")
 
     def test_create_account_assigns_fingerprint_and_profile(self, client, db_session):
         # F6: creation draws the one-account-one-fixed fingerprint + profile dir.
         resp = client.post("/api/accounts",
-                           data={"platform": "xiaohongshu", "nickname": "fp"})
-        assert resp.status_code == 200
+                           data={"platform": "xiaohongshu", "remark": "fp"},
+                           follow_redirects=False)
+        assert resp.status_code == 303
         from semilabs_hone.core.models.account import Account
-        acct = db_session.query(Account).filter(Account.nickname == "fp").first()
+        acct = db_session.query(Account).filter(Account.remark == "fp").first()
         assert acct is not None
         assert acct.profile_dir
         assert acct.viewport_w > 0 and acct.viewport_h > 0
@@ -73,15 +90,15 @@ class TestAccountsRoutes:
         aid = _seed_account(db_session)
         resp = client.delete(f"/api/accounts/{aid}")
         assert resp.status_code == 200
-        assert 'id="accounts-list"' in resp.text
+        assert resp.json()["ok"] is True
         from semilabs_hone.core.models.account import Account
         assert db_session.query(Account).filter(Account.id == aid).first() is None
 
-    def test_delete_missing_account_is_idempotent(self, client):
-        # G3: delete answers with the fragment even when the row is gone.
+    def test_delete_missing_account_404(self, client):
+        # v2 S10: JSON 契约，缺失 → 404。
         resp = client.delete("/api/accounts/999999")
-        assert resp.status_code == 200
-        assert 'id="accounts-list"' in resp.text
+        assert resp.status_code == 404
+        assert resp.json()["ok"] is False
 
     def test_login_account_submits_ipc(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
@@ -102,9 +119,11 @@ class TestAccountsRoutes:
         aid = _seed_account(db_session)
         resp = client.post(
             "/api/accounts/import-cookies",
-            data={"account_id": aid, "cookies": '[{"name":"sid"}]'})
+            data={"account_id": aid,
+                  "cookies": '[{"name":"sid","value":"x","domain":".xiaohongshu.com"}]'})
         assert resp.status_code == 200
-        assert 'id="accounts-list"' in resp.text
+        body = resp.json()
+        assert body["ok"] is True and body["status"] == "submitted"
 
     def test_import_cookies_invalid_json(self, client, db_session, monkeypatch):
         _fake_ipc(monkeypatch)
@@ -342,3 +361,114 @@ class TestTasksPauseDeleteActivate:
         resp = client.post(f"/api/tasks/{tid}/activate-browser")
         assert resp.status_code == 501
         assert resp.json()["ok"] is False
+
+
+# ─── accounts v2 S10 endpoints ───────────────────────────────────────────
+
+class TestAccountsV2Endpoints:
+    """v2 S10 三标识 + 行级编辑端点（Stage 5 移植）。"""
+
+    def test_list_accounts_json(self, client, db_session):
+        aid = _seed_account(db_session, remark="json-acc")
+        resp = client.get("/api/accounts")
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert isinstance(rows, list)
+        mine = [r for r in rows if r["id"] == aid]
+        assert mine and mine[0]["remark"] == "json-acc"
+        assert "platform_user_id" in mine[0] and "platform_nickname" in mine[0]
+
+    def test_get_account_json_and_404(self, client, db_session):
+        aid = _seed_account(db_session, remark="detail")
+        resp = client.get(f"/api/accounts/{aid}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True and body["remark"] == "detail"
+        assert client.get("/api/accounts/999999").status_code == 404
+
+    def test_edit_dialog_renders(self, client, db_session):
+        aid = _seed_account(db_session, remark="dlg")
+        resp = client.get(f"/api/accounts/{aid}/edit")
+        assert resp.status_code == 200
+        assert "account-edit-dialog" in resp.text
+        assert 'value="dlg"' in resp.text
+        assert resp.headers["content-type"].startswith("text/html")
+        assert client.get("/api/accounts/999999/edit").status_code == 404
+
+    def test_edit_post_remark_only(self, client, db_session):
+        aid = _seed_account(db_session, remark="before")
+        resp = client.post(f"/api/accounts/{aid}/edit", data={"remark": "after"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True and body["remark_changed"] is True
+        from semilabs_hone.core.models.account import Account
+        acct = db_session.query(Account).filter(Account.id == aid).first()
+        assert acct.remark == "after"
+
+    def test_edit_post_invalid_cookies_400(self, client, db_session):
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/edit",
+                           data={"cookies": '[{"name":"x"}]'})  # 缺 value/domain
+        assert resp.status_code == 400
+        assert resp.json()["ok"] is False
+
+    def test_edit_post_with_cookies_saves_file_and_submits(
+            self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        aid = _seed_account(db_session)
+        payload = '[{"name":"sid","value":"v","domain":".xiaohongshu.com"}]'
+        resp = client.post(f"/api/accounts/{aid}/edit", data={"cookies": payload})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cookie_saved"] is True and body["cookie_submitted"] is True
+        from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+        assert (profile_dir_for(aid) / "cookies.json").exists()
+
+    def test_update_cookie_dialog_renders(self, client, db_session):
+        aid = _seed_account(db_session)
+        resp = client.get(f"/api/accounts/{aid}/update-cookie-dialog")
+        assert resp.status_code == 200
+        assert "更新 Cookie" in resp.text
+        assert client.get("/api/accounts/999999/update-cookie-dialog").status_code == 404
+
+    def test_update_cookie_valid_submits(self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        aid = _seed_account(db_session)
+        resp = client.post(
+            f"/api/accounts/{aid}/update-cookie",
+            data={"cookies": '[{"name":"sid","value":"v","domain":".xiaohongshu.com"}]'})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True and body["status"] == "submitted"
+
+    def test_update_cookie_invalid_400(self, client, db_session):
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                           data={"cookies": "[]"})
+        assert resp.status_code == 400
+
+    def test_put_account_remark(self, client, db_session):
+        aid = _seed_account(db_session, remark="put-before")
+        resp = client.put(f"/api/accounts/{aid}", json={"remark": "put-after"})
+        assert resp.status_code == 200
+        assert resp.json()["remark"] == "put-after"
+        from semilabs_hone.core.models.account import Account
+        acct = db_session.query(Account).filter(Account.id == aid).first()
+        assert acct.remark == "put-after"
+
+    def test_put_account_remark_required(self, client, db_session):
+        aid = _seed_account(db_session)
+        resp = client.put(f"/api/accounts/{aid}", json={"remark": "  "})
+        assert resp.status_code == 400
+        assert client.put("/api/accounts/999999", json={"remark": "x"}).status_code == 404
+
+    def test_delete_blocked_by_running_task_same_platform(self, client, db_session):
+        # v2 S10 守卫的平台化适配：PRD 无 task→account FK，同平台 running → 409。
+        from semilabs_hone.core.models.task import CollectionTask
+        aid = _seed_account(db_session, platform="xiaohongshu")
+        task = CollectionTask(platform="xiaohongshu", status="running",
+                              expected_count=10)
+        db_session.add(task); db_session.commit()
+        resp = client.delete(f"/api/accounts/{aid}")
+        assert resp.status_code == 409
+        db_session.rollback()

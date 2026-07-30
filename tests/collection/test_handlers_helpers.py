@@ -21,9 +21,9 @@ def _cap():
     return (lambda m, d=None: out.append((m, d))), out
 
 
-def _make_account(db_session, *, platform="xiaohongshu", nickname="acct"):
+def _make_account(db_session, *, platform="xiaohongshu", remark="acct"):
     from semilabs_hone.core.models.account import Account
-    acct = Account(platform=platform, nickname=nickname)
+    acct = Account(platform=platform, remark=remark)
     db_session.add(acct)
     db_session.commit()
     return acct.id
@@ -77,7 +77,7 @@ class TestImportCookies:
 
 class TestUpdateAccountStatus:
     def test_updates_existing_account(self, db_session, tmp_data_dir):
-        aid = _make_account(db_session, nickname="up")
+        aid = _make_account(db_session, remark="up")
         cap, out = _cap()
         h_mod._update_account_status(aid, "active", cap)
 

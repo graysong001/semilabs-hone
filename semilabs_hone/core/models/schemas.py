@@ -17,8 +17,12 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 class AccountCreate(BaseModel):
+    """[契约变更 2026-07-13 S10] Account 建壳 payload。
+    - platform: 平台名（下拉选，默认 xiaohongshu）
+    - remark: 账号备注（NOT NULL，用户裁决必填；原 nickname 改名）
+    """
     platform: str = "xiaohongshu"
-    nickname: str
+    remark: str
 
 
 class TaskCreate(BaseModel):
