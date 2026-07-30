@@ -1,51 +1,10 @@
 <!-- 侧边栏: 四大业务板块 (ui_design_spec_v2 §5) -->
 <aside class="w-[240px] bg-app border-r border-gray-700/60 flex flex-col fixed top-0 left-0 bottom-0 z-50">
   <div class="h-[60px] flex items-center px-5 border-b border-gray-700/50">
-    <!-- 品牌区: SEMILABS 点阵字 (3×5 字模, 逐字母青→紫渐变呼应品牌渐变线) +
-         末尾闪烁光标 (_ 对齐点阵基线, 保留 CLI 意象); 点阵肌理 + 彩色与菜单项区分 -->
-    <div class="flex gap-[4px] items-end select-none" aria-label="Semilabs">
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#22d3ee">###
-#
-###
-  #
-###</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#35c1ef">###
-#
-##
-#
-###</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#48aff0"># #
-###
-###
-# #
-# #</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#5b9df1">###
- # 
- # 
- # 
-###</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#6e8bf2">#
-#
-#
-#
-###</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#8179f3"> # 
-# #
-###
-# #
-# #</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#9467f5">##
-# #
-##
-# #
-##</pre>
-      <pre class="font-mono text-[7px] leading-[7px]" style="color:#a855f7">###
-#
-###
-  #
-###</pre>
-      <span class="font-mono text-[9px] leading-[7px] text-brand animate-pulse">_</span>
-    </div>
+    <!-- 品牌区: FIGlet slant 字符画 logo (pyfiglet 渲染成透明 PNG, 逐列青→紫渐变,
+         高分 supersample + LANCZOS 缩放) — 字符画肌理精细度不受浏览器字号限制 -->
+    <img src="/static/img/logo.png" alt="Semilabs"
+         class="h-[26px] w-auto select-none" draggable="false">
   </div>
   <nav class="flex-1 py-4 overflow-y-auto">
     <!-- 模块一：素材抓取 -->
