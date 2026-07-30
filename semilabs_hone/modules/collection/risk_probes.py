@@ -107,11 +107,23 @@ def _looks_like_login_redirect(url: str, platform: str) -> bool:
 
 
 async def _any_selector(page: Any, selectors: list[str]) -> bool:
-    """Return True if any selector matches an element on the page."""
+    """Return True if any selector matches a VISIBLE element on the page.
+
+    Attribute-contains selectors (``[class*="qrcode"]``, ``[class*="captcha"]``)
+    also match pre-loaded but hidden components (APP-download QR cards,
+    dormant captcha widgets) — a hidden match must not sink the task to
+    need_human. Elements lacking a visibility API (bare test mocks) are
+    treated as visible so existing contract tests keep their meaning.
+    """
     for sel in selectors:
         try:
             el = await page.query_selector(sel)
-            if el is not None:
+            if el is None:
+                continue
+            is_visible = getattr(el, "is_visible", None)
+            if is_visible is None:
+                return True  # no visibility API → treat as visible (mocks)
+            if await is_visible():
                 return True
         except Exception:
             continue
