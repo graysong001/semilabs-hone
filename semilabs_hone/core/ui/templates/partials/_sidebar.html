@@ -1,10 +1,9 @@
 <!-- 侧边栏: 四大业务板块 (ui_design_spec_v2 §5) -->
 <aside class="w-[240px] bg-app border-r border-gray-700/60 flex flex-col fixed top-0 left-0 bottom-0 z-50">
-  <div class="h-[60px] flex flex-col justify-center px-5 border-b border-gray-700/50">
+  <div class="h-[60px] flex items-center px-5 border-b border-gray-700/50">
     <!-- 品牌区: SEMILABS 点阵字 (3×5 字模, 逐字母青→紫渐变呼应品牌渐变线) +
-         CLI 中文行 (❯ 提示符 + 闪烁光标); 点阵肌理 + 彩色与菜单项单色文字区分,
-         中文 13px 与英文 7px 点阵比例协调 (vendored 字体无中文字形, font-mono 混排) -->
-    <div class="flex gap-[4px] select-none" aria-label="Semilabs">
+         末尾闪烁光标 (_ 对齐点阵基线, 保留 CLI 意象); 点阵肌理 + 彩色与菜单项区分 -->
+    <div class="flex gap-[4px] items-end select-none" aria-label="Semilabs">
       <pre class="font-mono text-[7px] leading-[7px]" style="color:#22d3ee">###
 #
 ###
@@ -45,10 +44,8 @@
 ###
   #
 ###</pre>
+      <span class="font-mono text-[9px] leading-[7px] text-brand animate-pulse">_</span>
     </div>
-    <span class="mt-1 font-mono text-[13px] font-bold text-gray-300 tracking-wider select-none leading-none">
-      <span class="text-success">❯</span> 内容工厂<span class="text-brand animate-pulse">_</span>
-    </span>
   </div>
   <nav class="flex-1 py-4 overflow-y-auto">
     <!-- 模块一：素材抓取 -->
