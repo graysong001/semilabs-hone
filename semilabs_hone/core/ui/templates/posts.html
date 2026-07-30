@@ -1,98 +1,148 @@
 {% extends "base.html" %}
-{% block title %}Skim - 数据浏览{% endblock %}
+{% block title %}数据资产库{% endblock %}
 
 {% block content %}
-<h2>数据浏览</h2>
+<div class="flex justify-between items-center mb-6">
+  <nav class="flex items-center gap-2 text-sm">
+    <span class="text-gray-400">素材加工</span><span class="text-gray-600">/</span>
+    <span class="text-white font-medium">数据资产库</span>
+  </nav>
+  {% if filter_task_id %}
+  <a href="/api/export?task_id={{ filter_task_id }}" class="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+    </svg>
+    导出 CSV
+  </a>
+  {% endif %}
+</div>
 
-<!-- Filters -->
-<form method="get" action="/posts" class="filter-form" style="margin-bottom: 1em;">
-  <div class="grid">
-    <label>
-      平台
-      <select name="platform">
-        <option value="">全部</option>
-        <option value="xiaohongshu" {% if filter_platform == 'xiaohongshu' %}selected{% endif %}>xiaohongshu</option>
-      </select>
-    </label>
-    <div>
-      <button type="submit" class="secondary">筛选</button>
-      <a href="/posts" class="button outline">重置</a>
-    </div>
-  </div>
-</form>
+<!-- 过滤栏 -->
+<div class="flex gap-3 mb-5 items-center">
+  <form method="get" action="/posts" class="flex gap-3 items-center">
+    <select name="platform" class="h-9 px-3 bg-app-card border border-gray-700 rounded-md text-sm text-gray-300 focus:border-brand focus:outline-none">
+      <option value="">All Platform</option>
+      <option value="xiaohongshu" {% if filter_platform == 'xiaohongshu' %}selected{% endif %}>小红书</option>
+    </select>
+    {% if filter_task_id %}
+    <input type="hidden" name="task_id" value="{{ filter_task_id }}">
+    {% endif %}
+    <button type="submit" class="h-9 px-4 bg-app-card border border-gray-700 rounded-md text-sm text-gray-300 hover:border-brand hover:text-brand">筛选</button>
+    <a href="/posts" class="h-9 px-4 bg-app-card border border-gray-700 rounded-md text-sm text-gray-300 hover:border-brand hover:text-brand flex items-center">重置</a>
+  </form>
+</div>
 
-<!-- Results -->
-<p>共 {{ total }} 条笔记 (第 {{ page }}/{{ total_pages }} 页)</p>
+<!-- 统计信息 -->
+<div class="text-sm text-gray-400 mb-4">
+  共 <span class="text-white font-medium">{{ total }}</span> 条笔记
+  {% if filter_task_id %}
+  <span class="text-gray-500">(任务: {{ filter_task_id[:8] }}...)</span>
+  {% endif %}
+  <span class="text-gray-500">· 第 {{ page }}/{{ total_pages }} 页</span>
+</div>
 
-<table>
-  <thead>
-    <tr>
-      <th>平台</th>
-      <th>标题</th>
-      <th>作者</th>
-      <th>正文摘要</th>
-      <th>点赞</th>
-      <th>评论数</th>
-      <th>发布时间</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for post in posts %}
-    <tr id="row-{{ post.id }}" onclick="toggleComments('{{ post.id }}')" style="cursor: pointer;" title="点击展开评论">
-      <td>{{ post.platform }}</td>
-      <td>
-        <a href="/posts/{{ post.id }}">
-          {{ (post.title or "无标题")[:30] }}{{ "..." if post.title and post.title|length > 30 else "" }}
-        </a>
-      </td>
-      <td>{{ post.author_name or "—" }}</td>
-      <td>{{ (post.content_text or "")[:40] }}</td>
-      <td>{{ metrics_map.get(post.id, {}).get('likes', 0) }}</td>
-      <td>{{ metrics_map.get(post.id, {}).get('comments_count', 0) }}</td>
-      <td>{{ post.publish_time[:10] if post.publish_time else "—" }}</td>
-    </tr>
-    {% else %}
-    <tr>
-      <td colspan="7" style="text-align: center; color: var(--pico-muted-color);">
-        暂无数据，请先创建采集任务。
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<!-- 数据表格 -->
+<div class="bg-app-card rounded-lg border border-gray-700 overflow-hidden">
+  <table class="w-full">
+    <thead>
+      <tr class="bg-black/20 border-b border-gray-700">
+        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">平台</th>
+        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">标题</th>
+        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">作者</th>
+        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">点赞</th>
+        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">评论数</th>
+        <th class="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase">发布时间</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if not posts %}
+      <tr>
+        <td colspan="6" class="px-4 py-8 text-center text-gray-500 text-sm">
+          暂无数据，请先创建采集任务。
+        </td>
+      </tr>
+      {% endif %}
+      {% for post in posts %}
+      <tr id="row-{{ post.id }}" class="border-b border-gray-700/50 hover:bg-app-hover transition-colors cursor-pointer" onclick="toggleComments('{{ post.id }}')">
+        <td class="px-4 py-3">
+          {% if post.platform == 'xiaohongshu' %}
+          <span class="inline-block px-2.5 py-0.5 rounded text-xs font-medium bg-red-500/15 text-red-400">小红书</span>
+          {% else %}
+          <span class="inline-block px-2.5 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-400">{{ post.platform }}</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-3">
+          <a href="/posts/{{ post.id }}" class="text-white font-medium hover:text-brand" onclick="event.stopPropagation()">
+            {{ (post.title or "无标题")[:30] }}{{ "..." if post.title and post.title|length > 30 else "" }}
+          </a>
+          <div class="text-xs text-gray-500 mt-0.5">{{ (post.content_text or "")[:40] }}</div>
+        </td>
+        <td class="px-4 py-3 text-gray-300">{{ post.author_name or "—" }}</td>
+        <td class="px-4 py-3">
+          <span class="inline-flex items-center gap-1.5 text-gray-300">
+            <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+            {{ metrics_map.get(post.id, {}).get('likes', 0) }}
+          </span>
+        </td>
+        <td class="px-4 py-3 text-gray-300">{{ metrics_map.get(post.id, {}).get('comments_count', 0) }}</td>
+        <td class="px-4 py-3 text-sm text-gray-400">{{ post.publish_time[:10] if post.publish_time else "—" }}</td>
+      </tr>
+      <tr id="comments-row-{{ post.id }}" class="hidden">
+        <td colspan="6" class="px-4">
+          <div id="comments-container-{{ post.id }}"></div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 
-<!-- Pagination -->
+<!-- 分页 -->
 {% if total_pages > 1 %}
-<nav aria-label="分页">
-  <ul class="pagination">
+<div class="flex justify-between items-center mt-6">
+  <span class="text-sm text-gray-400">Showing {{ (page - 1) * per_page + 1 }} to {{ [page * per_page, total]|min }} of {{ total }} items.</span>
+  <div class="flex gap-1">
     {% if page > 1 %}
-    <li><a href="/posts?page={{ page - 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}">上一页</a></li>
+    <a href="/posts?page={{ page - 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}{% if filter_task_id %}&task_id={{ filter_task_id }}{% endif %}" class="min-w-[32px] h-8 px-2 border border-gray-700 rounded text-sm text-gray-300 hover:border-brand hover:text-brand flex items-center justify-center">&lt;</a>
     {% endif %}
     {% for p in range(1, total_pages + 1) %}
       {% if p == page %}
-      <li><a href="#" class="secondary" aria-current="page">{{ p }}</a></li>
+      <span class="min-w-[32px] h-8 px-2 bg-brand text-white rounded text-sm flex items-center justify-center">{{ p }}</span>
       {% elif p <= 3 or p > total_pages - 3 or (p >= page - 1 and p <= page + 1) %}
-      <li><a href="/posts?page={{ p }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}">{{ p }}</a></li>
+      <a href="/posts?page={{ p }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}{% if filter_task_id %}&task_id={{ filter_task_id }}{% endif %}" class="min-w-[32px] h-8 px-2 border border-gray-700 rounded text-sm text-gray-300 hover:border-brand hover:text-brand flex items-center justify-center">{{ p }}</a>
       {% elif p == 4 or p == total_pages - 3 %}
-      <li><span>...</span></li>
+      <span class="min-w-[32px] h-8 px-2 text-gray-500 flex items-center justify-center">...</span>
       {% endif %}
     {% endfor %}
     {% if page < total_pages %}
-    <li><a href="/posts?page={{ page + 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}">下一页</a></li>
+    <a href="/posts?page={{ page + 1 }}{% if filter_platform %}&platform={{ filter_platform }}{% endif %}{% if filter_task_id %}&task_id={{ filter_task_id }}{% endif %}" class="min-w-[32px] h-8 px-2 border border-gray-700 rounded text-sm text-gray-300 hover:border-brand hover:text-brand flex items-center justify-center">&gt;</a>
     {% endif %}
-  </ul>
-</nav>
+  </div>
+</div>
 {% endif %}
-{% endblock %}{# content #}
+{% endblock %}
 
 {% block scripts %}
 <script>
 // Master-detail 评论展开/收起 (PRD §5.4.2): 点行→插入子行; 再点→收起.
 function toggleComments(itemId) {
-  var existing = document.getElementById('detail-' + itemId);
-  if (existing) { existing.remove(); return; }
-  htmx.ajax('GET', '/api/items/' + itemId + '/comments',
-    { target: '#row-' + itemId, swap: 'afterend' });
+  var row = document.getElementById('comments-row-' + itemId);
+  if (!row) return;
+
+  if (row.classList.contains('hidden')) {
+    row.classList.remove('hidden');
+    // 如果还没加载过评论，通过 HTMX 加载
+    var container = document.getElementById('comments-container-' + itemId);
+    if (container && !container.dataset.loaded) {
+      htmx.ajax('GET', '/api/items/' + itemId + '/comments', {
+        target: '#comments-container-' + itemId,
+        swap: 'innerHTML'
+      });
+      container.dataset.loaded = '1';
+    }
+  } else {
+    row.classList.add('hidden');
+  }
 }
 </script>
 {% endblock %}

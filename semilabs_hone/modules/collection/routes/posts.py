@@ -30,10 +30,13 @@ def _metrics_of(item) -> dict:
 
 
 def _comments_fragment(item_id: str) -> str:
-    """Render the master-detail child row (PRD §5.4.2).
+    """Render the master-detail child row (PRD §5.4.2, v2 暗色片段).
 
-    Returns `<tr id="detail-<id>"><td colspan="7">…评论子表…</td></tr>` inserted
-    after the clicked main row (hx-swap=afterend). 0 评论 → 置灰文案。
+    Renders ``partials/_comments.html`` (dark comment sub-table) wrapped in
+    `<tr id="detail-<id>"><td colspan="6">…</td></tr>`. v2 posts.html 的
+    toggleComments 把它 innerHTML 进 `<div id="comments-container-*">` ——
+    HTML5 fragment 解析会丢掉非法的 tr/td 外壳、保留内部 div, 两种消费
+    方式都安全。0 评论 → 置灰文案。
     """
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.comment import CollectionComment
@@ -51,28 +54,15 @@ def _comments_fragment(item_id: str) -> str:
     finally:
         sess.close()
 
-    if not comments:
-        return (
-            f'<tr id="detail-{item_id}"><td colspan="7" '
-            f'style="color: var(--pico-muted-color); text-align: center;">'
-            f'该笔记暂无评论数据</td></tr>'
-        )
+    t = _templates()
+    assert t is not None, "Templates not initialized"
 
-    rows = []
-    for c in comments:
-        author = (c.author_name or "匿名")[:30]
-        text = (c.content_text or "")[:200]
-        rows.append(
-            f'<tr><td colspan="7"><small>'
-            f'<strong>{author}</strong> · ❤ {c.like_count or 0}<br>'
-            f'{text}</small></td></tr>'
-        )
-    body = "".join(rows)
-    return (
-        f'<tr id="detail-{item_id}"><td colspan="7">'
-        f'<table><tbody>{body}</tbody></table>'
-        f'</td></tr>'
+    content = t.env.get_template("partials/_comments.html").render(
+        item_id=item_id, comments=comments, empty=len(comments) == 0
     )
+
+    # 返回 `<tr>` 包裹的评论内容，用于表格插入
+    return f'<tr id="detail-{item_id}"><td colspan="6">{content}</td></tr>'
 
 
 @router.get("/api/items/{item_id}/comments")
@@ -93,6 +83,7 @@ async def api_item_comments(item_id: str) -> HTMLResponse:
 async def page_posts(
     request: Request,
     platform: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
 ) -> HTMLResponse:
@@ -105,6 +96,8 @@ async def page_posts(
         q = sess.query(CollectionItem)
         if platform:
             q = q.filter(CollectionItem.platform == platform)
+        if task_id:
+            q = q.filter(CollectionItem.task_id == task_id)
         items = q.all()
     except Exception:
         items = []
@@ -137,6 +130,8 @@ async def page_posts(
             "per_page": per_page,
             "total_pages": total_pages,
             "filter_platform": platform,
+            "filter_task_id": task_id,
+            "active_page": "data",
         },
     )
 
@@ -176,5 +171,6 @@ async def page_post_detail(request: Request, post_id: str) -> HTMLResponse:
             "post": post,
             "metrics": _metrics_of(post) if post is not None else {},
             "comments": comments,
+            "active_page": "data",
         },
     )
