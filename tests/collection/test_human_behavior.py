@@ -63,6 +63,23 @@ class TestGenerateSlideTrack:
         t2 = generate_slide_track(400.0)
         assert t2[-2]["x"] > t1[-2]["x"]
 
+    def test_generate_slide_track_timestamps_strictly_monotonic(self):
+        """Timestamps must strictly increase — non-monotonic t is a hard bot
+        feature for slider risk engines (旧实现每点独立随机总时长, 可产生
+        t[i+1] < t[i])."""
+        for _ in range(30):  # 随机抽 30 条轨迹, 全部严格递增
+            track = generate_slide_track(300.0)
+            ts = [p["t"] for p in track]
+            assert all(ts[i] < ts[i + 1] for i in range(len(ts) - 1)), \
+                f"non-monotonic timestamps: {ts}"
+
+    def test_generate_slide_track_duration_human_range(self):
+        """Total drag duration lands in a human window (~240-1740ms)."""
+        for _ in range(30):
+            track = generate_slide_track(300.0)
+            total_ms = track[-1]["t"]
+            assert 200 <= total_ms <= 1800, f"duration {total_ms}ms out of human range"
+
 
 # ─── human_type tests ──────────────────────────────────────────────────────
 
@@ -225,6 +242,69 @@ class TestHumanClick:
 
         assert mock_mouse.move.call_count > 0
         assert mock_mouse.click.call_count == 1
+
+
+# ─── mouse position memory tests ───────────────────────────────────────────
+
+
+class TestMousePositionMemory:
+    """_move_mouse_bezier must continue from the last cursor position
+    (_last_pos) — always starting from (0,0) makes every path fly in from the
+    top-left corner, a statistically regular machine signal."""
+
+    @pytest.mark.asyncio
+    async def test_first_move_starts_near_target_not_origin(self, monkeypatch):
+        """首次移动: 起点在目标附近随机处, 不是屏幕左上角 (0,0)."""
+        import semilabs_hone.modules.collection.anti_detect.human_behavior as hb_mod
+
+        monkeypatch.setattr(hb_mod, "_last_pos", None)
+        moves = []
+
+        mock_page = AsyncMock()
+
+        async def fake_move(x, y):
+            moves.append((x, y))
+        mock_page.mouse.move = fake_move
+
+        async def _no_sleep(d):
+            return None
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        await hb_mod._move_mouse_bezier(mock_page, 600.0, 400.0)
+
+        # 贝塞尔第一个采样点 (t=1/steps) 接近起点: 起点 ∈ 目标±(200,150)
+        first_x, first_y = moves[0]
+        assert first_x > 100  # 若起点是 (0,0) 首点 x ≈ 30 以下
+        assert first_y > 100
+        # 终点记忆已写入
+        assert hb_mod._last_pos == [600.0, 400.0]
+
+    @pytest.mark.asyncio
+    async def test_second_move_continues_from_last_position(self, monkeypatch):
+        """第二次移动从上次终点出发 (轨迹连续, 非反复从角落飞入)."""
+        import semilabs_hone.modules.collection.anti_detect.human_behavior as hb_mod
+
+        monkeypatch.setattr(hb_mod, "_last_pos", [500.0, 300.0])
+        moves = []
+
+        mock_page = AsyncMock()
+
+        async def fake_move(x, y):
+            moves.append((x, y))
+        mock_page.mouse.move = fake_move
+
+        async def _no_sleep(d):
+            return None
+        monkeypatch.setattr("asyncio.sleep", _no_sleep)
+
+        await hb_mod._move_mouse_bezier(mock_page, 800.0, 500.0)
+
+        # 首采样点 (t=0.05) ≈ 90% 起点 + 控制点扰动: 距 (500,300) 远小于
+        # 距新目标 (800,500)
+        first_x, first_y = moves[0]
+        assert abs(first_x - 500.0) < 100
+        assert abs(first_y - 300.0) < 100
+        assert hb_mod._last_pos == [800.0, 500.0]
 
 
 # ─── smart_wait tests ───────────────────────────────────────────────────────

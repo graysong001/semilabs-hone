@@ -21,6 +21,12 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
+# Module-level cursor position memory: consecutive clicks continue from where
+# the cursor last was. Always starting from (0,0) makes every Bezier path fly
+# in from the top-left corner — a statistically regular machine signal.
+_last_pos: list[float] | None = None
+
+
 def _resolve_locator(page: "Page", locator: dict[str, Any]) -> "PWLocator":
     """Resolve a multi-strategy locator dict to a Playwright Locator.
 
@@ -73,13 +79,22 @@ async def human_click(page: "Page", locator: dict) -> None:
 
 
 async def _move_mouse_bezier(page: "Page", target_x: float, target_y: float, steps: int = 20) -> None:
-    """Move mouse along a quadratic Bezier curve with random control point."""
-    # Current mouse position (default to 0,0)
-    sx, sy = 0.0, 0.0  # playwright tracks internally; just dispatch moves
+    """Move mouse along a quadratic Bezier curve with random control point.
 
-    # Random control point to create a natural arc
-    cx = target_x * 0.5 + random.uniform(-80, 80)
-    cy = target_y * 0.3 + random.uniform(-60, 60)
+    The path starts from the last cursor position (_last_pos); on the very
+    first move it starts at a random offset near the target (a real user's
+    cursor is already somewhere on the page, never teleporting from (0,0)).
+    """
+    global _last_pos
+    if _last_pos is None:
+        sx = target_x + random.uniform(-200, 200)
+        sy = target_y + random.uniform(-150, 150)
+    else:
+        sx, sy = _last_pos
+
+    # Random control point to create a natural arc between the two endpoints
+    cx = (sx + target_x) * 0.5 + random.uniform(-80, 80)
+    cy = (sy + target_y) * 0.5 + random.uniform(-60, 60)
 
     for t_frac in range(1, steps + 1):
         t = t_frac / steps
@@ -90,6 +105,8 @@ async def _move_mouse_bezier(page: "Page", target_x: float, target_y: float, ste
         # Variable speed: slower near start and end, faster in middle
         speed = 0.01 + 0.03 * math.sin(math.pi * t)
         await asyncio.sleep(speed)
+
+    _last_pos = [target_x, target_y]
 
 
 async def random_scroll(page: "Page", max_times: int, wait_ms: int) -> None:
@@ -148,10 +165,15 @@ def generate_slide_track(distance: float) -> list[dict]:
     """Generate a physical slider track: accelerate then decelerate + overshoot rebound.
 
     Returns a list of {x, y, t} dicts representing the track points.
+    Timestamps ACCUMULATE per step (8-25ms main / 10-30ms rebound) so they
+    are strictly monotonic — the old per-point `(i/steps) * uniform(200,500)`
+    re-randomized the total duration at every point and could produce
+    t[i+1] < t[i], a hard bot feature for slider risk engines. Total drag
+    time lands in a human ~240-1740ms window.
     """
     total_steps = random.randint(30, 60)
     track: list[dict] = []
-    start_time = 0.0
+    elapsed = 0.0
 
     for i in range(total_steps):
         t = i / total_steps
@@ -164,20 +186,19 @@ def generate_slide_track(distance: float) -> list[dict]:
         x = distance * progress
         # Slight Y jitter to simulate hand tremor
         y = math.sin(i * 0.5) * random.uniform(1, 5)
-        elapsed = (i / total_steps) * random.uniform(200, 500)
+        elapsed += random.uniform(8, 25)
 
         track.append({"x": round(x, 2), "y": round(y, 2), "t": round(elapsed, 2)})
 
-    # Overshoot: go past the target then rebound
+    # Overshoot: go past the target then rebound (timestamps keep accumulating)
     overshoot = distance * random.uniform(0.02, 0.08)
     rebound_steps = random.randint(3, 8)
-    base_time = track[-1]["t"] if track else 0
     for j in range(rebound_steps):
         t = j / rebound_steps
         decay = (1 - t) ** 2  # exponential decay
         ox = distance + overshoot * decay * math.cos(j * math.pi)
         oy = math.sin(j * 1.2) * random.uniform(0.5, 2) * decay
-        ot = base_time + (j + 1) * random.uniform(10, 30)
-        track.append({"x": round(ox, 2), "y": round(oy, 2), "t": round(ot, 2)})
+        elapsed += random.uniform(10, 30)
+        track.append({"x": round(ox, 2), "y": round(oy, 2), "t": round(elapsed, 2)})
 
     return track
