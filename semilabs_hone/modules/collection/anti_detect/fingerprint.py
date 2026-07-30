@@ -25,16 +25,13 @@ _VIEWPORTS = [
     {"width": 1280, "height": 800},
 ]
 _COLOR_SCHEMES = ["light", "dark"]
-_TIMEZONES = [
-    "Asia/Shanghai", "Asia/Tokyo", "Asia/Hong_Kong",
-    "America/New_York", "America/Los_Angeles", "America/Chicago",
-    "Europe/London", "Europe/Paris", "Europe/Berlin",
-    "Australia/Sydney",
-]
-_LOCALES = [
-    "zh-CN", "zh-TW", "en-US", "en-GB", "ja-JP",
-    "ko-KR", "fr-FR", "de-DE",
-]
+# 地理一致性收敛 (2026-07-30): 时区/locale 必须与真实出口 IP 地理一致 ——
+# 本机中国 IP 下抽中"纽约时区+fr-FR"这类组合会触发时区-IP 交叉校验风控,
+# 属于自伤行为。收敛到真实中国用户最大众的值(与 viewport/UA "不伪造"
+# 哲学自洽: 人群中最普通即最好的隐藏)。账号间独立性由 viewport/
+# color_scheme 维度保留。
+_TIMEZONES = ["Asia/Shanghai"]
+_LOCALES = ["zh-CN"]
 
 
 class Fingerprint(BaseModel):

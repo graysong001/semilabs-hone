@@ -71,15 +71,17 @@ class TestAssignFingerprint:
         assert isinstance(fp.locale, str) and "-" in fp.locale
 
     def test_assign_fingerprint_not_singleton(self, tmp_data_dir, monkeypatch):
-        """Two accounts must get independent draws (no process-wide singleton)."""
+        """Two accounts must get independent draws (no process-wide singleton).
+
+        独立性维度是 viewport/color_scheme; timezone/locale 已收敛为真实
+        地理值 (Asia/Shanghai + zh-CN, 与出口 IP 一致防交叉校验风控), 不再
+        作为账号区分维度。
+        """
         viewports = itertools.cycle(fp_mod._VIEWPORTS)
-        timezones = itertools.cycle(fp_mod._TIMEZONES)
 
         def fake_choice(seq):
             if seq is fp_mod._VIEWPORTS:
                 return next(viewports)
-            if seq is fp_mod._TIMEZONES:
-                return next(timezones)
             return seq[0]
 
         monkeypatch.setattr(fp_mod.random, "choice", fake_choice)
@@ -87,7 +89,9 @@ class TestAssignFingerprint:
         fp2 = assign_fingerprint()
         assert fp1 != fp2
         assert fp1.viewport != fp2.viewport
-        assert fp1.timezone != fp2.timezone
+        # 收敛后的地理指纹: 与真实出口 IP 地理一致
+        assert fp1.timezone == "Asia/Shanghai"
+        assert fp1.locale == "zh-CN"
 
     def test_assign_fingerprint_writes_no_file(self, tmp_data_dir):
         """The old global assigned_fingerprint.json cache must be gone."""
