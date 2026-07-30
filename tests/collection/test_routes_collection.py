@@ -472,3 +472,129 @@ class TestAccountsV2Endpoints:
         resp = client.delete(f"/api/accounts/{aid}")
         assert resp.status_code == 409
         db_session.rollback()
+
+
+# ─── Stage 7 覆盖率补测：v2 accounts/dashboard 分支 ─────────────────────
+
+_OK_COOKIE = '[{"name":"sid","value":"x","domain":".xiaohongshu.com"}]'
+
+
+class TestStage7CoveragePatch:
+    """Branch coverage for v2 accounts endpoints + dashboard pagination."""
+
+    def test_ipc_helper_real_import(self):
+        from semilabs_hone.modules.collection.routes import accounts as acc
+        IPCClient, IPCRequest = acc._ipc()
+        assert IPCClient is not None and IPCRequest is not None
+
+    def test_spawn_worker_called_and_exception_swallowed(self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        aid = _seed_account(db_session)
+        called = []
+        client.app.state.worker_spawner = lambda account_id: called.append(account_id)
+        try:
+            resp = client.post(f"/api/accounts/{aid}/login")
+            assert resp.status_code == 200
+            assert called == [aid]
+
+            def _boom(_aid):
+                raise RuntimeError("spawn fail")
+
+            client.app.state.worker_spawner = _boom
+            resp = client.post(f"/api/accounts/{aid}/validate")
+            assert resp.status_code == 200  # spawner 异常被吞, 不影响提交
+        finally:
+            client.app.state.worker_spawner = None
+
+    def test_validate_cookie_error_branches(self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        aid = _seed_account(db_session)
+        bad_payloads = [
+            '{"a":1}',                                  # 非数组
+            '[]',                                       # 空数组
+            '["x"]',                                    # 元素非对象
+            '[{"value":"v","domain":"d"}]',             # 缺 name
+            '[{"name":"n","domain":"d"}]',              # 缺 value
+            '[{"name":"n","value":"v"}]',               # 缺 domain
+        ]
+        for payload in bad_payloads:
+            resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                               data={"cookies": payload})
+            assert resp.status_code == 400, payload
+            assert resp.json()["ok"] is False
+
+    def test_cookie_echo_in_update_dialog(self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                           data={"cookies": _OK_COOKIE})
+        assert resp.status_code == 200
+        resp = client.get(f"/api/accounts/{aid}/update-cookie-dialog")
+        assert resp.status_code == 200
+        assert "sid" in resp.text and "1" in resp.text  # 回显内容 + 计数
+
+    def test_edit_post_missing_account_404(self, client):
+        resp = client.post("/api/accounts/999999/edit", data={"remark": "x"})
+        assert resp.status_code == 404
+
+    def test_edit_post_no_change_message(self, client, db_session):
+        aid = _seed_account(db_session, remark="same")
+        resp = client.post(f"/api/accounts/{aid}/edit", data={"remark": "same"})
+        assert resp.status_code == 200
+        assert "无变更" in resp.json()["message"]
+
+    def test_update_cookie_missing_account_404(self, client):
+        resp = client.post("/api/accounts/999999/update-cookie",
+                           data={"cookies": _OK_COOKIE})
+        assert resp.status_code == 404
+
+    def test_put_remark_via_json_body(self, client, db_session):
+        aid = _seed_account(db_session)
+        resp = client.put(f"/api/accounts/{aid}", json={"remark": "via-json"})
+        assert resp.status_code == 200
+        assert resp.json()["remark"] == "via-json"
+
+    def test_create_with_valid_cookies_saves_and_submits(self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        resp = client.post("/api/accounts", data={
+            "platform": "xiaohongshu", "remark": "withcookie", "cookies": _OK_COOKIE,
+        }, follow_redirects=False)
+        assert resp.status_code == 303
+        assert "cookie_error" not in resp.headers["location"]
+        from semilabs_hone.core.models.account import Account
+        from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+        acct = db_session.query(Account).filter(Account.remark == "withcookie").first()
+        assert (profile_dir_for(acct.id) / "cookies.json").exists()
+
+    def test_create_with_invalid_cookies_redirects_with_reason(self, client, db_session, monkeypatch):
+        _fake_ipc(monkeypatch)
+        resp = client.post("/api/accounts", data={
+            "platform": "xiaohongshu", "remark": "badcookie", "cookies": "not-json",
+        }, follow_redirects=False)
+        assert resp.status_code == 303
+        assert "cookie_error=" in resp.headers["location"]
+
+    def test_delete_cleans_profile_dir(self, client, db_session):
+        aid = _seed_account(db_session)
+        from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+        pdir = profile_dir_for(aid)
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "cookies.json").write_text("[]")
+        resp = client.delete(f"/api/accounts/{aid}")
+        assert resp.status_code == 200 and resp.json()["ok"] is True
+        assert not pdir.exists()
+
+    def test_validate_missing_account_404(self, client):
+        resp = client.post("/api/accounts/999999/validate")
+        assert resp.status_code == 404
+        assert resp.json()["fix_hint"]
+
+    def test_import_cookies_missing_account_404(self, client):
+        resp = client.post("/api/accounts/import-cookies",
+                           data={"account_id": 999999, "cookies": _OK_COOKIE})
+        assert resp.status_code == 404
+        assert resp.json()["fix_hint"]
+
+    def test_dashboard_invalid_page_param_falls_back(self, client):
+        resp = client.get("/?page=abc")
+        assert resp.status_code == 200
