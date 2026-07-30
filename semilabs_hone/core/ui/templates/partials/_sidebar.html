@@ -1,11 +1,10 @@
 <!-- 侧边栏: 四大业务板块 (ui_design_spec_v2 §5) -->
 <aside class="w-[240px] bg-app border-r border-gray-700/60 flex flex-col fixed top-0 left-0 bottom-0 z-50">
-  <div class="h-[60px] flex flex-col items-start justify-center px-5 border-b border-gray-700/50">
-    <!-- 品牌区: FIGlet slant 字符画 logo (pyfiglet 渲染成透明 PNG, 逐列青→紫渐变,
-         高分 supersample + LANCZOS 缩放) + 中文小字副标 (宽字距降灰, 不抢字符画主体) -->
-    <img src="/static/img/logo.png" alt="Semilabs"
-         class="h-[24px] w-auto select-none" draggable="false">
-    <span class="mt-1 font-mono text-[11px] text-gray-500 tracking-[0.35em] select-none leading-none">内容工厂</span>
+  <div class="h-[60px] flex items-center px-5 border-b border-gray-700/50">
+    <!-- 品牌区: FIGlet slant 字符画 logo (透明 PNG, 青→紫渐变) + 右下角"内容工厂"
+         斜体紫色落款 (与 slant 斜体感/渐变尾端呼应, 已画入图中) -->
+    <img src="/static/img/logo.png" alt="Semilabs 内容工厂"
+         class="h-[34px] w-auto select-none" draggable="false">
   </div>
   <nav class="flex-1 py-4 overflow-y-auto">
     <!-- 模块一：素材抓取 -->
