@@ -97,7 +97,7 @@ def _account(db_session, platform: str, *, status="active"):
 
     fp = assign_fingerprint()
     acct = Account(
-        platform=platform, nickname="e2e", status=status,
+        platform=platform, remark="e2e", status=status,
         viewport_w=fp.viewport["width"], viewport_h=fp.viewport["height"],
         color_scheme=fp.color_scheme, timezone=fp.timezone, locale=fp.locale,
     )

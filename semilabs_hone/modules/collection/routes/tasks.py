@@ -346,7 +346,7 @@ async def api_task_progress(task_id: str) -> JSONResponse:
     """GET /api/tasks/{id}/progress — latest progress snapshot (PRD §5.4).
 
     Resolves the task's `request_id` → `progress/<rid>.json` and returns the
-    IPCProgress payload (message/data). Polled by task_detail.html as a WS
+    IPCProgress payload (message/data). Consumed by the dashboard as a WS
     fallback; 404 when the task or progress file is absent (frontend treats
     both as "waiting").
     """
