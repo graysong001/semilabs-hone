@@ -247,19 +247,19 @@ def _actions_html(task) -> str:
             f'<path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>'
             f'</svg></button>'
         )
-        # 块4: completed → 删除
+        # 块4: completed → 删除 (统一确认弹窗, 替代 hx-confirm 原生弹窗)
         parts.append(
             f'<button class="text-red-400 hover:text-red-300" title="删除" '
-            f'hx-delete="/api/tasks/{tid}" hx-target="#task-row-{tid}" hx-swap="outerHTML" hx-confirm="确定要删除这个任务吗？">'
+            f'onclick="confirmDeleteTask(\'{tid}\')">'
             f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
             f'<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/>'
             f'</svg></button>'
         )
     if task.status in ("error", "failed"):
-        # 块4: error/failed → 删除
+        # 块4: error/failed → 删除 (统一确认弹窗)
         parts.append(
             f'<button class="text-red-400 hover:text-red-300" title="删除" '
-            f'hx-delete="/api/tasks/{tid}" hx-target="#task-row-{tid}" hx-swap="outerHTML" hx-confirm="确定要删除这个任务吗？">'
+            f'onclick="confirmDeleteTask(\'{tid}\')">'
             f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
             f'<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/>'
             f'</svg></button>'

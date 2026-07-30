@@ -50,6 +50,9 @@
   </div>
 </div>
 <div id="toast-container" class="fixed top-5 right-5 z-[9999] flex flex-col gap-2"></div>
+<!-- 统一详情抽屉容器 (openDrawer/closeDrawer, 见 app.js) -->
+<div id="drawer-backdrop" onclick="closeDrawer()"></div>
+<aside id="drawer"><div id="drawer-content" class="min-h-full"></div></aside>
 <script src="/static/app.js"></script>
 {% block scripts %}{% endblock %}
 </body>

@@ -318,3 +318,93 @@
     modal.showModal();
   };
 })();
+
+/* ========== 统一交互范式 (弹窗确认 / 详情抽屉) ========== */
+
+// 统一确认弹窗: 替代原生 confirm (hx-confirm 只能调浏览器原生样式, 与暗色主题割裂)
+// confirmAction({ title, message, confirmText, onConfirm }) — 全局单例 <dialog>
+var _confirmDialog = null;
+window.confirmAction = function (opts) {
+  if (!_confirmDialog) {
+    _confirmDialog = document.createElement('dialog');
+    _confirmDialog.id = 'confirm-dialog';
+    _confirmDialog.className = 'm-auto w-[380px] max-w-[92vw] rounded-xl bg-app-card border border-gray-700 shadow-2xl p-0';
+    document.body.appendChild(_confirmDialog);
+    _confirmDialog.addEventListener('click', function (e) { if (e.target === _confirmDialog) _confirmDialog.close(); });
+  }
+  _confirmDialog.innerHTML =
+    '<div class="p-5">' +
+    '  <div class="flex items-start gap-3">' +
+    '    <div class="confirm-icon">' +
+    '      <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">' +
+    '        <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>' +
+    '      </svg>' +
+    '    </div>' +
+    '    <div class="flex-1 min-w-0">' +
+    '      <h3 class="text-base font-semibold text-white"></h3>' +
+    '      <p class="mt-1 text-sm text-gray-400 leading-relaxed"></p>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="mt-5 flex justify-end gap-2">' +
+    '    <button type="button" data-role="cancel" class="px-3.5 py-1.5 rounded-lg text-sm text-gray-300 hover:bg-gray-700/60 transition-colors">取消</button>' +
+    '    <button type="button" data-role="confirm" class="px-3.5 py-1.5 rounded-lg text-sm font-medium text-white bg-danger hover:bg-red-600 transition-colors"></button>' +
+    '  </div>' +
+    '</div>';
+  _confirmDialog.querySelector('h3').textContent = opts.title || '确认操作';
+  _confirmDialog.querySelector('p').textContent = opts.message || '';
+  var btnConfirm = _confirmDialog.querySelector('[data-role="confirm"]');
+  btnConfirm.textContent = opts.confirmText || '确认';
+  _confirmDialog.querySelector('[data-role="cancel"]').onclick = function () { _confirmDialog.close(); };
+  btnConfirm.onclick = function () { _confirmDialog.close(); if (opts.onConfirm) opts.onConfirm(); };
+  _confirmDialog.showModal();
+};
+
+// 任务删除: 确认弹窗 + HTMX 删行 (替代 hx-delete + hx-confirm 原生弹窗)
+window.confirmDeleteTask = function (taskId) {
+  confirmAction({
+    title: '删除任务',
+    message: '确定要删除这个任务吗？该操作不可恢复。',
+    confirmText: '删除',
+    onConfirm: function () {
+      htmx.ajax('DELETE', '/api/tasks/' + taskId, { target: '#task-row-' + taskId, swap: 'outerHTML' });
+    }
+  });
+};
+
+// 账号删除: 确认弹窗 + HTMX 删行; rowEl 为行元素 (hx-target closest tr 的 JS 等价)
+window.confirmDeleteAccount = function (accountId, rowEl) {
+  confirmAction({
+    title: '删除账号',
+    message: '确定删除该账号吗？将同时清除浏览器配置与 Cookie，操作不可恢复。',
+    confirmText: '删除',
+    onConfirm: function () {
+      htmx.ajax('DELETE', '/api/accounts/' + accountId, { target: rowEl, swap: 'outerHTML' });
+    }
+  });
+};
+
+// 统一详情抽屉: openDrawer(url) 右侧滑出; closeDrawer() / ESC / 遮罩点击关闭
+var _drawerEscBound = false;
+window.openDrawer = function (url) {
+  var drawer = document.getElementById('drawer');
+  var backdrop = document.getElementById('drawer-backdrop');
+  if (!drawer || !backdrop) return;
+  htmx.ajax('GET', url, { target: '#drawer-content', swap: 'innerHTML' });
+  requestAnimationFrame(function () {
+    backdrop.classList.add('drawer-open');
+    drawer.classList.add('drawer-open');
+  });
+  document.body.style.overflow = 'hidden';
+  if (!_drawerEscBound) {
+    _drawerEscBound = true;
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDrawer(); });
+  }
+};
+window.closeDrawer = function () {
+  var drawer = document.getElementById('drawer');
+  var backdrop = document.getElementById('drawer-backdrop');
+  if (!drawer || !backdrop) return;
+  backdrop.classList.remove('drawer-open');
+  drawer.classList.remove('drawer-open');
+  document.body.style.overflow = '';
+};

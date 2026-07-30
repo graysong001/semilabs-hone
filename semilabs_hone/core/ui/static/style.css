@@ -16,3 +16,35 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); }
 
 /* Toast 入场动画 (规范 §11) */
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* ========== 统一交互范式: 弹窗/抽屉动效 (高级感打底) ========== */
+
+/* dialog 进出场: fade + 轻微上浮缩放, 丝滑不生硬 */
+@keyframes dialogIn {
+  from { opacity: 0; transform: translateY(-10px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+dialog[open] { animation: dialogIn 0.22s ease-out; }
+
+/* 确认弹窗 (confirmAction): 复用 dialog 基底, danger 主色 */
+#confirm-dialog .confirm-icon {
+  width: 44px; height: 44px; border-radius: 9999px;
+  background: rgba(255, 69, 96, 0.12); color: #FF4560;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+
+/* 抽屉 (openDrawer): 右侧滑入 + 遮罩淡入; JS 切换 .drawer-open */
+#drawer-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 60;
+  opacity: 0; pointer-events: none; transition: opacity 0.28s ease;
+}
+#drawer-backdrop.drawer-open { opacity: 1; pointer-events: auto; }
+#drawer {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 540px; max-width: 92vw; z-index: 61;
+  background: #222733; border-left: 1px solid #374151;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45);
+  transform: translateX(100%); transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  overflow-y: auto;
+}
+#drawer.drawer-open { transform: translateX(0); }

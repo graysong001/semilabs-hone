@@ -1,0 +1,74 @@
+{# 笔记详情内容 — posts 列表抽屉 (in_drawer=True) 与 /posts/{id} 整页共享 (PRD §4.6.1) #}
+{% if in_drawer %}
+<!-- 抽屉模式: 顶部吸顶关闭条 -->
+<div class="sticky top-0 z-10 flex items-center justify-between px-6 h-14 bg-app-content/95 backdrop-blur border-b border-gray-700/60">
+  <span class="text-sm font-medium text-gray-300">笔记详情</span>
+  <button onclick="closeDrawer()" title="关闭 (Esc)"
+          class="w-8 h-8 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700/60 flex items-center justify-center">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+  </button>
+</div>
+<div class="px-6 py-5">
+{% endif %}
+
+<article class="bg-app-card rounded-lg border border-gray-700 p-6">
+  <header class="border-b border-gray-700 pb-4 mb-4">
+    <h2 class="text-xl font-bold text-white">{{ post.title or "无标题" }}</h2>
+    <p class="text-sm text-gray-400 mt-2">
+      {% if post.platform == 'xiaohongshu' %}
+      <span class="inline-block px-2.5 py-0.5 rounded text-xs font-medium bg-red-500/15 text-red-400">小红书</span>
+      {% else %}
+      <span class="inline-block px-2.5 py-0.5 rounded text-xs font-medium bg-blue-500/15 text-blue-400">{{ post.platform }}</span>
+      {% endif %}
+      <span class="ml-2">作者: {{ post.author_name or "匿名" }}</span>
+      <span class="ml-2">发布于: {{ post.publish_time[:16] if post.publish_time else "未知" }}</span>
+    </p>
+  </header>
+
+  {% if post.content_text %}
+  <div class="text-gray-300 leading-relaxed whitespace-pre-wrap mb-6">
+    {{ post.content_text[:2000] }}{{ "..." if post.content_text and post.content_text|length > 2000 else "" }}
+  </div>
+  {% endif %}
+
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div class="bg-black/20 rounded-lg p-3 text-center">
+      <div class="text-xs text-gray-500">❤ 点赞</div>
+      <div class="text-lg font-semibold text-white">{{ metrics.get('likes', 0) }}</div>
+    </div>
+    <div class="bg-black/20 rounded-lg p-3 text-center">
+      <div class="text-xs text-gray-500">⭐ 收藏</div>
+      <div class="text-lg font-semibold text-white">{{ metrics.get('collects', 0) }}</div>
+    </div>
+    <div class="bg-black/20 rounded-lg p-3 text-center">
+      <div class="text-xs text-gray-500">💬 评论</div>
+      <div class="text-lg font-semibold text-white">{{ metrics.get('comments_count', 0) }}</div>
+    </div>
+    <div class="bg-black/20 rounded-lg p-3 text-center">
+      <div class="text-xs text-gray-500">↗ 分享</div>
+      <div class="text-lg font-semibold text-white">{{ metrics.get('shares', 0) }}</div>
+    </div>
+  </div>
+
+  {% if post.url %}
+  <p><a href="{{ post.url }}" target="_blank" rel="noopener" class="text-brand hover:text-brand-dark text-sm">查看原文 →</a></p>
+  {% endif %}
+</article>
+
+<!-- Comments -->
+<section class="bg-app-card rounded-lg border border-gray-700 p-6 mt-5">
+  <h3 class="text-base font-semibold text-white mb-4">评论 ({{ comments|length }})</h3>
+  {% for comment in comments %}
+  <article class="border-b border-gray-700/50 py-3 last:border-0">
+    <header class="flex justify-between items-center mb-1">
+      <span class="text-sm text-blue-400 font-medium">{{ comment.author_name or "匿名" }}</span>
+      <span class="text-xs text-gray-500">❤ {{ comment.like_count or 0 }}</span>
+    </header>
+    <p class="text-sm text-gray-300">{{ comment.content_text or "" }}</p>
+  </article>
+  {% else %}
+  <p class="text-gray-500 text-center text-sm py-4">暂无评论</p>
+  {% endfor %}
+</section>
+
+{% if in_drawer %}</div>{% endif %}

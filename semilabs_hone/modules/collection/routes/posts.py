@@ -75,6 +75,47 @@ async def api_item_comments(item_id: str) -> HTMLResponse:
     return HTMLResponse(_comments_fragment(item_id))
 
 
+@router.get("/api/items/{item_id}/detail")
+async def api_item_detail(request: Request, item_id: str) -> HTMLResponse:
+    """GET /api/items/{id}/detail — 笔记详情抽屉片段 (统一交互范式).
+
+    posts 列表行标题点击 → openDrawer 右侧滑出。与 /posts/{id} 整页共享
+    ``partials/_post_detail_content.html`` (in_drawer=True 带吸顶关闭条)。
+    """
+    from fastapi import HTTPException
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.post import CollectionItem
+    from semilabs_hone.core.models.comment import CollectionComment
+
+    sess = get_session()
+    try:
+        post = sess.query(CollectionItem).filter(CollectionItem.id == item_id).first()
+        if post is None:
+            raise HTTPException(status_code=404, detail="Post not found")
+        comments = (
+            sess.query(CollectionComment)
+            .filter(CollectionComment.item_id == post.id)
+            .order_by(CollectionComment.like_count.desc())
+            .all()
+        )
+    except HTTPException:
+        raise
+    finally:
+        sess.close()
+
+    t = _templates()
+    assert t is not None, "Templates not initialized"
+    return t.TemplateResponse(
+        request, "partials/_post_detail_content.html",
+        {
+            "post": post,
+            "metrics": _metrics_of(post),
+            "comments": comments,
+            "in_drawer": True,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------

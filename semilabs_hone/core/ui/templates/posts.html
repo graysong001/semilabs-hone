@@ -71,7 +71,7 @@
           {% endif %}
         </td>
         <td class="px-4 py-3">
-          <a href="/posts/{{ post.id }}" class="text-white font-medium hover:text-brand" onclick="event.stopPropagation()">
+          <a href="/posts/{{ post.id }}" class="text-white font-medium hover:text-brand" onclick="event.stopPropagation(); event.preventDefault(); openDrawer('/api/items/{{ post.id }}/detail')" title="查看详情">
             {{ (post.title or "无标题")[:30] }}{{ "..." if post.title and post.title|length > 30 else "" }}
           </a>
           <div class="text-xs text-gray-500 mt-0.5">{{ (post.content_text or "")[:40] }}</div>
