@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 _XHR_POLL_INTERVAL = 0.05
 #: Keep the buffer bounded on long-running sessions.
 _XHR_BUFFER_LIMIT = 200
+#: Extra window a scroll_collect step waits for the next page's XHR after a
+#: wheel scroll (the human-scroll wait_ms usually covers the latency; tests
+#: zero these against static-snapshot mocks instead of sleeping real seconds).
+_SNAPSHOT_WAIT_S = 1.5
+_SNAPSHOT_POLL_S = 0.1
 
 
 # Map group strings to their Pydantic models
@@ -257,9 +262,13 @@ class GenericEngine(BasePlatformScraper):
     ) -> None:
         """Scroll-and-collect loop with hard caps (PRD §8.4 场景4.2).
 
-        Re-extracts ``from_``/``group``/``map`` from the saved XHR snapshot after
-        each wheel scroll, dedups against already-collected ids, appends fresh
-        validated items to ``out``. Stops at ``max_scrolls`` (default 20) or
+        Seeds from the ``from_`` snapshot, then after each wheel scroll pulls
+        the NEXT intercepted response matching ``step.url_pattern``/``method``
+        from the live buffer — a lazy-load list issues a fresh XHR per page,
+        so re-parsing the seed snapshot after every scroll would dedup to zero
+        forever (that static-snapshot loop never saw any page beyond the
+        first). Dedups against already-collected ids, appends fresh validated
+        items to ``out``. Stops at ``max_scrolls`` (default 20) or
         ``empty_break`` (default 5) consecutive scrolls with no new items —
         never deadlocks on an infinite loader.
         """
@@ -284,7 +293,11 @@ class GenericEngine(BasePlatformScraper):
         while scrolls < step.max_scrolls and consecutive_empty < step.empty_break:
             await self._random_scroll(page, 1, step.wait_ms)
             scrolls += 1
-            fresh = self._extract_dedup(resp, group, fmap, collected)
+            new_resp = await self._take_new_snapshot(step)
+            if new_resp is None:
+                consecutive_empty += 1
+                continue
+            fresh = self._extract_dedup(new_resp, group, fmap, collected)
             if fresh:
                 out.extend(await self._validate_group(fresh, group))
                 consecutive_empty = 0
@@ -295,6 +308,30 @@ class GenericEngine(BasePlatformScraper):
             "scroll_collect: scrolls=%d items=%d consecutive_empty=%d",
             scrolls, len(out), consecutive_empty,
         )
+
+    async def _take_new_snapshot(self, step: Any) -> dict | None:
+        """Pull the next buffered response for a scroll_collect step.
+
+        The wheel scroll itself takes time (human multi-step deltas + wait_ms)
+        during which the lazy-load XHR usually lands; poll a short extra
+        window for stragglers. A step without ``url_pattern`` cannot receive
+        incremental pages — return None immediately (same net effect as the
+        old static re-parse, without the wasted work).
+        """
+        url_pattern = getattr(step, "url_pattern", None) or ""
+        if not url_pattern:
+            return None
+        method = getattr(step, "method", None)
+        captured = self._take_captured(url_pattern, method)
+        if captured is not None:
+            return captured
+        deadline = time.monotonic() + _SNAPSHOT_WAIT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_SNAPSHOT_POLL_S)
+            captured = self._take_captured(url_pattern, method)
+            if captured is not None:
+                return captured
+        return None
 
     def _extract_dedup(
         self,

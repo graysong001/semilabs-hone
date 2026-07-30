@@ -206,7 +206,7 @@ class TestGenericEngineWithXhsYaml:
     """Test engine with the actual XHS platform.yaml."""
 
     @pytest.mark.asyncio
-    async def test_xhs_search_flow(self):
+    async def test_xhs_search_flow(self, monkeypatch):
         """Engine with XHS yaml + mock page + fixture should extract items."""
         yaml_path = (
             Path(__file__).parent.parent.parent
@@ -227,6 +227,17 @@ class TestGenericEngineWithXhsYaml:
             url_pattern="/api/sns/web/v1/search/notes",
         )
         engine.page = page
+
+        # scroll_collect step in the real yaml: neutralize the human scroll and
+        # the new-snapshot poll window (the static mock page never emits more).
+        async def _noop_scroll(p, mt, wms):
+            return None
+        monkeypatch.setattr(
+            "semilabs_hone.modules.collection.anti_detect.human_behavior.random_scroll",
+            _noop_scroll,
+        )
+        import semilabs_hone.modules.collection.scrapers.engine as engine_mod
+        monkeypatch.setattr(engine_mod, "_SNAPSHOT_WAIT_S", 0)
 
         items = await engine.run_flow("search", keyword="咖啡", sort="general")
 
@@ -371,6 +382,86 @@ class TestScrollCollect:
         )
         await engine.run_flow("search", keyword="x")
         assert len(scroll_calls) == 3  # capped at max_scrolls
+
+
+class _PagingScrollPage(_ScrollPage):
+    """Mock page that serves the next XHR page on each wheel scroll (lazy load)."""
+
+    def __init__(self, pages: list[dict], url_pattern: str = "/api/search"):
+        super().__init__(pages[0], url_pattern)
+        self._pages = pages
+        self._served = 1  # the first page is emitted by goto
+        outer = self
+
+        class _Mouse:
+            async def wheel(self, dx, dy):
+                if outer._served < len(outer._pages):
+                    data = outer._pages[outer._served]
+                    outer._served += 1
+                    for cb in outer._listeners.get("response", []):
+                        cb(MockResponse(f"https://example.com{outer._url}", data))
+
+        self.mouse = _Mouse()
+
+
+class TestScrollCollectPagination:
+    """scroll_collect must consume FRESH XHR snapshots per scroll (增量翻页)."""
+
+    @pytest.mark.asyncio
+    async def test_scroll_collect_consumes_incremental_pages(self, monkeypatch):
+        """A wheel scroll triggers the next page's XHR → new items collected,
+        cross-page duplicates dropped (修复回归: 旧实现循环内重解析同一静态
+        快照, 永远采不到第二页)."""
+        page2 = {
+            "data": {
+                "items": [
+                    {"note_id": "64abc123def456", "display_title": "首页重复帖",
+                     "user": {"nickname": "甲"}, "interact_info": {"liked_count": "1"}},
+                    {"note_id": "64fff000aaa111", "display_title": "第二页新帖",
+                     "user": {"nickname": "乙"}, "interact_info": {"liked_count": "2"}},
+                ],
+                "has_more": False,
+            },
+            "success": True,
+        }
+        spec = PlatformSpec(
+            platform="test_platform",
+            display_name="Test Platform",
+            base_url="https://test.example.com",
+            login=LoginSpec(type="qrcode", login_url="/login"),
+            flows={
+                "search": Flow(steps=[
+                    Step(type="navigate", url="/search?q={keyword}"),
+                    Step(type="wait_xhr", url_pattern="/api/search", method="POST",
+                         save_as="list_resp", timeout_ms=15000),
+                    Step(type="scroll_collect", from_="list_resp",
+                         url_pattern="/api/search", method="POST",
+                         group="ItemRef", map={"item_id": "$.note_id"},
+                         max_scrolls=20, empty_break=2, wait_ms=10),
+                ]),
+            },
+        )
+        engine = GenericEngine(spec=spec)
+        engine.page = _PagingScrollPage(
+            [_load_fixture("search_response.json"), page2]
+        )
+
+        async def fake_scroll(p, mt, wms):
+            # the real random_scroll drives the wheel that fires the lazy XHR
+            await p.mouse.wheel(0, 800)
+
+        monkeypatch.setattr(
+            "semilabs_hone.modules.collection.anti_detect.human_behavior.random_scroll",
+            fake_scroll,
+        )
+        import semilabs_hone.modules.collection.scrapers.engine as engine_mod
+        monkeypatch.setattr(engine_mod, "_SNAPSHOT_WAIT_S", 0.5)
+        monkeypatch.setattr(engine_mod, "_SNAPSHOT_POLL_S", 0.01)
+
+        items = await engine.run_flow("search", keyword="x")
+        ids = [i.item_id for i in items if isinstance(i, ItemRef)]
+        # 首页 2 条 + 第二页去重后 1 条新 = 3 (顺序: seed 先, 增量后)
+        assert ids == ["64abc123def456", "64def789abc012", "64fff000aaa111"]
 
 
 class TestNoScrollByEvaluate:

@@ -30,14 +30,23 @@ flows:
         method: POST
         save_as: search_resp
         timeout_ms: 15000
-      - type: extract
+      # 翻页增量采集: scroll_collect 自带 seed extract (首屏), 之后每轮滚动从
+      # 拦截 buffer 取下一条 search/notes 响应增量提取+跨页去重; 不再有独立
+      # extract 步骤 (否则首屏数据会重复入库)。empty_break=5 次无新即收,
+      # max_scrolls=20 硬顶 (PRD §8.4 场景4.2)。
+      - type: scroll_collect
         from: search_resp
+        url_pattern: "/api/sns/web/v1/search/notes"
+        method: POST
         group: ItemRef
         map:
           item_id: "$.note_id"
           title: "$.display_title"
           author_name: "$.user.nickname"
           likes: "$.interact_info.liked_count"
+        max_scrolls: 20
+        empty_break: 5
+        wait_ms: 1500
 
   detail:
     steps:
