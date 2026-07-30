@@ -120,6 +120,13 @@ async def page_posts(
 
     t = _templates()
     assert t is not None, "Templates not initialized"
+    # sidebar 运行中徽章在全站共享 (default(0) 会误导为无任务运行)
+    from semilabs_hone.core.models.task import CollectionTask
+    sess2 = get_session()
+    try:
+        running_count = sess2.query(CollectionTask).filter(CollectionTask.status == "running").count()
+    finally:
+        sess2.close()
     return t.TemplateResponse(
         request, "posts.html",
         {
@@ -132,6 +139,7 @@ async def page_posts(
             "filter_platform": platform,
             "filter_task_id": task_id,
             "active_page": "data",
+            "running_count": running_count,
         },
     )
 

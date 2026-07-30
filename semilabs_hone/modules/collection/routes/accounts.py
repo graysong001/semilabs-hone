@@ -165,6 +165,15 @@ async def page_accounts(request: Request) -> HTMLResponse:
     """GET /accounts — account list + add form（v2 暗色页，active_page='auth'）。"""
     from semilabs_hone.modules.collection.scrapers.registry import list_platforms
 
+    # sidebar 运行中徽章在全站共享 (default(0) 会误导为无任务运行)
+    from semilabs_hone.core.models.db import get_session
+    from semilabs_hone.core.models.task import CollectionTask
+    sess = get_session()
+    try:
+        running_count = sess.query(CollectionTask).filter(CollectionTask.status == "running").count()
+    finally:
+        sess.close()
+
     t = _templates()
     assert t is not None, "Templates not initialized"
     return t.TemplateResponse(
@@ -173,6 +182,7 @@ async def page_accounts(request: Request) -> HTMLResponse:
             "accounts": _list_accounts(),
             "platforms": list_platforms(),
             "active_page": "auth",
+            "running_count": running_count,
         },
     )
 

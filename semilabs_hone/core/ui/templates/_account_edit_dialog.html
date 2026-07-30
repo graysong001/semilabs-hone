@@ -1,5 +1,8 @@
-<dialog open id="account-edit-dialog" class="modal-backdrop fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-        hx-on:htmx:after-swap="this.querySelector('dialog').showModal()">
+<!-- 不带 open 属性: 插入 DOM 后由 after-swap 触发 showModal() 成为真模态
+     (ESC 可关 + ::backdrop 生效)。旧写法在 dialog 自身上再找后代 dialog →
+     null.showModal() 必抛 TypeError, 靠 open 属性兜底 → 假模态。 -->
+<dialog id="account-edit-dialog" class="modal-backdrop fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+        hx-on:htmx:after-swap="this.showModal()">
   <div class="bg-app-card border border-gray-700 rounded-lg p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-lg font-semibold text-white">编辑账号 · #{{ account.id }} · {{ account.platform }}</h3>
@@ -15,9 +18,6 @@
               document.getElementById('account-edit-dialog').remove();
               showToast({severity:'success',message:(resp&&resp.message)||'已更新',duration:2000});
               setTimeout(()=>location.reload(),2000);
-            }else{
-              const msg=(resp&&resp.error)||('更新失败'+(event.detail.xhr.status?'（HTTP '+event.detail.xhr.status+'）':''));
-              showToast({severity:'error',message:msg,duration:5000});
             }">
       <!-- 备注 -->
       <div class="mb-4">

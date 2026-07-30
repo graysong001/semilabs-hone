@@ -1,5 +1,5 @@
-<dialog open id="account-edit-dialog" class="modal-backdrop fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-        hx-on:htmx:after-swap="this.querySelector('dialog').showModal()">
+<dialog id="account-edit-dialog" class="modal-backdrop fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+        hx-on:htmx:after-swap="this.showModal()">
   <div class="bg-app-card border border-gray-700 rounded-lg p-6 w-full max-w-md" onclick="event.stopPropagation()">
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-lg font-semibold text-white">更新 Cookie · 账号 #{{ account.id }}</h3>
@@ -8,7 +8,7 @@
     </div>
     <form hx-post="/api/accounts/{{ account.id }}/update-cookie"
           hx-swap="none"
-          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();showToast({severity:'success',message:'Cookie 已更新',duration:2000});setTimeout(()=>location.reload(),2000);}else if(event.detail.xhr.status===409){const r=JSON.parse(event.detail.xhr.responseText);showToast({severity:'warn',message:r.error||'账号冲突',duration:4000});}else{showToast({severity:'error',message:'更新失败',duration:3000});}">
+          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();showToast({severity:'success',message:'Cookie 已提交，验证结果稍后以通知形式返回',duration:3000});setTimeout(()=>location.reload(),2000);}">
       <div class="mb-3 text-xs text-gray-400">
         {% if cookie_count > 0 %}
         <span class="text-green-400">● 已绑定 {{ cookie_count }} 条 cookie</span>

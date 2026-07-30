@@ -7,14 +7,13 @@
     <span class="text-gray-400">素材加工</span><span class="text-gray-600">/</span>
     <span class="text-white font-medium">数据资产库</span>
   </nav>
-  {% if filter_task_id %}
-  <a href="/api/export?task_id={{ filter_task_id }}" class="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">
+  <!-- 全量导出常驻 (空数据时 exportCsv 前端 toast); 按任务过滤时导出该任务 -->
+  <a href="#" onclick="exportCsv('{{ filter_task_id or '' }}', this); return false;" class="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium">
     <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
       <path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
     </svg>
     导出 CSV
   </a>
-  {% endif %}
 </div>
 
 <!-- 过滤栏 -->

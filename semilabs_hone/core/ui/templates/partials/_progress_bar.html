@@ -1,8 +1,10 @@
-<!-- 进度条 (ui_design_spec_v2 §7.2) -->
+<!-- 进度条 (ui_design_spec_v2 §7.2) — data-progress-for 是 app.js updateProgress 的
+     WS 实时驱动契约 (Stage 1 调和红线): 缺了它进度条只在渲染时画一次, 永不实时 -->
 {% set pct = (task.actual_count / task.expected_count * 100)|round if task.expected_count and task.expected_count > 0 else 0 %}
 <div class="flex items-center gap-2">
   <div class="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden min-w-[80px]">
-    <div class="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full transition-all duration-500" style="width: {{ pct }}%"></div>
+    <div class="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full transition-all duration-500"
+         style="width: {{ pct }}%" data-progress-for="{{ task.id }}" role="progressbar" aria-valuenow="{{ pct|int }}" aria-valuemin="0" aria-valuemax="100"></div>
   </div>
   <span class="text-xs text-gray-400 whitespace-nowrap">{{ task.actual_count }}/{{ task.expected_count }}</span>
 </div>

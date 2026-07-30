@@ -80,9 +80,21 @@
       });
   };
 
-  /* ========== 全局 HTMX 错误 Toast ========== */
-  document.addEventListener("htmx:responseError", function () {
-    showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
+  /* ========== 全局 HTMX 错误 Toast ==========
+   * 后端 4xx/409 的 JSON 契约是 {error, fix_hint?}（G8 pre-flight / 删除守卫 / cookie 校验），
+   * 必须透出具体原因——“系统异常”对可自愈的用户错误是误导。按钮级不再重复 toast。 */
+  function toastResponseError(xhr) {
+    var msg = "系统异常，操作失败，请检查后台日志";
+    try {
+      var body = JSON.parse(xhr.responseText);
+      if (body && body.error) {
+        msg = body.error + (body.fix_hint ? "：" + body.fix_hint : "");
+      }
+    } catch (e) { /* 非 JSON 响应用兜底文案 */ }
+    showToast({ severity: "error", message: msg, duration: 4000 });
+  }
+  document.addEventListener("htmx:responseError", function (evt) {
+    if (evt.detail && evt.detail.xhr) toastResponseError(evt.detail.xhr);
   });
   document.addEventListener("htmx:sendError", function () {
     showToast({ severity: "error", message: "系统异常，操作失败，请检查后台日志", duration: 3000 });
@@ -213,6 +225,13 @@
         showToast({
           severity: msg.valid ? "info" : "warn",
           message: msg.message || (msg.valid ? "会话有效" : "会话已失效"),
+        });
+        break;
+      case "cookie_import_conflict":
+        showToast({
+          severity: "error",
+          message: msg.message || "该平台身份已绑定其他账号，Cookie 未生效",
+          duration: 6000,
         });
         break;
       default: break;
