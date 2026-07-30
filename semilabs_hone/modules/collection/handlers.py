@@ -178,8 +178,9 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
         # a worker ctx exists (F5), else persisted to disk (degraded/test path).
         cookies = payload.get("cookies")
         if cookies:
+            reason = None
             if _WORKER_CTX is not None:
-                imported = await _import_cookies_ctx(platform, account_id, cookies, progress_cb)
+                imported, reason = await _import_cookies_ctx(platform, account_id, cookies, progress_cb)
             else:
                 _import_cookies(account_id, platform, cookies, progress_cb)
                 imported = True
@@ -210,6 +211,10 @@ async def handler_login(payload: dict, progress_cb: Callable) -> dict:
                     "login_method": "cookie_import",
                     "account_id": account_id,
                 }
+        # 注入/验证失败：携带具体原因（插件格式、注入异常、登录态失效），
+        # 不再 fallthrough 到笼统的"所有登录方式均失败"。
+        from semilabs_hone.core.utils.retry import LoginError
+        raise LoginError(reason or "Cookie 导入验证未通过")
 
     # Fall through to QR if auto and recovery failed
     if method == "auto":
@@ -389,18 +394,70 @@ async def _try_session_recovery(platform: str, account_id: int | None, progress_
     return ok
 
 
-async def _import_cookies_ctx(platform: str, account_id: int | None, cookies: list, progress_cb: Callable) -> bool:
-    """Tier 3 (live): import cookies into the profile via ctx.add_cookies, then validate."""
+#: Playwright sameSite 合法值映射 — Chrome 扩展导出的 cookie 用
+#: unspecified/no_restriction（甚至缺省），直接喂 add_cookies 必报错。
+_SAMESITE_MAP = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "unspecified": "None",
+    "no_restriction": "None",
+}
+
+
+def _normalize_cookies(cookies: list) -> list:
+    """归一化 Chrome 扩展导出的 cookie 为 Playwright add_cookies 兼容格式。
+
+    - sameSite: unspecified/no_restriction/大小写混杂 → Strict|Lax|None
+    - expirationDate → expires；session/无有效期 → expires=-1
+    - 仅保留 Playwright 接受字段（剥离 hostOnly/storeId/session/id 等）
+    """
+    out = []
+    for c in cookies:
+        if not isinstance(c, dict):
+            continue
+        nc = {
+            "name": str(c.get("name", "")),
+            "value": str(c.get("value", "")),
+            "domain": str(c.get("domain", "")),
+            "path": str(c.get("path") or "/"),
+            "secure": bool(c.get("secure")),
+            "httpOnly": bool(c.get("httpOnly")),
+        }
+        ss = _SAMESITE_MAP.get(str(c.get("sameSite") or "").lower())
+        if ss:
+            nc["sameSite"] = ss
+        try:
+            exp = float(c.get("expires", c.get("expirationDate")) or 0)
+        except (TypeError, ValueError):
+            exp = 0
+        nc["expires"] = exp if exp > 0 else -1
+        out.append(nc)
+    return out
+
+
+async def _import_cookies_ctx(platform: str, account_id: int | None, cookies: list, progress_cb: Callable) -> tuple[bool, str | None]:
+    """Tier 3 (live): import cookies into the profile via ctx.add_cookies, then validate.
+
+    Returns (ok, reason): reason is a user-facing failure message when ok is
+    False — never fail silently (the old bare-bool return dropped the cause).
+    """
     if _WORKER_CTX is None:
         progress_cb("login_import_no_ctx", {"account_id": account_id})
-        return False
+        return False, "采集浏览器未就绪，请稍后重试"
+    normalized = _normalize_cookies(cookies)
+    if not normalized:
+        return False, "Cookie 数组为空或元素格式无效"
     try:
-        await _WORKER_CTX.add_cookies(cookies)
-        progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(cookies)})
+        await _WORKER_CTX.add_cookies(normalized)
+        progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(normalized)})
     except Exception as exc:
         logger.warning(f"add_cookies failed: {exc}")
-        return False
-    return await _session_check(platform, account_id, progress_cb)
+        progress_cb("cookie_import_failed", {"account_id": account_id, "reason": str(exc)})
+        return False, f"Cookie 注入浏览器失败：{exc}"
+    if await _session_check(platform, account_id, progress_cb):
+        return True, None
+    return False, "Cookie 已注入但登录态验证未通过：cookie 可能已失效或不属于该平台，请重新导出"
 
 
 # Seconds between QR success polls; module-level so tests can patch.
@@ -1003,6 +1060,15 @@ def _check_rhythm(account_id: int | None, progress_cb: Callable, now: datetime |
     here — it propagates so the caller parks the task as `paused` (PRD §7.1
     mandates paused, not need_human). DB lookup failures still pass (don't
     block scraping on infra hiccups). ``now`` is injectable (会话经验 #7).
+
+    Clock alignment (2026-07-31): the count must use the SAME clock as the
+    store path — upsert_item stamps scraped_at with datetime.now(timezone.utc)
+    (tz suffix dropped on SQLite, so func.date() yields the UTC date). The old
+    local-date compare silently undercounted during local 00:00-08:00 (UTC
+    still yesterday): fresh items never matched "today" and the cap went
+    dormant. UTC-day buckets also match dashboard.today_start and reset at
+    08:00 local — exactly when quiet hours end, i.e. one quota day = one
+    active window.
     """
     from semilabs_hone.modules.collection.scheduler.rhythm import check_daily_limit
 
@@ -1012,7 +1078,7 @@ def _check_rhythm(account_id: int | None, progress_cb: Callable, now: datetime |
         from semilabs_hone.core.models.post import CollectionItem
         sess = get_session()
         try:
-            today = (now or datetime.now()).date().isoformat()
+            today = (now or datetime.now(timezone.utc)).date().isoformat()
             today_count = (
                 sess.query(CollectionItem)
                 .filter(func.date(CollectionItem.scraped_at) == today)

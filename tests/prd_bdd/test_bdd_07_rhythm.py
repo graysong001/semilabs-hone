@@ -5,7 +5,7 @@ BDD acceptance tests for scenarios 7.1 (全局日限额跨任务累加) and 7.2 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,9 +24,15 @@ class TestScenario71DailyQuotaAccumulation:
     """
 
     async def _seed_today_items(self, db_session, n, *, platform="xiaohongshu"):
-        """Insert n collection_items dated today (simulating task A's morning run)."""
+        """Insert n collection_items dated today (simulating task A's morning run).
+
+        Seeds use the SAME clock as the production store path (UTC-aware —
+        upsert_item stamps datetime.now(timezone.utc)); a local-naive seed
+        lands on a different func.date() bucket during local 00:00-08:00 and
+        the quota count silently misses it (wall-clock-dependent flake).
+        """
         from semilabs_hone.core.models.post import CollectionItem
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         for i in range(n):
             db_session.add(CollectionItem(
                 platform=platform, platform_id=f"seedA_{i}",
