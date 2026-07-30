@@ -125,6 +125,26 @@ git cherry-pick d810008 e8e027c f8881a5 7e5051a
 
 ---
 
+## 7b. v2 暗色 UI 全量移植（feat/ui-v2-dark，off main）
+
+v2 分支后端停在旧点（缺 P0 修复/schema 硬化/E2E），直接 merge 有丢修复风险 → **手工移植**：UI 资产 `git checkout origin/feat/ui-redesign-v2 -- <path>`，Python 路由/模型/handler 以 main 为底手工叠加 v2 新增。Tailwind Play CDN + Google Fonts 全部 vendor 本地化，离线可用。
+
+| # | Stage | 要点 | 提交 |
+|---|---|---|---|
+| 7b.1 ✅ | 基座 | vendor（tailwind.js + 5 族字体 woff2 + fonts.css）；base/_sidebar/style.css 取 v2；app.js 调和（v2 为底 + 保留 `data-progress-for`/`session_status`） | 799009d |
+| 7b.2 ✅ | dashboard 任务大厅 | dashboard.py 统计卡/分页/badge_map；6 模板取 v2 | 6c990ea |
+| 7b.3 ✅ | 任务路由重构 | `/tasks` 302→`/`；删 `/tasks/new`、`/tasks/{id}` 页面及 5 模板；新增 pause/DELETE/activate-browser 端点；`/row` 渲染 partials/_task_row；保留 cancel/resume 修复 | 9c500d6 |
+| 7b.4 ✅ | posts 数据资产 | posts.html/_comments 取 v2；post_detail v2 未重写 → 轻量暗色化（数据绑定不变）；posts.py 补 task_id 过滤/active_page='data' | 7bcf11c |
+| 7b.5 ✅ | accounts 三标识 | nickname→remark(NOT NULL) + platform_user_id/platform_nickname + UNIQUE(platform,platform_user_id)；保留 phone/profile_dir/daily_count_date；v2 七端点叠加；handlers 身份提取（identity_api/identity_map）+ cookie_import 冲突 LoginError；3 模板取 v2 | 9155751 |
+| 7b.6 ✅ | 测试适配 | E2E remark 遗漏修复；s9a/bdd_04_nav 14 绿确认；E2E 仅依赖 API 端点不依赖被删页面 | 9dd31fe |
+| 7b.7 ✅ | 验收 | loop_gate 全绿（覆盖率 84%→85%，TestStage7CoveragePatch 14 测试补分支）；TestClient 冒烟 `/ /accounts /posts` + vendor 200 + 任务生命周期 | 738db74 |
+
+**计划外适配（v2 不可直搬的三处）**：① delete 守卫——PRD 无 task→account FK，v2 按 account_id 列查 running 不可搬 → 平台化守卫（同平台 pending/running → 409）；② create 保留 main F6 指纹分配（v2 无）；③ v2 import-cookies 冲突透传在文件 IPC 下是死代码 → 冲突只走 WS `cookie_import_conflict` 事件。
+
+**遗留（用户操作）**：accounts schema 变更（remark NOT NULL + 新列 + UNIQUE）无迁移 → 先 `/api/export` 备份，删 `data/factory.db` 重启重建，再人工走查 SOP（三标识登录 → 任务大厅建任务 → 风控弹窗 → 进度 → 导出）。
+
+---
+
 ## 8. P2：收尾
 
 1. `docs/DEV_PLAN.md`：更新主线声明（合并完成，fix 线 F/G 已全部移植或归档）。
