@@ -61,8 +61,9 @@ class TestScenario41TimeoutSkip:
 
         async def mock_fetch_item(ref):
             attempts["n"] += 1
-            if attempts["n"] == 1:
-                # Simulate page.goto / wait_for_selector timing out (>30s).
+            if ref.item_id == "bad":
+                # 持续超时: 瞬时网络重试(1次)后仍失败 → 按无效件跳过
+                # (PRD 4.1 语义: 捕获 + 不中断 + 计数 + 继续下一条)
                 raise TimeoutError("page.goto: timeout 30000ms exceeded")
             return ScrapedPost(platform_id=ref.item_id, title="ok", content="c")
 
@@ -99,8 +100,8 @@ class TestScenario41TimeoutSkip:
             assert result["posts_scraped"] == 1
             # The timed-out ref was logged as a skip (invalid件 consumed).
             assert any(m == "detail_skip_error" for m, _ in progress)
-            # Both refs were attempted (bad skipped, good stored) — continue next URL.
-            assert attempts["n"] == 2
+            # bad 重试 1 次后仍失败才跳过 (bad×2 + good×1) — continue next URL.
+            assert attempts["n"] == 3
         finally:
             _restore_handler_env(h_mod, orig)
 
