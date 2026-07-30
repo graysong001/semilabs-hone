@@ -1,13 +1,17 @@
 <!-- 侧边栏: 四大业务板块 (ui_design_spec_v2 §5) -->
 <aside class="w-[240px] bg-app border-r border-gray-700/60 flex flex-col fixed top-0 left-0 bottom-0 z-50">
-  <div class="h-[60px] flex items-center px-4 border-b border-gray-700/50">
-    <!-- 品牌区: 终端卡片风 — 常驻品牌色淡底+圆角边框，与菜单项(无底色, hover 才亮)形成明确层级;
-         CLI 文字 logo 保留 ❯ 提示符 + 闪烁光标 (vendored 字体无中文字形, font-mono 等宽栈混排) -->
-    <div class="w-full flex items-center px-3 py-1.5 rounded-md bg-brand/10 border border-brand/25 select-none">
-      <span class="font-mono text-sm font-bold text-white tracking-wider">
-        <span class="text-success">❯</span> SemiLabs-内容工厂<span class="text-brand animate-pulse">_</span>
-      </span>
-    </div>
+  <div class="h-[60px] flex flex-col justify-center px-5 border-b border-gray-700/50">
+    <!-- 品牌区: ASCII 点阵字 logo (SEMILABS, 5行×3列 # 字符画) + CLI 中文行 —
+         点阵字与菜单项的普通文字天然区分，无需底色卡片; 中文走 font-mono 等宽栈
+         (vendored 字体无中文字形)，❯ 提示符 + 闪烁光标保留 CLI 意象 -->
+    <pre class="font-mono text-[8px] leading-[8px] text-white select-none">### ### # # ### #    #  ##  ###
+#   #   ###  #  #   # # # # #
+### ##  ###  #  #   ### ##  ##
+  # #   # #  #  #   # # # # #
+### ### # # ### ### # # ##  ## </pre>
+    <span class="mt-1 font-mono text-[11px] font-bold text-gray-400 tracking-wider select-none leading-none">
+      <span class="text-success">❯</span> 内容工厂<span class="text-brand animate-pulse">_</span>
+    </span>
   </div>
   <nav class="flex-1 py-4 overflow-y-auto">
     <!-- 模块一：素材抓取 -->
