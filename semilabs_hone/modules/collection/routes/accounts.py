@@ -24,6 +24,7 @@ Rules that come from walking the user SOP:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime
@@ -354,6 +355,11 @@ async def api_update_cookie_dialog(request: Request, account_id: int) -> HTMLRes
         sess.close()
 
 
+#: update-cookie 同步等待 worker 注入+验证的上限（worker 冷启动拉起 Chrome
+#: 较慢，给足余量；超时返回 504 让用户稍后手动验证）。
+_COOKIE_VERIFY_TIMEOUT_S = 120.0
+
+
 @router.post("/api/accounts/{account_id}/update-cookie")
 async def api_update_cookie(
     request: Request,
@@ -363,7 +369,10 @@ async def api_update_cookie(
     """POST /api/accounts/{id}/update-cookie — 更新指定账号的 cookie（行级操作）。
 
     [v2 方案A] 替代原全局 import-cookies 表单流，改为行级操作；
-    严格校验 → 同步落盘 → IPC 异步注入验证（提取平台身份回写）。
+    严格校验 → 同步落盘 → IPC 注入验证。
+    [2026-07-30] 同步等待 worker 验证结果：成功/失败原因即时返回（插件导出
+    格式经 handlers._normalize_cookies 归一化）；仅测试/无 spawner 环境降级
+    为异步 submitted。
     """
     cookies_data, err = _validate_cookie_json(cookies or "")
     if err:
@@ -380,7 +389,27 @@ async def api_update_cookie(
         json.dump(cookies_data, f, ensure_ascii=False, indent=2)
 
     request_id = _submit_cookie_import(request, account_id, platform, cookies_data)
-    return JSONResponse({"ok": True, "request_id": request_id, "status": "submitted"})
+
+    # 无 spawner（测试/worker 手动管理模式）→ 旧的异步 submitted 契约
+    if getattr(request.app.state, "worker_spawner", None) is None:
+        return JSONResponse({"ok": True, "request_id": request_id, "status": "submitted"})
+
+    IPCClient, _ = _ipc()
+    try:
+        result = await IPCClient().wait_result(request_id, timeout=_COOKIE_VERIFY_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return JSONResponse({
+            "ok": False,
+            "error": "验证超时：采集浏览器未在预期时间内响应，请稍后点击「登录」重试",
+        }, status_code=504)
+
+    if result.status == "ok":
+        return JSONResponse({
+            "ok": True, "request_id": request_id, "status": "verified",
+            "message": "Cookie 验证通过，账号已激活",
+        })
+    err_msg = (result.error or {}).get("message") or "Cookie 验证未通过"
+    return JSONResponse({"ok": False, "error": err_msg}, status_code=422)
 
 
 @router.put("/api/accounts/{account_id}")

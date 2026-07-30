@@ -8,7 +8,19 @@
     </div>
     <form hx-post="/api/accounts/{{ account.id }}/update-cookie"
           hx-swap="none"
-          hx-on::after-request="if(event.detail.successful){document.getElementById('account-edit-dialog').remove();showToast({severity:'success',message:'Cookie 已提交，验证结果稍后以通知形式返回',duration:3000});setTimeout(()=>location.reload(),2000);}">
+          hx-on::before-request="var b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='注入并验证中…';"
+          hx-on::after-request="var b=this.querySelector('button[type=submit]');b.disabled=false;b.textContent='更新并验证';
+            if(event.detail.successful){
+              var okMsg='Cookie 验证通过，账号已激活';
+              try{okMsg=JSON.parse(event.detail.xhr.response).message||okMsg;}catch(e){}
+              document.getElementById('account-edit-dialog').remove();
+              showToast({severity:'success',message:okMsg,duration:4000});
+              setTimeout(()=>location.reload(),1500);
+            }else{
+              var errMsg='Cookie 验证失败';
+              try{errMsg=JSON.parse(event.detail.xhr.response).error||errMsg;}catch(e){}
+              showToast({severity:'error',message:errMsg,duration:8000});
+            }">
       <div class="mb-3 text-xs text-gray-400">
         {% if cookie_count > 0 %}
         <span class="text-green-400">● 已绑定 {{ cookie_count }} 条 cookie</span>

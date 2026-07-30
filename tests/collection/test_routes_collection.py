@@ -679,3 +679,74 @@ class TestStage7CoveragePatch:
     def test_dashboard_invalid_page_param_falls_back(self, client):
         resp = client.get("/?page=abc")
         assert resp.status_code == 200
+
+
+# ─── update-cookie 同步等待验证（2026-07-30：导入即验证 + 明确报错）─────
+
+class _FakeIpcResult:
+    def __init__(self, status, error=None):
+        self.status = status
+        self.error = error
+
+
+def _fake_ipc_waitable(monkeypatch, *, result=None, wait_error=None):
+    """Stub _ipc with a wait_result that returns/raises the given outcome."""
+    from semilabs_hone.modules.collection.routes import accounts as acc
+    from semilabs_hone.core.ipc.protocol import IPCRequest
+
+    class _FakeClient:
+        def submit(self, req):
+            return None
+
+        async def wait_result(self, request_id, timeout=300):
+            if wait_error is not None:
+                raise wait_error
+            return result
+
+    monkeypatch.setattr(acc, "_ipc", lambda: (_FakeClient, IPCRequest))
+
+
+class TestUpdateCookieSyncVerify:
+    """有 spawner（生产）时 update-cookie 同步等待 worker 验证结果。"""
+
+    @pytest.fixture
+    def spawner(self, client):
+        client.app.state.worker_spawner = lambda account_id: None
+        yield
+        client.app.state.worker_spawner = None
+
+    def test_verified_returns_activation_message(self, client, db_session, monkeypatch, spawner):
+        _fake_ipc_waitable(monkeypatch, result=_FakeIpcResult("ok"))
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                           data={"cookies": _OK_COOKIE})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True and body["status"] == "verified"
+        assert "已激活" in body["message"]
+
+    def test_worker_error_surfaces_422_with_reason(self, client, db_session, monkeypatch, spawner):
+        _fake_ipc_waitable(monkeypatch, result=_FakeIpcResult(
+            "error", error={"message": "Cookie 已注入但登录态验证未通过：cookie 可能已失效"}))
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                           data={"cookies": _OK_COOKIE})
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["ok"] is False and "已失效" in body["error"]
+
+    def test_worker_error_without_message_falls_back(self, client, db_session, monkeypatch, spawner):
+        _fake_ipc_waitable(monkeypatch, result=_FakeIpcResult("error", error=None))
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                           data={"cookies": _OK_COOKIE})
+        assert resp.status_code == 422
+        assert resp.json()["error"] == "Cookie 验证未通过"
+
+    def test_wait_timeout_returns_504(self, client, db_session, monkeypatch, spawner):
+        _fake_ipc_waitable(monkeypatch, wait_error=TimeoutError("timed out"))
+        aid = _seed_account(db_session)
+        resp = client.post(f"/api/accounts/{aid}/update-cookie",
+                           data={"cookies": _OK_COOKIE})
+        assert resp.status_code == 504
+        assert "验证超时" in resp.json()["error"]
