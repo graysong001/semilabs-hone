@@ -718,19 +718,43 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
             "percent": _percent(processed, planned_total),
         })
 
-        try:
-            item_refs = await engine.search(keyword, sort)
-        except Exception as exc:
-            from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
-            if isinstance(exc, RiskProbeHit):
-                # Captcha/login wall during search goto/scroll → suspend.
-                await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
-                break  # task suspended (need_human); stop the keyword loop
-            from semilabs_hone.core.utils.retry import SkimError
-            if isinstance(exc, SkimError):
-                raise
-            logger.warning(f"Search failed for '{keyword}': {exc}")
-            item_refs = []
+        # Search retry loop: a RiskProbeHit suspends → human resume → re-run
+        # the SAME keyword search (symmetric with the detail retry loop). A
+        # "stop" directive parks the task as paused and returns immediately —
+        # the old `break` fell through to _complete_task and marked a
+        # human-interrupted task completed.
+        item_refs = []
+        search_done = False
+        while not search_done:
+            try:
+                item_refs = await engine.search(keyword, sort)
+                search_done = True
+            except Exception as exc:
+                from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+                if isinstance(exc, RiskProbeHit):
+                    # Captcha/login wall during search goto/scroll → suspend.
+                    verdict = await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                    if verdict == "stop":
+                        progress_cb("user_stop", {
+                            "task_id": task_id, "stage": "search",
+                            "keyword": keyword,
+                        })
+                        _set_task_paused(task_id, progress_cb)
+                        return {
+                            "status": "paused",
+                            "reason": "user_stop",
+                            "posts_scraped": total_posts,
+                            "comments_count": total_comments,
+                            "images_count": total_images,
+                            "last_note_index": last_note_index,
+                        }
+                    continue  # resume → retry the same keyword search
+                from semilabs_hone.core.utils.retry import SkimError
+                if isinstance(exc, SkimError):
+                    raise
+                logger.warning(f"Search failed for '{keyword}': {exc}")
+                item_refs = []
+                search_done = True  # non-risk failure → empty result, next keyword
 
         # Limit to max_posts
         if len(item_refs) > max_posts:
@@ -800,7 +824,21 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 except Exception as exc:
                     from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
                     if isinstance(exc, RiskProbeHit):
-                        await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                        verdict = await _handle_need_human(task_id, request_id, exc.hit, progress_cb, last_note_index)
+                        if verdict == "stop":
+                            progress_cb("user_stop", {
+                                "task_id": task_id, "stage": "detail",
+                                "platform_id": platform_id,
+                            })
+                            _set_task_paused(task_id, progress_cb)
+                            return {
+                                "status": "paused",
+                                "reason": "user_stop",
+                                "posts_scraped": total_posts,
+                                "comments_count": total_comments,
+                                "images_count": total_images,
+                                "last_note_index": last_note_index,
+                            }
                         continue  # retry same ref after resume (done still False)
                     from semilabs_hone.core.utils.retry import SkimError
                     if isinstance(exc, SkimError):

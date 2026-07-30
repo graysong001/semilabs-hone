@@ -526,6 +526,192 @@ class TestHandlerScrapeTaskNeedHuman:
             h_mod._await_resume = orig_await
             _restore_handler_env(h_mod, orig)
 
+    async def test_search_probe_hit_then_resume_retries_search(self, db_session, tmp_data_dir):
+        """search raises RiskProbeHit once → resume → the SAME keyword search is
+        retried (旧实现 break 出关键词循环并把任务标 completed)."""
+        from semilabs_hone.core.models.schemas import ScrapedPost
+        from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+        from semilabs_hone.modules.collection.risk_probes import ProbeHit
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        search_calls = {"n": 0}
+
+        async def mock_search(keyword, sort):
+            search_calls["n"] += 1
+            if search_calls["n"] == 1:
+                raise RiskProbeHit(ProbeHit(kind="captcha", platform="xiaohongshu"))
+            return [FakeRef("n1")]
+
+        async def mock_fetch_item(ref):
+            return ScrapedPost(platform_id=ref.item_id, title="t", content="c")
+
+        async def mock_fetch_comments(ref):
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        orig_await = h_mod._await_resume
+
+        async def _resume(rid, poll_interval=2.0):
+            return "resume"
+        h_mod._await_resume = _resume
+
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-search-resume",
+            }, cap)
+            assert result["status"] == "ok"
+            assert result["posts_scraped"] == 1
+            # search was retried after the human resume
+            assert search_calls["n"] == 2
+            assert any(m == "need_human" for m, _ in progress)
+        finally:
+            h_mod._await_resume = orig_await
+            _restore_handler_env(h_mod, orig)
+
+    async def test_search_probe_hit_stop_parks_task_paused(self, db_session, tmp_data_dir):
+        """search 阶段命中风控 + 人工点停止 → 任务置 paused 返回 (绝不标 completed)."""
+        from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+        from semilabs_hone.modules.collection.risk_probes import ProbeHit
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        async def mock_search(keyword, sort):
+            raise RiskProbeHit(ProbeHit(kind="captcha", platform="xiaohongshu"))
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        orig_await = h_mod._await_resume
+
+        async def _stop(rid, poll_interval=2.0):
+            return "stop"
+        h_mod._await_resume = _stop
+
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-search-stop",
+            }, cap)
+            assert result["status"] == "paused"
+            assert result["reason"] == "user_stop"
+            assert result["posts_scraped"] == 0
+            assert any(m == "user_stop" for m, _ in progress)
+            # DB 终态: paused (不是 need_human, 也不是 completed)
+            from semilabs_hone.core.models.task import CollectionTask
+            from semilabs_hone.core.models.db import get_session
+            sess = get_session()
+            try:
+                task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+                assert task.status == "paused"
+            finally:
+                sess.close()
+        finally:
+            h_mod._await_resume = orig_await
+            _restore_handler_env(h_mod, orig)
+
+    async def test_detail_probe_hit_stop_keeps_partial_progress(self, db_session, tmp_data_dir):
+        """detail 循环命中风控 + 停止 → paused 返回且保留已采计数 (stop 不再被
+        continue 吞掉)."""
+        from semilabs_hone.core.models.schemas import ScrapedPost
+        from semilabs_hone.modules.collection.scrapers.engine import RiskProbeHit
+        from semilabs_hone.modules.collection.risk_probes import ProbeHit
+        from semilabs_hone.modules.collection.handlers import handler_scrape_task
+        import semilabs_hone.modules.collection.handlers as h_mod
+
+        class FakeRef:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+        async def mock_search(keyword, sort):
+            return [FakeRef("n1"), FakeRef("n2")]
+
+        fetch_calls = {"n": 0}
+
+        async def mock_fetch_item(ref):
+            fetch_calls["n"] += 1
+            if ref.item_id == "n2":
+                raise RiskProbeHit(ProbeHit(kind="captcha", platform="xiaohongshu"))
+            return ScrapedPost(platform_id=ref.item_id, title="t", content="c")
+
+        async def mock_fetch_comments(ref):
+            return []
+
+        mock_engine = MagicMock()
+        mock_engine.search = mock_search
+        mock_engine.fetch_item = mock_fetch_item
+        mock_engine.fetch_comments = mock_fetch_comments
+        mock_engine.page = None
+
+        task_id = _make_task(db_session, max_posts=5)
+        orig = _patch_handler_env(h_mod, mock_engine)
+        orig_await = h_mod._await_resume
+
+        async def _stop(rid, poll_interval=2.0):
+            return "stop"
+        h_mod._await_resume = _stop
+
+        progress = []
+
+        def cap(m, d=None):
+            progress.append((m, d))
+
+        try:
+            result = await handler_scrape_task({
+                "task_id": task_id, "platform": "xiaohongshu",
+                "keywords": ["kw"], "sort": "general",
+                "max_posts_per_keyword": 5, "download_images": False,
+                "collect_comments": False, "account_id": 1,
+                "request_id": "req-detail-stop",
+            }, cap)
+            assert result["status"] == "paused"
+            assert result["reason"] == "user_stop"
+            # n1 已入库, n2 命中后人工停止 — 部分进度保留
+            assert result["posts_scraped"] == 1
+            assert any(m == "user_stop" for m, _ in progress)
+            from semilabs_hone.core.models.task import CollectionTask
+            from semilabs_hone.core.models.db import get_session
+            sess = get_session()
+            try:
+                task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+                assert task.status == "paused"
+            finally:
+                sess.close()
+        finally:
+            h_mod._await_resume = orig_await
+            _restore_handler_env(h_mod, orig)
+
 
 # ---------------------------------------------------------------------------
 # T25 — night-sleep long-sleep, not throw (PRD §4.5.1)
