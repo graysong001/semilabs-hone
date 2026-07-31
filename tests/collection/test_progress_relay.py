@@ -103,3 +103,83 @@ class TestProgressRelay:
         broadcasts: list = []
         await _run_relay_briefly(monkeypatch, broadcasts)
         assert broadcasts == []
+
+
+class TestStaleFileFiltering:
+    """Relay startup must not re-broadcast stale bus residue (mtime older than
+    _STALE_FILE_AGE_S before startup) — yesterday's qr_ready/login_success
+    would otherwise flood the WS buffer as fresh toasts after a web restart."""
+
+    def _age_file(self, path, seconds_ago):
+        import os
+        import time
+        old = time.time() - seconds_ago
+        os.utime(path, (old, old))
+
+    async def test_stale_progress_not_broadcast(self, tmp_data_dir, db_session, monkeypatch):
+        from semilabs_hone.core.ipc.paths import atomic_write_json, progress_path
+        from semilabs_hone.core.ipc.protocol import IPCProgress
+
+        rid = "stale-prog"
+        _seed_task_with_rid(db_session, rid)
+        p = progress_path(rid)
+        atomic_write_json(p, IPCProgress(request_id=rid, message="qr_ready").model_dump())
+        self._age_file(p, ws_mod._STALE_FILE_AGE_S + 100)
+
+        broadcasts: list = []
+        await _run_relay_briefly(monkeypatch, broadcasts)
+
+        assert [b for b in broadcasts if b.get("request_id") == rid] == []
+
+    async def test_fresh_progress_still_broadcast(self, tmp_data_dir, db_session, monkeypatch):
+        """Files touched within the stale window are live — relayed normally."""
+        from semilabs_hone.core.ipc.paths import atomic_write_json, progress_path
+        from semilabs_hone.core.ipc.protocol import IPCProgress
+
+        rid = "fresh-prog"
+        _seed_task_with_rid(db_session, rid)
+        p = progress_path(rid)
+        atomic_write_json(p, IPCProgress(request_id=rid, message="qr_ready").model_dump())
+        self._age_file(p, ws_mod._STALE_FILE_AGE_S - 100)
+
+        broadcasts: list = []
+        await _run_relay_briefly(monkeypatch, broadcasts)
+
+        assert any(b.get("request_id") == rid for b in broadcasts)
+
+    async def test_stale_result_deleted_without_broadcast(self, tmp_data_dir, db_session, monkeypatch):
+        from semilabs_hone.core.ipc.paths import atomic_write_json, result_path
+
+        rid = "stale-res"
+        _seed_task_with_rid(db_session, rid)
+        p = result_path(rid)
+        atomic_write_json(p, {
+            "request_id": rid, "status": "error",
+            "error": {"category": "login", "message": "所有登录方式均失败"},
+        })
+        self._age_file(p, ws_mod._STALE_FILE_AGE_S + 100)
+
+        broadcasts: list = []
+        await _run_relay_briefly(monkeypatch, broadcasts)
+
+        assert [b for b in broadcasts if b.get("request_id") == rid] == []
+        assert not p.exists(), "stale result must be deleted, not left on the bus"
+
+    async def test_fresh_result_consumed_normally(self, tmp_data_dir, db_session, monkeypatch):
+        from semilabs_hone.core.ipc.paths import atomic_write_json, result_path
+
+        rid = "fresh-res"
+        _seed_task_with_rid(db_session, rid)
+        p = result_path(rid)
+        atomic_write_json(p, {
+            "request_id": rid, "status": "error",
+            "error": {"category": "login", "message": "boom"},
+        })
+
+        broadcasts: list = []
+        await _run_relay_briefly(monkeypatch, broadcasts)
+
+        assert any(
+            b.get("request_id") == rid and b.get("type") == "error" for b in broadcasts
+        )
+        assert not p.exists()  # consume-on-read 保持

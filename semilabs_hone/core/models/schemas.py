@@ -66,7 +66,8 @@ class TaskCreate(BaseModel):
 class ProgressMessage(BaseModel):
     type: Literal[
         "progress", "warn", "qr_ready", "login_required", "login_success",
-        "captcha_required", "task_completed", "error", "disk_warn"
+        "captcha_required", "task_completed", "error", "disk_warn",
+        "session_status", "cookie_import_conflict",
     ]
     module: str | None = None
     task_id: int | None = None

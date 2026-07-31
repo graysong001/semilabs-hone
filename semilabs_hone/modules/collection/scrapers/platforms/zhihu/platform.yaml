@@ -17,6 +17,9 @@ login:
   identity_map:
     user_id: "id"
     nickname: "name"
+  # [2026-07-31] 登录态 DOM 判定（选择器待真实录制校准，同 T27）：
+  logged_in_selector: ".AppHeader-profile img"
+  login_modal_selector: ".signFlowModal"
 
 # 🟡 T27 人工录制: 下列 search/detail/comments 三 flow 的 JSONPath maps 基于知乎
 # 已知 API v4 端点结构给出, 须经真实录制 (recorder + llm_mapper) 校准后替换。

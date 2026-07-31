@@ -10,6 +10,7 @@ Design: docs/skim_design.md §13.3.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from typing import TYPE_CHECKING
 
@@ -32,12 +33,18 @@ class WSManager:
         self.message_buffer: deque = deque(maxlen=50)
 
     async def connect(self, ws: WebSocket) -> None:
-        """Accept a new WS connection and replay the message buffer."""
+        """Accept a new WS connection and replay the message buffer.
+
+        Replayed messages are flagged ``replay: true`` so the frontend can
+        restore progress state from them but must NOT fire side effects
+        (toasts / page reloads) — otherwise a buffered login_success would
+        trigger accounts.html reload → WS reconnect → replay → reload loop.
+        """
         await ws.accept()
         self.connections.add(ws)
-        # Replay recent messages to the new connection
+        # Replay recent messages to the new connection (flagged, see docstring)
         for msg in self.message_buffer:
-            await ws.send_json(msg)
+            await ws.send_json({**msg, "replay": True})
 
     async def disconnect(self, ws: WebSocket) -> None:
         """Remove a disconnected WebSocket."""
@@ -66,8 +73,18 @@ PROGRESS_EVENT_TYPES = {
     "qr_ready": "qr_ready",
     "captcha_required": "captcha_required",
     "login_success": "login_success",
+    # 账号验证结果（handler_validate）：app.js/accounts.html 都监听这个类型，
+    # 此前 validate_done 无映射导致前端永远收不到验证反馈。
+    "session_status": "session_status",
     "disk_warn": "disk_warn",
 }
+
+#: Bus files untouched for this long before relay startup are stale residue
+#: (yesterday's qr_ready / failed login results), not live progress — never
+#: broadcast them into the WS buffer, or a web restart replays old events as
+#: fresh toasts. Live workers rewrite their progress file every step, so a
+#: file older than this window is provably dead (wait_result times out at 120s).
+_STALE_FILE_AGE_S = 300.0
 
 
 async def run_progress_relay(interval: float = 2.0) -> None:
@@ -94,6 +111,7 @@ async def run_progress_relay(interval: float = 2.0) -> None:
     )
 
     seen_progress: dict[str, float] = {}  # rid -> last broadcasted updated_at
+    started_at = time.time()
     running = True
     try:
         while running:
@@ -103,6 +121,11 @@ async def run_progress_relay(interval: float = 2.0) -> None:
                 if pdir.exists():
                     for f in pdir.glob("*.json"):
                         if f.name == "heartbeat.json":
+                            continue
+                        try:
+                            if f.stat().st_mtime < started_at - _STALE_FILE_AGE_S:
+                                continue  # stale bus residue, see _STALE_FILE_AGE_S
+                        except OSError:
                             continue
                         rid = f.stem
                         data = read_json_if_exists(f)
@@ -114,13 +137,17 @@ async def run_progress_relay(interval: float = 2.0) -> None:
                         seen_progress[rid] = updated
                         task_id = _resolve_task_id(rid)
                         message = data.get("message", "")
+                        payload = data.get("data") or {}
                         await ws_manager.broadcast({
                             "type": PROGRESS_EVENT_TYPES.get(message, "progress"),
                             "module": "collection",
                             "task_id": task_id,
                             "request_id": rid,
-                            "message": message,
-                            "data": data.get("data") or {},
+                            # first-class events (session_status) carry their own
+                            # user-facing message; app.js reads valid at top level.
+                            "message": payload.get("message") or message,
+                            "data": payload,
+                            **({"valid": payload["valid"]} if "valid" in payload else {}),
                         })
             except asyncio.CancelledError:
                 raise
@@ -132,6 +159,18 @@ async def run_progress_relay(interval: float = 2.0) -> None:
                 rdir = results_dir()
                 if rdir.exists():
                     for f in rdir.glob("*.json"):
+                        try:
+                            if f.stat().st_mtime < started_at - _STALE_FILE_AGE_S:
+                                # stale result: its waiter timed out long ago;
+                                # delete without broadcasting (no error bombing
+                                # after a web restart)
+                                try:
+                                    f.unlink()
+                                except OSError:
+                                    pass
+                                continue
+                        except OSError:
+                            continue
                         rid = f.stem
                         data = read_json_if_exists(f)
                         if data is None:

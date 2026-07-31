@@ -18,6 +18,10 @@ login:
   identity_map:
     user_id: "data.user.id"
     nickname: "data.user.nickname"
+  # [2026-07-31 实测] 登录态 DOM 判定（selfinfo 裸 fetch 被网关签名拦 500，
+  # 首页未登录不跳 /login 而是弹登录框，故以页面真实 DOM 为准）：
+  logged_in_selector: ".side-bar .user img"   # 侧栏头像可见 = 已登录（已实测）
+  login_modal_selector: ".login-container"    # 登录弹窗可见 = 未登录
 
 flows:
   search:

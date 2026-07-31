@@ -30,6 +30,10 @@ _WORKER_CTX: Any = None
 # engine can apply the account's fixed fingerprint per page.
 _WORKER_ACCOUNT: Any = None
 
+#: Chrome processes relaunched by _ensure_live_ctx after the user closed the
+#: original window; terminated on worker exit (G30: no orphan Chrome).
+_RELAUNCHED_CHROME_PROCS: list = []
+
 #: Bounded retry for transient network failures (goto timeout / connection
 #: reset): environmental jitter worth retrying — unlike risk-control signals
 #: (RiskProbeHit) and domain errors (SkimError), which must never be retried
@@ -344,13 +348,178 @@ def _find_conflicting_account(platform: str, platform_user_id: str, exclude_id: 
         return None
 
 
+def _ctx_alive(ctx: Any) -> bool:
+    """True if the worker ctx is still usable (Chrome window not closed).
+
+    Fake ctx objects in tests carry no ``.browser`` — treat them as alive so
+    the degraded paths keep their historical behavior.
+    """
+    browser = getattr(ctx, "browser", None)
+    if browser is None:
+        return True
+    try:
+        return bool(browser.is_connected())
+    except Exception:
+        return False
+
+
+async def _ensure_live_ctx(account_id: int | None, progress_cb: Callable) -> Any | None:
+    """Return a usable worker ctx, relaunching Chrome when it was closed.
+
+    The spawner skips re-spawn while the worker heartbeat is fresh, so a
+    user-closed Chrome used to brick every subsequent login/validate with
+    "Target page, context or browser has been closed" until the worker idled
+    out. Self-heal in place instead: relaunch on the same profile dir and
+    republish the ctx. ``_WORKER_CTX is None`` (web process / tests) never
+    launches a browser.
+    """
+    global _WORKER_CTX
+    if _WORKER_CTX is None:
+        return None
+    if _ctx_alive(_WORKER_CTX):
+        return _WORKER_CTX
+    progress_cb("browser_relaunch", {"account_id": account_id})
+    try:
+        from semilabs_hone.modules.collection.browser.cdp import (
+            attach,
+            find_free_port,
+            launch_real_chrome,
+        )
+        from semilabs_hone.modules.collection.browser.profile import ensure_profile
+        if account_id is None and _WORKER_ACCOUNT is not None:
+            account_id = getattr(_WORKER_ACCOUNT, "id", None)
+        profile_dir = ensure_profile(account_id)
+        port = find_free_port()
+        proc = launch_real_chrome(str(profile_dir), port)
+        _RELAUNCHED_CHROME_PROCS.append(proc)
+        _browser, ctx = await attach(port)
+        _WORKER_CTX = ctx
+        logger.info(f"Chrome relaunched for account {account_id} (pid={proc.pid})")
+        return ctx
+    except Exception as exc:
+        logger.warning(f"Chrome relaunch failed: {exc}")
+        return None
+
+
+def terminate_relaunched_chromes() -> None:
+    """Terminate Chrome processes relaunched by _ensure_live_ctx (G30)."""
+    while _RELAUNCHED_CHROME_PROCS:
+        proc = _RELAUNCHED_CHROME_PROCS.pop()
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+async def _load_cookies_into_ctx(ctx: Any, account_id: int | None, progress_cb: Callable) -> None:
+    """Re-inject cookies.json into the live ctx before a session check.
+
+    Chrome drops session cookies (expires=-1) on exit, so a relaunched browser
+    is missing exactly the cookies that prove the login; the user's saved
+    cookies.json is the authoritative source. Best-effort and idempotent
+    (add_cookies overwrites same name+domain+path) — never blocks the check.
+    """
+    if account_id is None:
+        return
+    try:
+        from semilabs_hone.modules.collection.browser.profile import profile_dir_for
+        cookie_path = profile_dir_for(account_id) / "cookies.json"
+        if not cookie_path.exists():
+            return
+        with open(cookie_path, "r") as f:
+            raw = json.load(f)
+        if not isinstance(raw, list) or not raw:
+            return
+        normalized = _normalize_cookies(raw)
+        if normalized:
+            await ctx.add_cookies(normalized)
+            progress_cb("session_check_cookies_loaded", {
+                "account_id": account_id, "count": len(normalized)})
+    except Exception as exc:
+        logger.warning(f"cookies.json re-inject skipped: {exc}")
+
+
+async def _platform_page(ctx: Any, base_url: str) -> Any | None:
+    """Resolve the page to show the platform home in (same-site > blank > new).
+
+    Validation keeps this page open so the user sees the login state with
+    their own eyes; reusing one tab per platform avoids tab pile-up across
+    repeated validations.
+    """
+    host = urlparse(base_url).netloc
+    try:
+        blank = None
+        for p in ctx.pages:
+            try:
+                url = p.url or ""
+            except Exception:
+                continue
+            if host and host in url:
+                return p
+            if blank is None and (url.startswith("about:") or "newtab" in url):
+                blank = p
+        if blank is not None:
+            return blank
+        return await ctx.new_page()
+    except Exception as exc:
+        logger.warning(f"platform page resolve failed: {exc}")
+        return None
+
+
+#: DOM 登录态判定的轮询上限（登录弹窗/头像都是异步渲染，给足加载时间）。
+_DOM_DETECT_TIMEOUT_S = 8.0
+_DOM_DETECT_POLL_S = 0.5
+
+
+async def _detect_login_dom(page: Any, spec: Any) -> bool | None:
+    """DOM 信号判定登录态：True 已登录 / False 弹登录窗 / None 无法判定。
+
+    identity_api 裸 fetch 会被平台网关签名头拦截（实测 XHS selfinfo 500），
+    URL bounce 对首页弹登录窗的站点形同虚设（XHS 未登录不跳 /login）；
+    页面 DOM 才是用户肉眼所见的真实状态（2026-07-31 实测校准）。
+    """
+    logged_in_sel = getattr(spec.login, "logged_in_selector", None)
+    modal_sel = getattr(spec.login, "login_modal_selector", None)
+    if not logged_in_sel and not modal_sel:
+        return None
+    deadline = time.monotonic() + _DOM_DETECT_TIMEOUT_S
+    while True:
+        try:
+            state = await page.evaluate(
+                """({loggedIn, modal}) => {
+                    const vis = (sel) => {
+                        if (!sel) return false;
+                        const el = document.querySelector(sel);
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    return {loggedIn: vis(loggedIn), modal: vis(modal)};
+                }""",
+                {"loggedIn": logged_in_sel, "modal": modal_sel},
+            )
+        except Exception:
+            return None
+        if state and state.get("modal"):
+            return False  # 登录弹窗 = 强未登录信号
+        if state and state.get("loggedIn"):
+            return True
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(_DOM_DETECT_POLL_S)
+
+
 async def _session_check(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
     """Real session check via the injected ctx (FIX_PLAN F5).
 
-    Valid = ctx holds cookies for base_url AND navigating home does not
-    bounce back to the login page.
+    验证即所见（2026-07-31 用户裁决）：打开平台首页后保留页面并带到前台，
+    用户肉眼确认登录状态。判定顺序：DOM 信号（配了 selector 的平台，实测
+    最可靠）→ identity_api → URL bounce。ctx 死亡（用户关了 Chrome 窗口）
+    时自动重启浏览器自愈；检查前重注 cookies.json（Chrome 重启会丢
+    session cookie）。
     """
-    if _WORKER_CTX is None:
+    ctx = await _ensure_live_ctx(account_id, progress_cb)
+    if ctx is None:
         progress_cb("session_check_no_ctx", {"account_id": account_id})
         return False
     try:
@@ -359,31 +528,52 @@ async def _session_check(platform: str, account_id: int | None, progress_cb: Cal
     except Exception as exc:
         logger.warning(f"session check: unknown platform {platform}: {exc}")
         return False
+
+    await _load_cookies_into_ctx(ctx, account_id, progress_cb)
+
     try:
-        cookies = await _WORKER_CTX.cookies(spec.base_url)
+        cookies = await ctx.cookies(spec.base_url)
     except Exception as exc:
         logger.warning(f"ctx.cookies failed: {exc}")
         return False
     if not cookies:
         progress_cb("session_check_no_cookies", {"account_id": account_id})
         return False
-    page = await _WORKER_CTX.new_page()
+
+    page = await _platform_page(ctx, spec.base_url)
+    if page is None:
+        progress_cb("session_check_no_page", {"account_id": account_id})
+        return False
     try:
         await page.goto(spec.base_url, wait_until="domcontentloaded", timeout=30000)
-        login_path = (spec.login.login_url or "/login").rstrip("/")
-        current_path = urlparse(page.url).path.rstrip("/")
-        if current_path == login_path:
-            progress_cb("session_check_bounced_to_login", {"account_id": account_id})
-            return False
-        return True
     except Exception as exc:
         logger.warning(f"session check navigation failed: {exc}")
         return False
-    finally:
-        try:
-            await page.close()
-        except Exception:
-            pass
+
+    dom_state = await _detect_login_dom(page, spec)
+    if dom_state is not None:
+        valid = dom_state
+        if not valid:
+            progress_cb("session_check_login_modal_shown", {"account_id": account_id})
+    elif getattr(spec.login, "identity_api", None):
+        identity = await _extract_platform_identity(ctx, platform)
+        valid = bool(identity and identity.get("platform_user_id"))
+        if not valid:
+            progress_cb("session_check_identity_missing", {"account_id": account_id})
+    else:
+        login_path = (spec.login.login_url or "/login").rstrip("/")
+        current_path = urlparse(page.url).path.rstrip("/")
+        valid = current_path != login_path
+        if not valid:
+            progress_cb("session_check_bounced_to_login", {"account_id": account_id})
+
+    # Keep the page and raise its tab: the check result is visible (logged-in
+    # home, or the login page inviting a manual scan).
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+    return valid
 
 
 async def _try_session_recovery(platform: str, account_id: int | None, progress_cb: Callable) -> bool:
@@ -442,14 +632,15 @@ async def _import_cookies_ctx(platform: str, account_id: int | None, cookies: li
     Returns (ok, reason): reason is a user-facing failure message when ok is
     False — never fail silently (the old bare-bool return dropped the cause).
     """
-    if _WORKER_CTX is None:
+    ctx = await _ensure_live_ctx(account_id, progress_cb)
+    if ctx is None:
         progress_cb("login_import_no_ctx", {"account_id": account_id})
         return False, "采集浏览器未就绪，请稍后重试"
     normalized = _normalize_cookies(cookies)
     if not normalized:
         return False, "Cookie 数组为空或元素格式无效"
     try:
-        await _WORKER_CTX.add_cookies(normalized)
+        await ctx.add_cookies(normalized)
         progress_cb("login_cookies_imported", {"account_id": account_id, "count": len(normalized)})
     except Exception as exc:
         logger.warning(f"add_cookies failed: {exc}")
@@ -645,10 +836,16 @@ async def handler_validate(payload: dict, progress_cb: Callable) -> dict:
 
     # A dead session is a *result*, not an error (USER_SOP G14): the request
     # ends ok and carries valid:false so the UI says "please log in" instead
-    # of an unknown-error toast.
+    # of an unknown-error toast. The event name matches the WS relay mapping
+    # (session_status) so the account page toast + row refresh actually fire.
     progress_cb(
-        "validate_done",
-        {"account_id": account_id, "valid": valid},
+        "session_status",
+        {
+            "account_id": account_id,
+            "valid": valid,
+            "message": "会话有效，已在浏览器中打开平台页面" if valid
+                       else "会话已失效，请在浏览器页面中重新登录",
+        },
     )
     return {
         "status": "ok",

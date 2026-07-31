@@ -82,6 +82,11 @@ class LoginSpec(BaseModel):
     timeout: int = 120
     identity_api: str | None = None
     identity_map: dict[str, str] | None = None
+    # [2026-07-31] 登录态 DOM 判定（验证即所见）：identity_api 裸 fetch 会被
+    # 平台网关签名头（x-s/x-t）拦成 5xx，URL bounce 对首页弹登录窗的站点
+    # （小红书不跳 /login）形同虚设；页面 DOM 才是用户肉眼所见的真实状态。
+    logged_in_selector: str | None = None   # 登录态标志（如侧栏头像）可见 → 已登录
+    login_modal_selector: str | None = None  # 登录弹窗可见 → 未登录（强信号）
 
 
 class PlatformSpec(BaseModel):

@@ -148,7 +148,13 @@ async def _run_worker(port: int, account_id: int) -> None:
     finally:
         # Tear down the browser we launched so a worker exit does not leak a
         # Chrome process holding the CDP port (next worker's find_free_port
-        # would otherwise skip past a zombie).
+        # would otherwise skip past a zombie). Also reap any Chrome the
+        # handlers relaunched after the user closed the original window.
+        try:
+            from semilabs_hone.modules.collection import handlers as _handlers_mod
+            _handlers_mod.terminate_relaunched_chromes()
+        except Exception:
+            pass
         try:
             await browser.close()
         except Exception:
