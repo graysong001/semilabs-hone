@@ -392,14 +392,29 @@ window.confirmAction = function (opts) {
   _confirmDialog.showModal();
 };
 
-// 任务删除: 确认弹窗 + HTMX 删行 (替代 hx-delete + hx-confirm 原生弹窗)
+// 任务删除: 确认弹窗 + fetch 删行。后端返回 JSON 契约 {ok,task_id}/{ok,error}，
+// 不能用 HTMX swap（会把原始 JSON 渲染进任务列表），成功后直接移除对应行。
 window.confirmDeleteTask = function (taskId) {
   confirmAction({
     title: '删除任务',
     message: '确定要删除这个任务吗？该操作不可恢复。',
     confirmText: '删除',
     onConfirm: function () {
-      htmx.ajax('DELETE', '/api/tasks/' + taskId, { target: '#task-row-' + taskId, swap: 'outerHTML' });
+      fetch('/api/tasks/' + taskId, { method: 'DELETE' })
+        .then(function (resp) {
+          return resp.json().catch(function () { return {}; }).then(function (body) {
+            if (resp.ok && body.ok) {
+              var row = document.getElementById('task-row-' + taskId);
+              if (row) row.remove();
+              showToast('任务已删除', 'success');
+            } else {
+              showToast({ severity: 'error', message: body.error || '删除失败，请检查后台日志', duration: 4000 });
+            }
+          });
+        })
+        .catch(function () {
+          showToast({ severity: 'error', message: '系统异常，操作失败，请检查后台日志', duration: 3000 });
+        });
     }
   });
 };
