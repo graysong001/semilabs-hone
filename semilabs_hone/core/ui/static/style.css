@@ -48,3 +48,17 @@ dialog[open] { animation: dialogIn 0.22s ease-out; }
   overflow-y: auto;
 }
 #drawer.drawer-open { transform: translateX(0); }
+
+/* 操作列图标按钮 tooltip (data-tip)：原生 title 有延迟，而 actions 单元格每
+   5s 被 htmx 整体替换，tooltip 永远来不及出现。::after 无延迟即时显示，
+   DOM 替换后 :hover 在新元素上立即重匹配，提示不中断。 */
+[data-tip] { position: relative; }
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute; bottom: calc(100% + 6px); left: 50%;
+  transform: translateX(-50%);
+  background: #2A303D; color: #E5E7EB;
+  font-size: 12px; line-height: 1; padding: 5px 8px;
+  border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.12);
+  white-space: nowrap; pointer-events: none; z-index: 70;
+}

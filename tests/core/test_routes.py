@@ -179,7 +179,8 @@ def test_wsmanager_connect_disconnect():
 
 
 def test_wsmanager_connect_replays_buffer():
-    """New connections should receive buffered messages."""
+    """New connections should receive buffered messages, flagged replay=True
+    (frontend must not fire side effects — toasts/reload — for replays)."""
     mgr = WSManager()
     mock_ws = MagicMock()
     mock_ws.accept = AsyncMock()
@@ -194,9 +195,33 @@ def test_wsmanager_connect_replays_buffer():
         assert mock_ws in mgr.connections
         # Should have called send_json for the buffered message
         assert mock_ws.send_json.call_count == 1
-        assert mock_ws.send_json.call_args[0][0] == {"type": "progress", "message": "replayed"}
+        assert mock_ws.send_json.call_args[0][0] == {
+            "type": "progress", "message": "replayed", "replay": True,
+        }
 
     asyncio.run(_test())
+
+
+def test_wsmanager_replay_flag_does_not_pollute_buffer():
+    """Replay flag is added per-send; the stored buffer message stays clean
+    (otherwise the flag would accumulate on every reconnect)."""
+    mgr = WSManager()
+    mgr.message_buffer.append({"type": "login_success"})
+
+    import asyncio
+
+    async def _test():
+        for _ in range(2):
+            mock_ws = MagicMock()
+            mock_ws.accept = AsyncMock()
+            mock_ws.send_json = AsyncMock()
+            await mgr.connect(mock_ws)
+            sent = mock_ws.send_json.call_args[0][0]
+            assert sent["replay"] is True
+
+    asyncio.run(_test())
+    # Buffer 内的原始消息不被打上 replay 标记
+    assert mgr.message_buffer[0] == {"type": "login_success"}
 
 
 def test_wsmanager_module_singleton():

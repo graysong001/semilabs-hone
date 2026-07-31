@@ -132,14 +132,40 @@
     }
   };
 
-  // count-btn 点击
+  // count-btn 点击：选中态 Tailwind 类与 .active 同步迁移 —— 模板里 50 的
+  // 蓝色选中态是硬编码 class（bg-brand/text-white），只切 .active 消不掉，
+  // 会出现 10/50 两个按钮同时高亮。
+  var COUNT_ACTIVE = ["active", "bg-brand", "text-white", "border-brand"];
+  var COUNT_IDLE = ["bg-app-card", "text-gray-300", "border-gray-600"];
+  function countBtnSelect(btn) {
+    document.querySelectorAll('.count-btn').forEach(function(b) {
+      b.classList.remove.apply(b.classList, COUNT_ACTIVE);
+      b.classList.add.apply(b.classList, COUNT_IDLE);
+    });
+    btn.classList.remove.apply(btn.classList, COUNT_IDLE);
+    btn.classList.add.apply(btn.classList, COUNT_ACTIVE);
+  }
   document.querySelectorAll('.count-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
-      document.querySelectorAll('.count-btn').forEach(function(b) { b.classList.remove('active'); });
-      btn.classList.add('active');
+      countBtnSelect(btn);
       document.querySelector('[name="expected_count"]').value = btn.dataset.count;
     });
   });
+  // 手动输入自定义数量时：匹配已有档位则同步高亮，否则取消所有按钮选中态
+  var countInput = document.querySelector('[name="expected_count"]');
+  if (countInput) {
+    countInput.addEventListener('input', function() {
+      var match = null;
+      document.querySelectorAll('.count-btn').forEach(function(b) {
+        if (b.dataset.count === countInput.value) match = b;
+      });
+      if (match) { countBtnSelect(match); return; }
+      document.querySelectorAll('.count-btn').forEach(function(b) {
+        b.classList.remove.apply(b.classList, COUNT_ACTIVE);
+        b.classList.add.apply(b.classList, COUNT_IDLE);
+      });
+    });
+  }
 
   // 开始采集 → 显示耗时预估弹窗
   window.submitWithEstimate = function() {
@@ -212,6 +238,13 @@
 
   function dispatch(msg) {
     var type = msg.type;
+    // WS 重连 replay 的历史消息（服务端 connect 打标 replay:true）：只恢复
+    // 进度条，不 toast、不派发 ws:message —— 否则 buffer 里的 login_success
+    // 会触发 accounts.html reload → WS 重连 → replay → 无限刷新循环。
+    if (msg.replay) {
+      if (type === "progress") updateProgress(msg);
+      return;
+    }
     switch (type) {
       case "progress": updateProgress(msg); break;
       case "warn":

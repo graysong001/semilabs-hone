@@ -199,18 +199,18 @@ def _actions_html(task) -> str:
     # 块3: running → 暂停 + 取消
     if task.status == "running":
         parts.append(
-            f'<button class="text-yellow-400 hover:text-yellow-300" title="暂停" '
+            f'<button class="text-yellow-400 hover:text-yellow-300" title="暂停" data-tip="暂停" '
             f'hx-post="/api/tasks/{tid}/pause" hx-target="#actions-{tid}" hx-swap="innerHTML" '
             f'hx-disabled-elt="this" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
-            f'<svg width="16" height="16" fill="currentColor">'
+            f'<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">'
             f'<rect x="4" y="3" width="3" height="10"/><rect x="11" y="3" width="3" height="10"/>'
             f'</svg></button>'
         )
         parts.append(
-            f'<button class="text-red-400 hover:text-red-300" title="取消" '
+            f'<button class="text-red-400 hover:text-red-300" title="取消" data-tip="取消" '
             f'hx-post="/api/tasks/{tid}/cancel" hx-target="#actions-{tid}" hx-swap="innerHTML" '
             f'hx-disabled-elt="this" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
-            f'<svg width="16" height="16" fill="currentColor"><rect x="4" y="4" width="8" height="8"/></svg></button>'
+            f'<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="4" width="8" height="8"/></svg></button>'
         )
     # 块5: need_human → 唤起浏览器 + 已处理继续
     if task.status == "need_human":
@@ -228,39 +228,39 @@ def _actions_html(task) -> str:
     if task.status in ("failed", "error", "paused"):
         # 块1: paused/error/failed → 恢复 (复用 /resume)
         parts.append(
-            f'<button class="text-green-400 hover:text-green-300" title="恢复" '
+            f'<button class="text-green-400 hover:text-green-300" title="恢复" data-tip="恢复" '
             f'hx-post="/api/tasks/{tid}/resume" hx-target="#actions-{tid}" hx-swap="innerHTML" '
             f'hx-disabled-elt="this" hx-on::after-request="if(event.detail.successful) htmx.ajax(\'GET\', \'/api/tasks/{tid}/actions\', \'#actions-{tid}\')">'
-            f'<svg width="16" height="16" fill="currentColor"><path d="M5 3l9 5-9 5V3z"/></svg></button>'
+            f'<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l9 5-9 5V3z"/></svg></button>'
         )
     if task.status == "completed":
         # 块1: completed → 查看 (跳 /posts?task_id=X) + 导出 CSV
         parts.append(
-            f'<a href="/posts?task_id={tid}" class="text-gray-400 hover:text-blue-400" title="查看">'
-            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<a href="/posts?task_id={tid}" class="text-gray-400 hover:text-blue-400" title="查看采集数据" data-tip="查看采集数据">'
+            f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
             f'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
             f'</svg></a>'
         )
         parts.append(
-            f'<button onclick="exportCsv(\'{tid}\', this)" class="text-gray-400 hover:text-blue-400" title="导出">'
-            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<button onclick="exportCsv(\'{tid}\', this)" class="text-gray-400 hover:text-blue-400" title="导出 CSV" data-tip="导出 CSV">'
+            f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
             f'<path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>'
             f'</svg></button>'
         )
         # 块4: completed → 删除 (统一确认弹窗, 替代 hx-confirm 原生弹窗)
         parts.append(
-            f'<button class="text-red-400 hover:text-red-300" title="删除" '
+            f'<button class="text-red-400 hover:text-red-300" title="删除" data-tip="删除" '
             f'onclick="confirmDeleteTask(\'{tid}\')">'
-            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
             f'<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/>'
             f'</svg></button>'
         )
     if task.status in ("error", "failed"):
         # 块4: error/failed → 删除 (统一确认弹窗)
         parts.append(
-            f'<button class="text-red-400 hover:text-red-300" title="删除" '
+            f'<button class="text-red-400 hover:text-red-300" title="删除" data-tip="删除" '
             f'onclick="confirmDeleteTask(\'{tid}\')">'
-            f'<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">'
+            f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
             f'<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/>'
             f'</svg></button>'
         )
