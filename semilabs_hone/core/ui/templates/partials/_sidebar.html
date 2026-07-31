@@ -1,10 +1,10 @@
 <!-- 侧边栏: 四大业务板块 (ui_design_spec_v2 §5) -->
 <aside class="w-[240px] bg-app border-r border-gray-700/60 flex flex-col fixed top-0 left-0 bottom-0 z-50">
   <div class="h-[60px] flex items-center px-5 border-b border-gray-700/50">
-    <!-- 品牌区: SEMILABS slant 字符画 + 内容工厂 16×16 方块点阵 —
-         同一套视觉语言: 点阵肌理 / 青→紫渐变 (中文行独立映射完整渐变) /
-         中文行高 ≈ 英文 83% (渲染脚本一次性产物, 暗底透明 PNG) -->
-    <img src="/static/img/logo.png" alt="Semilabs 内容工厂"
+    <!-- 品牌区: SEMILABS slant 字符画(亮描边+暗芯) + 渐变分割线 + 内容工厂宽扁点阵 tagline —
+         lockup 层级: 英文实体主标题 / slate-500 hairline 结构线(中性色不抢渐变) / 中文 52% 行高扁砖 cell 两端对齐 /
+         青→紫渐变 + W6 斜体 (scripts/patch_logo_cn.py) -->
+    <img src="/static/img/logo.png?v=7" alt="Semilabs 内容工厂"
          class="h-[44px] w-auto select-none" draggable="false">
   </div>
   <nav class="flex-1 py-4 overflow-y-auto">
