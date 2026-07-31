@@ -675,6 +675,77 @@ async def test_server_writes_heartbeat(tmp_data_dir, monkeypatch):
     assert "timestamp" in data
 
 
+@pytest.mark.asyncio
+async def test_server_orphan_self_exit(tmp_data_dir, monkeypatch):
+    """PPID=1 (web parent dead, reparented to launchd) → serve_worker exits on
+    the next poll tick instead of lingering as an orphan worker forever
+    (observed: 79 orphan workers accumulated across web restarts)."""
+    import os as _os
+
+    monkeypatch.setattr(_os, "getppid", lambda: 1)
+
+    client = IPCClient()
+    client.submit(IPCRequest(
+        request_id="orphan1", module="test_mod", op="echo", payload={}
+    ))
+
+    # Returns almost immediately despite a pending request + long idle timeout.
+    await asyncio.wait_for(
+        serve_worker(
+            "test_mod", {"echo": _echo_handler},
+            poll_interval=0.05, idle_timeout=9999,
+        ),
+        timeout=2,
+    )
+    # Request NOT consumed — the worker exited before picking anything.
+    assert request_path("orphan1").exists()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_continues_during_long_handler(tmp_data_dir, monkeypatch):
+    """A long awaited handler must not stall the heartbeat: the parallel
+    heartbeat task keeps writing while the main loop is parked inside the
+    handler — otherwise >30s stale trips the web watchdog into falsely
+    reaping a healthy running task (实测: 采集中误报“引擎异常中断”)."""
+    from semilabs_hone.core.ipc import server
+
+    monkeypatch.setattr(server, "HEARTBEAT_INTERVAL", 0.05)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_handler(payload, progress_cb):
+        entered.set()
+        await release.wait()  # park mid-flight, main loop blocked here
+        return {"ok": True}
+
+    client = IPCClient()
+    client.submit(IPCRequest(
+        request_id="hb1", module="test_mod", op="slow", payload={}
+    ))
+    task = asyncio.create_task(
+        serve_worker("test_mod", {"slow": slow_handler}, poll_interval=0.05)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        # Handler parked; heartbeats must still accumulate.
+        await asyncio.sleep(0.15)
+        first = read_json_if_exists(heartbeat_path())["timestamp"]
+        await asyncio.sleep(0.15)
+        second = read_json_if_exists(heartbeat_path())["timestamp"]
+        assert second > first, "heartbeat stalled while handler in flight"
+        release.set()
+        res = await client.wait_result("hb1", timeout=2)
+        assert res.status == "ok"
+    finally:
+        release.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 # ── PRD §3.3 web-side heartbeat watchdog ─────────────────────────────────
 
 
