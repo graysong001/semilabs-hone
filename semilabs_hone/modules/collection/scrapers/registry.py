@@ -125,9 +125,9 @@ def _load_adapter(yaml_path: str) -> type[BasePlatformScraper] | None:
     return None
 
 
-def list_platforms() -> list[str]:
+def list_platforms(force: bool = False) -> list[str]:
     """Return sorted list of registered platform names (for UI dropdown)."""
-    return sorted(load_registry().keys())
+    return sorted(load_registry(force=force).keys())
 
 
 def get(platform: str) -> tuple[PlatformSpec, type[BasePlatformScraper] | None]:

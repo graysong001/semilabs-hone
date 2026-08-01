@@ -39,7 +39,7 @@
         <td class="px-4 py-3">
           <div class="font-medium text-white">{{ task.target_value[:30] if task.target_value else '-' }}</div>
           <div class="text-xs text-gray-500 mt-0.5">{{ task.task_type }} · {{ task.expected_count }}条</div>
-          {% if task.error_msg %}<div class="text-xs text-red-400 mt-1">{{ task.error_msg }}</div>{% endif %}
+          {% if task.error_msg %}<div class="text-xs text-red-400 mt-1">{{ task.error_msg }}{% if 'selector' in task.error_msg or '选择器' in task.error_msg or 'url_pattern' in task.error_msg or 'dom' in task.error_msg or 'API 变更' in task.error_msg %} <a href="/discover?platform={{ task.platform }}&return=tasks" class="text-brand hover:underline text-xs ml-1">重新探测</a>{% endif %}</div>{% endif %}
         </td>
         <td class="px-4 py-3">
           {% include "partials/_progress_bar.html" %}

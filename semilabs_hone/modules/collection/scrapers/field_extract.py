@@ -214,3 +214,57 @@ def extract_dom(
 
     # All-None row would be a fake record (USER_SOP G26): never emit it.
     return [row] if any(v is not None for v in row.values()) else []
+
+
+def extract_dom_multi(
+    html: str,
+    container_selector: str,
+    field_map: dict[str, str],
+) -> list[dict]:
+    """Extract multiple items from HTML using a container selector + per-field selectors.
+
+    Unlike extract_dom (single-row global), this finds ALL elements matching
+    `container_selector`, then within each container extracts fields from
+    `field_map` using relative CSS selectors.  Used by scroll_collect DOM
+    fallback where a search-results page contains many cards.
+
+    Selector format: same as extract_dom (``css:<sel>`` or ``css:<sel>@<attr>``).
+    """
+    if not html or not container_selector or not field_map:
+        return []
+
+    tree = HTMLParser(html)
+    containers = tree.css(container_selector)
+    if not containers:
+        return []
+
+    results: list[dict] = []
+    for container in containers:
+        row: dict[str, Any] = {}
+        for field_name, expr in field_map.items():
+            try:
+                if expr.startswith("attr:"):
+                    # Extract attribute from the container element itself
+                    attr_name = expr[5:]
+                    row[field_name] = container.attributes.get(attr_name)
+                elif expr.startswith("css:"):
+                    selector_part = expr[4:]
+                    attr = None
+                    if "@" in selector_part:
+                        selector_part, attr = selector_part.split("@", 1)
+                    nodes = container.css(selector_part)
+                    if nodes:
+                        if attr:
+                            row[field_name] = nodes[0].attributes.get(attr)
+                        else:
+                            row[field_name] = nodes[0].text(strip=True)
+                    else:
+                        row[field_name] = None
+                else:
+                    row[field_name] = None
+            except Exception:
+                row[field_name] = None
+        # Skip all-None rows (USER_SOP G26)
+        if any(v is not None for v in row.values()):
+            results.append(row)
+    return results

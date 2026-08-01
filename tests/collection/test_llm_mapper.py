@@ -544,10 +544,10 @@ async def test_map_group_then_validate_roundtrip(search_sample):
     class MockMessages:
         async def create(self, **kwargs):
             return Resp(json.dumps({
-                "item_id": "$.data.items[*].note_id",
-                "title": "$.data.items[*].display_title",
-                "author_name": "$.data.items[*].user.nickname",
-                "likes": "$.data.items[*].interact_info.liked_count",
+                "item_id": "$.data.items[*].id",
+                "title": "$.data.items[*].note_card.display_title",
+                "author_name": "$.data.items[*].note_card.user.nickname",
+                "likes": "$.data.items[*].note_card.interact_info.liked_count",
             }))
 
     class MockClient:

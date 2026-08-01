@@ -77,6 +77,12 @@ PROGRESS_EVENT_TYPES = {
     # 此前 validate_done 无映射导致前端永远收不到验证反馈。
     "session_status": "session_status",
     "disk_warn": "disk_warn",
+    "scrape_failed": "task_failed",
+    # 平台探测器事件 (Task #7)
+    "discover_xhr": "discover_xhr",
+    "discover_dom": "discover_dom",
+    "discover_ready": "discover_ready",
+    "discover_status": "discover_status",
 }
 
 #: Bus files untouched for this long before relay startup are stale residue

@@ -36,10 +36,10 @@ class TestExtractApiSearch:
         """Happy path: extract ItemRef fields from XHS search API response."""
         data = _load_fixture("search_response.json")
         field_map = {
-            "item_id": "$.note_id",
-            "title": "$.display_title",
-            "author_name": "$.user.nickname",
-            "likes": "$.interact_info.liked_count",
+            "item_id": "$.id",
+            "title": "$.note_card.display_title",
+            "author_name": "$.note_card.user.nickname",
+            "likes": "$.note_card.interact_info.liked_count",
         }
         results = extract_api(data, "ItemRef", field_map)
 
@@ -58,7 +58,7 @@ class TestExtractApiSearch:
         """Fields not in JSON return None, not crash."""
         data = _load_fixture("search_response.json")
         field_map = {
-            "item_id": "$.note_id",
+            "item_id": "$.id",
             "nonexistent_field": "$.does.not.exist",
         }
         results = extract_api(data, "ItemRef", field_map)

@@ -20,6 +20,7 @@ ROUTES = [
     "semilabs_hone.modules.collection.routes.tasks",
     "semilabs_hone.modules.collection.routes.posts",
     "semilabs_hone.modules.collection.routes.export",
+    "semilabs_hone.modules.collection.routes.discover",
 ]
 
 # worker 入口 (core/ipc/server 主循环 + 本模块 handler)

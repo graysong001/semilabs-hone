@@ -22,6 +22,7 @@ from semilabs_hone.modules.collection.scrapers.base import (
 from semilabs_hone.modules.collection.scrapers.field_extract import (
     extract_api,
     extract_dom,
+    extract_dom_multi,
     render_template,
 )
 from semilabs_hone.modules.collection.scrapers.spec import PlatformSpec
@@ -180,6 +181,8 @@ class GenericEngine(BasePlatformScraper):
                         step.url_pattern or "",
                         step.method,
                         step.timeout_ms,
+                        ssr_state_key=getattr(step, "ssr_state_key", None),
+                        ssr_state_path=getattr(step, "ssr_state_path", None),
                     )
                     if step.save_as:
                         saved[step.save_as] = resp_data
@@ -271,6 +274,10 @@ class GenericEngine(BasePlatformScraper):
         items to ``out``. Stops at ``max_scrolls`` (default 20) or
         ``empty_break`` (default 5) consecutive scrolls with no new items —
         never deadlocks on an infinite loader.
+
+        DOM fallback: when XHR extraction yields nothing, falls back to
+        page DOM using ``dom_container`` + ``dom_fallback`` selectors from
+        the step definition (mirrors the extract step's _extract_dom_fallback).
         """
         resp = saved.get(step.from_ or "")
         group = step.group
@@ -304,6 +311,12 @@ class GenericEngine(BasePlatformScraper):
             else:
                 consecutive_empty += 1
 
+        # DOM fallback: if XHR produced nothing, extract from current page DOM.
+        if not out:
+            dom_items = await self._scroll_collect_dom_fallback(page, step, group, collected)
+            if dom_items:
+                out.extend(await self._validate_group(dom_items, group))
+
         logger.debug(
             "scroll_collect: scrolls=%d items=%d consecutive_empty=%d",
             scrolls, len(out), consecutive_empty,
@@ -332,6 +345,46 @@ class GenericEngine(BasePlatformScraper):
             if captured is not None:
                 return captured
         return None
+
+    async def _scroll_collect_dom_fallback(
+        self,
+        page: Any,
+        step: Any,
+        group: str,
+        collected: set[str],
+    ) -> list[dict]:
+        """DOM extraction fallback for scroll_collect when XHR yields nothing.
+
+        Uses ``dom_container`` (repeating card selector) and ``dom_fallback``
+        (per-field CSS map) from the step's extra config.  Returns fresh items
+        not already in ``collected``.
+        """
+        dom_container = getattr(step, "dom_container", None)
+        dom_fallback = getattr(step, "dom_fallback", None)
+        if not dom_container or not dom_fallback:
+            logger.warning(
+                "scroll_collect DOM fallback: no dom_container/dom_fallback in step; "
+                "cannot fall back (add CSS selectors to platform.yaml)"
+            )
+            return []
+        logger.info("XHR failed, falling back to DOM extraction")
+        try:
+            html = await page.content()
+        except Exception as exc:
+            logger.warning("scroll_collect DOM fallback: page.content() failed: %s", exc)
+            return []
+        if not isinstance(html, str) or not html:
+            return []
+        items = extract_dom_multi(html, dom_container, dom_fallback)
+        # Dedup against already-collected IDs
+        fresh: list[dict] = []
+        for it in items:
+            key = self._item_dedup_key(it)
+            if key in collected:
+                continue
+            collected.add(key)
+            fresh.append(it)
+        return fresh
 
     def _extract_dedup(
         self,
@@ -486,6 +539,9 @@ class GenericEngine(BasePlatformScraper):
         url_pattern: str,
         method: str | None = None,
         timeout_ms: int = 15000,
+        *,
+        ssr_state_key: str | None = None,
+        ssr_state_path: str | None = None,
     ) -> dict:
         """Return the body of an intercepted XHR matching `url_pattern`.
 
@@ -494,6 +550,10 @@ class GenericEngine(BasePlatformScraper):
         attached at wait time would always miss them (USER_SOP G24). This
         drains the buffer that the listener fills; an empty return means the
         response never came and the caller should fall back to the DOM.
+
+        SSR fallback (2026-07-31): if ``ssr_state_key`` is provided and XHR
+        times out, attempts to read the page's SSR hydration global variable
+        (e.g. window.__INITIAL_STATE__) via page.evaluate before giving up.
         """
         self._arm_interception(page)
         deadline = time.monotonic() + timeout_ms / 1000.0
@@ -505,8 +565,56 @@ class GenericEngine(BasePlatformScraper):
         captured = self._take_captured(url_pattern, method)
         if captured is not None:
             return captured
+        # SSR hydration fallback: read embedded data from JS global variable
+        if ssr_state_key:
+            ssr_data = await self._try_ssr_state(page, ssr_state_key, ssr_state_path)
+            if ssr_data:
+                logger.info(
+                    "XHR timeout for '%s'; SSR state '%s' provided data",
+                    url_pattern, ssr_state_key,
+                )
+                return ssr_data
         logger.warning("XHR timeout for pattern '%s', falling back to DOM", url_pattern)
         return {}
+
+    async def _try_ssr_state(
+        self,
+        page: Any,
+        state_key: str,
+        state_path: str | None = None,
+    ) -> dict | None:
+        """Try to read SSR hydration data from a page global variable.
+
+        Args:
+            state_key: JS expression for the root state (e.g. "window.__INITIAL_STATE__").
+            state_path: Optional dot-path into the state object (e.g. "note.noteList").
+
+        Returns a dict wrapping the data (mimics XHR response structure) or None
+        on failure.  Only reads — never modifies page state (safety constraint).
+        """
+        try:
+            # Build a safe JS expression that reads the state and traverses the path
+            js_expr = state_key
+            if state_path:
+                for segment in state_path.split("."):
+                    js_expr += f"?.{segment}"
+            # Wrap in JSON.stringify so we get serializable text back
+            script = f"JSON.stringify(({js_expr}) || null)"
+            raw = await page.evaluate(script)
+            if not raw or raw == "null":
+                return None
+            data = json.loads(raw)
+            if data:
+                # Wrap in a structure that mimics an XHR response body so that
+                # downstream extract_api can process it with the same JSONPath map.
+                if isinstance(data, list):
+                    return {"data": {"items": data}, "success": True, "_source": "ssr"}
+                if isinstance(data, dict):
+                    return {**data, "_source": "ssr"}
+            return None
+        except Exception as exc:
+            logger.debug("SSR state read failed (%s): %s", state_key, exc)
+            return None
 
     def _arm_interception(self, page: Any) -> None:
         """Start recording responses of `page` (idempotent per page)."""

@@ -1,0 +1,21 @@
+{
+    "code": 1000,
+    "success": true,
+    "msg": "成功",
+    "data": {
+        "search_cpl_id": "36ec1786e325d67b6843df356a6cc764",
+        "word_request_id": "28911225-a90d-4aaa-b3ff-f7da01ab465f#1785513828518",
+        "sug_items": [
+            {"text": "aicoding教程", "highlight_flags": [true,true,true,true,true,true,true,true,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "aicoding题怎么做", "highlight_flags": [true,true,true,true,true,true,true,true,false,false,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "aicoding作品集", "highlight_flags": [true,true,true,true,true,true,true,true,false,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "ai coding", "highlight_flags": [true,true,true,true,true,true,true,true,true], "search_type": "notes", "type": "top_note"},
+            {"text": "aicoding工具哪个好", "highlight_flags": [true,true,true,true,true,true,true,true,false,false,false,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "aicoding面试", "highlight_flags": [true,true,true,true,true,true,true,true,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "ai coding工具", "highlight_flags": [true,true,true,true,true,true,true,true,true,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "ai coding项目", "highlight_flags": [true,true,true,true,true,true,true,true,true,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "AI coding面试题", "highlight_flags": [true,true,true,true,true,true,true,true,true,false,false,false], "search_type": "notes", "type": "top_note"},
+            {"text": "AI coding什么意思", "highlight_flags": [true,true,true,true,true,true,true,true,true,false,false,false,false], "search_type": "notes", "type": "top_note"}
+        ]
+    }
+}

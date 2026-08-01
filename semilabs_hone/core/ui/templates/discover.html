@@ -1,0 +1,408 @@
+<!-- 平台探测器 (Task #8) -->
+{% extends "base.html" %}
+{% block title %}平台探测器{% endblock %}
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+  <nav class="flex items-center gap-2 text-sm">
+    <span class="text-gray-400">素材抓取</span><span class="text-gray-600">/</span>
+    <span class="text-white font-medium">平台探测器</span>
+  </nav>
+</div>
+
+<!-- 标题区 -->
+<div class="mb-6">
+  <h1 class="text-xl font-bold text-white">平台探测器</h1>
+  <p class="text-sm text-gray-400 mt-1">输入目标页面 URL，自动分析 API 结构和 DOM 布局</p>
+</div>
+
+<!-- 主体：左右两栏 -->
+<div class="flex gap-6">
+
+  <!-- 左侧控制区 (30%) -->
+  <div class="w-[30%] flex-shrink-0 space-y-5">
+    <div class="bg-app-card rounded-lg border border-gray-700 p-5 space-y-4">
+      <!-- 平台选择 -->
+      <div>
+        <label class="block text-xs font-semibold text-gray-400 uppercase mb-1.5">平台</label>
+        <select id="discover-platform" class="w-full bg-app-input border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:border-brand focus:outline-none">
+          {% for p in platforms %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+          <option value="__new__">新平台</option>
+        </select>
+      </div>
+
+      <!-- 目标 URL -->
+      <div>
+        <label class="block text-xs font-semibold text-gray-400 uppercase mb-1.5">目标 URL</label>
+        <input id="discover-url" type="url"
+               class="w-full bg-app-input border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-brand focus:outline-none"
+               placeholder="https://www.xiaohongshu.com/search_result?keyword=...">
+      </div>
+
+      <!-- Flow 类型 -->
+      <div>
+        <label class="block text-xs font-semibold text-gray-400 uppercase mb-1.5">页面类型</label>
+        <div class="space-y-2">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="flow_type" value="search" checked
+                   class="w-4 h-4 text-brand bg-app-input border-gray-600 focus:ring-brand focus:ring-1">
+            <span class="text-sm text-gray-300">搜索列表</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="flow_type" value="detail"
+                   class="w-4 h-4 text-brand bg-app-input border-gray-600 focus:ring-brand focus:ring-1">
+            <span class="text-sm text-gray-300">详情页</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="flow_type" value="comments"
+                   class="w-4 h-4 text-brand bg-app-input border-gray-600 focus:ring-brand focus:ring-1">
+            <span class="text-sm text-gray-300">评论页</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- 开始探测按钮 -->
+      <button id="discover-start-btn" onclick="startDiscover()"
+              class="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+        <svg id="discover-spinner" class="hidden animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <span id="discover-btn-text">开始探测</span>
+      </button>
+
+      <!-- 状态文本 -->
+      <div id="discover-status" class="text-xs text-gray-400 min-h-[1.25rem]"></div>
+    </div>
+  </div>
+
+  <!-- 右侧结果区 (70%) -->
+  <div class="flex-1 space-y-5">
+
+    <!-- API 列表 -->
+    <div class="bg-app-card rounded-lg border border-gray-700 p-5">
+      <h3 class="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+        <svg class="w-4 h-4 text-brand" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        捕获的 API
+        <span id="api-count-badge" class="hidden ml-auto text-xs bg-brand/20 text-brand px-2 py-0.5 rounded-full">0</span>
+      </h3>
+      <div id="api-list" class="space-y-2 max-h-[400px] overflow-y-auto">
+        <p id="api-placeholder" class="text-sm text-gray-500 py-4 text-center">等待探测启动…</p>
+      </div>
+    </div>
+
+    <!-- DOM 容器 -->
+    <div class="bg-app-card rounded-lg border border-gray-700 p-5">
+      <h3 class="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+        <svg class="w-4 h-4 text-success" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        DOM 容器
+      </h3>
+      <div id="dom-containers" class="space-y-2">
+        <p id="dom-placeholder" class="text-sm text-gray-500 py-4 text-center">等待 DOM 分析完成…</p>
+      </div>
+    </div>
+
+    <!-- 底部操作区 (初始隐藏) -->
+    <div id="discover-actions" class="hidden bg-app-card rounded-lg border border-gray-700 p-5 space-y-4">
+      <div class="flex items-center gap-3">
+        <button id="generate-yaml-btn" onclick="generateYaml()"
+                class="flex items-center gap-2 px-4 py-2 bg-success/90 hover:bg-success text-black font-medium rounded-lg text-sm transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          生成 platform.yaml
+        </button>
+        <button onclick="copyYaml()" class="px-3 py-2 bg-app-hover border border-gray-600 text-gray-300 rounded-lg text-sm hover:border-gray-500 transition-colors">
+          复制 YAML
+        </button>
+        <button disabled class="px-3 py-2 bg-app-hover border border-gray-700 text-gray-500 rounded-lg text-sm cursor-not-allowed" title="V2 功能">
+          保存
+        </button>
+      </div>
+
+      <!-- YAML 输出 -->
+      <div id="yaml-output-wrap" class="hidden">
+        <textarea id="yaml-output" rows="20" readonly
+                  class="w-full bg-black/40 border border-gray-700 rounded-lg px-4 py-3 text-xs text-green-300 font-mono resize-y focus:outline-none focus:border-brand"></textarea>
+      </div>
+
+      <!-- 验证结果 -->
+      <div id="validation-result" class="hidden text-xs space-y-1"></div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  "use strict";
+
+  var requestId = null;
+
+  /* ===== 开始探测 ===== */
+  window.startDiscover = function() {
+    var url = document.getElementById("discover-url").value.trim();
+    if (!url || !url.startsWith("http")) {
+      showToast("请输入合法的 HTTP/HTTPS URL", "error");
+      return;
+    }
+
+    var platform = document.getElementById("discover-platform").value;
+    var flowType = document.querySelector('input[name="flow_type"]:checked').value;
+    var btn = document.getElementById("discover-start-btn");
+    var spinner = document.getElementById("discover-spinner");
+    var btnText = document.getElementById("discover-btn-text");
+
+    // 禁用 + spinner
+    btn.disabled = true;
+    spinner.classList.remove("hidden");
+    btnText.textContent = "探测中…";
+
+    // 清空之前的结果
+    document.getElementById("api-list").innerHTML = "";
+    document.getElementById("dom-containers").innerHTML = '<p class="text-sm text-gray-500 py-4 text-center">等待 DOM 分析完成…</p>';
+    document.getElementById("discover-actions").classList.add("hidden");
+    document.getElementById("api-count-badge").classList.add("hidden");
+
+    fetch("/api/discover/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_url: url,
+        platform_name: platform === "__new__" ? "" : platform,
+        flow_type: flowType
+      })
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      if (data.ok) {
+        requestId = data.request_id;
+        document.getElementById("discover-status").textContent = "已提交，等待 Worker 处理…";
+      } else {
+        showToast(data.error || "启动失败", "error");
+        resetStartBtn();
+      }
+    })
+    .catch(function() {
+      showToast("网络错误", "error");
+      resetStartBtn();
+    });
+  };
+
+  function resetStartBtn() {
+    var btn = document.getElementById("discover-start-btn");
+    var spinner = document.getElementById("discover-spinner");
+    var btnText = document.getElementById("discover-btn-text");
+    btn.disabled = false;
+    spinner.classList.add("hidden");
+    btnText.textContent = "开始探测";
+  }
+
+  /* ===== 追加 API 卡片 ===== */
+  window.appendApiCard = function(api) {
+    var list = document.getElementById("api-list");
+    if (!list) return;
+
+    // 移除占位符
+    var ph = document.getElementById("api-placeholder");
+    if (ph) ph.remove();
+
+    var card = document.createElement("div");
+    card.className = "bg-app/60 border border-gray-700/50 rounded-lg p-3 hover:border-gray-600 transition-colors";
+
+    var methodColors = { GET: "text-green-400", POST: "text-yellow-400", PUT: "text-blue-400", DELETE: "text-red-400" };
+    var methodClass = methodColors[api.method] || "text-gray-400";
+
+    var categoryLabels = { data_api: "数据API", list_data: "数据API", detail_data: "数据API", tracking: "埋点", analytics: "埋点" };
+    var categoryLabel = categoryLabels[api.category] || "其他";
+    var categoryColor = (api.category === "data_api" || api.category === "list_data" || api.category === "detail_data")
+      ? "bg-green-500/15 text-green-400"
+      : (api.category === "tracking" || api.category === "analytics")
+        ? "bg-gray-500/15 text-gray-400"
+        : "bg-blue-500/15 text-blue-400";
+
+    var isDataApi = (api.category === "data_api" || api.category === "list_data" || api.category === "detail_data");
+
+    var truncUrl = api.url.length > 60 ? api.url.substring(0, 60) + "…" : api.url;
+    var sizeText = api.response_size ? (api.response_size > 1024 ? (api.response_size / 1024).toFixed(1) + " KB" : api.response_size + " B") : "";
+
+    var cardId = "api-card-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+
+    card.innerHTML =
+      '<div class="flex items-center gap-2">' +
+        (isDataApi ? '<input type="checkbox" checked data-api-url="' + encodeURIComponent(api.url) + '" data-api-method="' + api.method + '" class="discover-api-check w-4 h-4 rounded bg-app-input border-gray-600 text-brand focus:ring-brand">' : '') +
+        '<span class="text-xs font-mono font-bold ' + methodClass + '">' + api.method + '</span>' +
+        '<span class="text-xs text-gray-300 truncate flex-1" title="' + api.url.replace(/"/g, '&quot;') + '">' + truncUrl + '</span>' +
+        '<span class="text-[10px] px-1.5 py-0.5 rounded ' + categoryColor + '">' + categoryLabel + '</span>' +
+        (sizeText ? '<span class="text-[10px] text-gray-500">' + sizeText + '</span>' : '') +
+        (isDataApi ? '<button onclick="toggleApiDetail(\'' + cardId + '\')" class="text-xs text-brand hover:text-brand-light ml-1">展开</button>' : '') +
+      '</div>' +
+      (isDataApi && api.response_sample
+        ? '<div id="' + cardId + '" class="hidden mt-2"><pre class="text-[10px] text-gray-400 bg-black/30 rounded p-2 max-h-[200px] overflow-auto whitespace-pre-wrap">' + escapeHtml(formatJsonPreview(api.response_sample, 3)) + '</pre></div>'
+        : '');
+
+    list.appendChild(card);
+
+    // 更新计数
+    var badge = document.getElementById("api-count-badge");
+    var count = list.querySelectorAll(".discover-api-check").length || list.children.length;
+    badge.textContent = list.children.length;
+    badge.classList.remove("hidden");
+  };
+
+  window.toggleApiDetail = function(id) {
+    var el = document.getElementById(id);
+    if (el) el.classList.toggle("hidden");
+  };
+
+  /* ===== 渲染 DOM 容器 ===== */
+  window.renderDomContainers = function(containers) {
+    var wrap = document.getElementById("dom-containers");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+
+    if (!containers || containers.length === 0) {
+      wrap.innerHTML = '<p class="text-sm text-gray-500 py-4 text-center">未检测到可用容器</p>';
+      return;
+    }
+
+    containers.forEach(function(c) {
+      var card = document.createElement("div");
+      card.className = "bg-app/60 border border-gray-700/50 rounded-lg p-3";
+
+      var fieldsHtml = "";
+      if (c.sample_fields && Object.keys(c.sample_fields).length > 0) {
+        fieldsHtml = '<table class="mt-2 w-full text-[10px]"><tbody>';
+        Object.keys(c.sample_fields).forEach(function(key) {
+          var val = String(c.sample_fields[key]).substring(0, 80);
+          fieldsHtml += '<tr class="border-t border-gray-700/30"><td class="py-1 pr-2 text-gray-400 font-mono">' + escapeHtml(key) + '</td><td class="py-1 text-gray-300">' + escapeHtml(val) + '</td></tr>';
+        });
+        fieldsHtml += '</tbody></table>';
+      }
+
+      card.innerHTML =
+        '<div class="flex items-center gap-2">' +
+          '<code class="text-xs text-brand font-mono">' + escapeHtml(c.selector || "") + '</code>' +
+          '<span class="text-[10px] text-gray-500">' + (c.item_count || 0) + ' 个元素</span>' +
+          (c.tag ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400">' + escapeHtml(c.tag) + '</span>' : '') +
+        '</div>' +
+        fieldsHtml;
+
+      wrap.appendChild(card);
+    });
+  };
+
+  /* ===== 生成 YAML ===== */
+  window.generateYaml = function() {
+    if (!requestId) {
+      showToast("请先完成探测", "error");
+      return;
+    }
+
+    var selected = [];
+    document.querySelectorAll(".discover-api-check:checked").forEach(function(cb) {
+      selected.push({ url: decodeURIComponent(cb.dataset.apiUrl), method: cb.dataset.apiMethod });
+    });
+
+    var btn = document.getElementById("generate-yaml-btn");
+    btn.disabled = true;
+    btn.textContent = "生成中…";
+
+    fetch("/api/discover/" + requestId + "/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: requestId, selected_apis: selected })
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> 生成 platform.yaml';
+
+      if (data.ok) {
+        document.getElementById("yaml-output-wrap").classList.remove("hidden");
+        document.getElementById("yaml-output").value = data.yaml || "";
+        showToast("YAML 生成成功", "success");
+
+        // 显示验证结果
+        if (data.validation) {
+          renderValidation(data.validation);
+        }
+      } else {
+        showToast(data.error || "生成失败", "error");
+      }
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> 生成 platform.yaml';
+      showToast("网络错误", "error");
+    });
+  };
+
+  /* ===== 复制 YAML ===== */
+  window.copyYaml = function() {
+    var textarea = document.getElementById("yaml-output");
+    if (!textarea || !textarea.value) {
+      showToast("暂无 YAML 内容", "warning");
+      return;
+    }
+    navigator.clipboard.writeText(textarea.value).then(function() {
+      showToast("已复制到剪贴板", "success");
+    }).catch(function() {
+      textarea.select();
+      document.execCommand("copy");
+      showToast("已复制到剪贴板", "success");
+    });
+  };
+
+  /* ===== 验证结果渲染 ===== */
+  function renderValidation(validation) {
+    var wrap = document.getElementById("validation-result");
+    if (!wrap) return;
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = "";
+
+    if (validation.matched && validation.matched.length > 0) {
+      var matchedHtml = '<div class="text-green-400"><span class="font-medium">映射成功：</span>' + validation.matched.join(", ") + '</div>';
+      wrap.innerHTML += matchedHtml;
+    }
+    if (validation.missing && validation.missing.length > 0) {
+      var missingHtml = '<div class="text-yellow-400"><span class="font-medium">未映射：</span>' + validation.missing.join(", ") + '</div>';
+      wrap.innerHTML += missingHtml;
+    }
+  }
+
+  /* ===== 工具函数 ===== */
+  function escapeHtml(str) {
+    var div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function formatJsonPreview(obj, maxDepth) {
+    try {
+      if (typeof obj === "string") obj = JSON.parse(obj);
+      return JSON.stringify(truncateObj(obj, maxDepth, 0), null, 2);
+    } catch (e) {
+      return String(obj).substring(0, 500);
+    }
+  }
+
+  function truncateObj(obj, maxDepth, depth) {
+    if (depth >= maxDepth) return typeof obj === "object" && obj !== null ? (Array.isArray(obj) ? ["...(" + obj.length + " items)"] : "{...}") : obj;
+    if (Array.isArray(obj)) {
+      return obj.slice(0, 3).map(function(item) { return truncateObj(item, maxDepth, depth + 1); }).concat(obj.length > 3 ? ["...(" + (obj.length - 3) + " more)"] : []);
+    }
+    if (typeof obj === "object" && obj !== null) {
+      var result = {};
+      var keys = Object.keys(obj).slice(0, 10);
+      keys.forEach(function(k) { result[k] = truncateObj(obj[k], maxDepth, depth + 1); });
+      if (Object.keys(obj).length > 10) result["..."] = "(" + (Object.keys(obj).length - 10) + " more keys)";
+      return result;
+    }
+    return obj;
+  }
+
+})();
+</script>
+{% endblock %}

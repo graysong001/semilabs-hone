@@ -216,6 +216,21 @@ class TestTaskLifecycle:
         finally:
             sess.close()
 
+    def test_complete_task_zero_count_sets_failed(self, db_session, tmp_data_dir):
+        tid = _make_task(db_session, status="running")
+        cap, out = _cap()
+        h_mod._complete_task(tid, 0, cap)
+        from semilabs_hone.core.models.task import CollectionTask
+        from semilabs_hone.core.models.db import get_session
+        sess = get_session()
+        try:
+            t = sess.query(CollectionTask).filter(CollectionTask.id == tid).first()
+            assert t.status == "failed"
+            assert t.actual_count == 0
+            assert t.error_msg is not None
+        finally:
+            sess.close()
+
 
 # ─── _get_engine ──────────────────────────────────────────────────────────
 

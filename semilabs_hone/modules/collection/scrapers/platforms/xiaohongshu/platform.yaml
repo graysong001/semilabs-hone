@@ -30,24 +30,34 @@ flows:
       - type: navigate
         url: "/search_result?keyword={keyword}&source=web_search_result_notes&sort={sort}"
       - type: wait_xhr
-        url_pattern: "/api/sns/web/v1/search/notes"
-        method: POST
+        # [2026-07-31] 放宽匹配: 子串 "search/notes" 兼容 v1→v2 版本变更;
+        # 去掉 method 限制兼容 POST→GET 切换 (小红书可能改为 GET 请求).
+        url_pattern: "search/notes"
         save_as: search_resp
         timeout_ms: 15000
+        # SSR hydration 降级: XHR 超时时从页面内嵌 JS 全局变量提取搜索数据
+        ssr_state_key: "window.__INITIAL_STATE__"
+        ssr_state_path: "note.noteList"
       # 翻页增量采集: scroll_collect 自带 seed extract (首屏), 之后每轮滚动从
       # 拦截 buffer 取下一条 search/notes 响应增量提取+跨页去重; 不再有独立
       # extract 步骤 (否则首屏数据会重复入库)。empty_break=5 次无新即收,
       # max_scrolls=20 硬顶 (PRD §8.4 场景4.2)。
       - type: scroll_collect
         from: search_resp
-        url_pattern: "/api/sns/web/v1/search/notes"
-        method: POST
+        url_pattern: "search/notes"
         group: ItemRef
         map:
-          item_id: "$.note_id"
-          title: "$.display_title"
-          author_name: "$.user.nickname"
-          likes: "$.interact_info.liked_count"
+          item_id: "$.id"
+          title: "$.note_card.display_title"
+          author_name: "$.note_card.user.nickname"
+          likes: "$.note_card.interact_info.liked_count"
+        # DOM fallback: when XHR interception times out, extract from rendered page.
+        dom_container: "section[data-note-id]"
+        dom_fallback:
+          item_id: "attr:data-note-id"
+          title: "css:a.title span, .note-item .title"
+          author_name: "css:.author .name-time-wrapper .name, .author-wrapper .name, [class*='author'] .name"
+          likes: "css:[class*='like'] .count, .like-wrapper .count"
         max_scrolls: 20
         empty_break: 5
         wait_ms: 1500

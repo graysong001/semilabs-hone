@@ -73,7 +73,7 @@ def _validate_new_task(sess, platform: str, account_id: int, targets: list[str])
     if platform not in known:
         return _error(
             f"未知平台 '{platform}'",
-            f"可用平台: {', '.join(known) or '（无）'}；新站点需先录制生成 platform.yaml",
+            f"可用平台: {', '.join(known) or '（无）'}。<a href='/discover?return=create' class='text-brand hover:underline'>点此接入新平台</a>",
             400,
         )
 
@@ -127,7 +127,7 @@ _BADGE_MAP = {
     "need_human": ("bg-red-500/15 text-red-400",       "⚠️", "需人工处理"),
     "paused":     ("bg-gray-500/15 text-gray-400",     "⏸️", "已暂停"),
     "error":      ("bg-purple-500/15 text-purple-400", "⛔", "异常中止"),
-    "failed":     ("bg-purple-500/15 text-purple-400", "⛔", "异常中止"),
+    "failed":     ("bg-red-500/15 text-red-400",       "❌", "失败"),
     "cancelled":  ("bg-gray-500/15 text-gray-400",     "⛔", "已取消"),
 }
 

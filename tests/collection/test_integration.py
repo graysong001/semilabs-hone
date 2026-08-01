@@ -493,7 +493,7 @@ class TestNetworkTransientRetry:
                 "collect_comments": False, "account_id": 1,
                 "request_id": "req-net-cap",
             }, cap)
-            assert result["status"] == "ok"
+            assert result["status"] == "failed"
             assert result["posts_scraped"] == 0
             # 1 次原始 + 2 次重试 = 3 次调用
             assert search_calls["n"] == 3

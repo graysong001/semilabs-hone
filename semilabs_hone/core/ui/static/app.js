@@ -36,7 +36,7 @@
       "background:" + (TOAST_BG[severity] || TOAST_BG.info) + ";color:#fff;padding:10px 20px;border-radius:8px;" +
       "font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.3);animation:slideIn 0.3s;" +
       "border:1px solid rgba(255,255,255,0.1);max-width:320px;";
-    el.textContent = message;
+    el.innerHTML = message;
     container.appendChild(el);
     setTimeout(function () {
       el.style.transition = "opacity 0.3s";
@@ -253,6 +253,14 @@
       case "qr_ready": showToast({ severity: "info", message: "扫码已就绪，请在 Chrome 中完成登录" }); break;
       case "captcha_required": showToast({ severity: "warn", message: "需要验证码，请在 Chrome 中完成验证" }); break;
       case "task_completed": showToast({ severity: "info", message: "任务完成: " + (msg.task_id || "") }); break;
+      case "task_failed":
+        showToast({ severity: "error", message: "任务失败: " + (msg.data && msg.data.error ? msg.data.error : (msg.message || "")), duration: 5000 });
+        // Refresh status badge for the failed task
+        if (msg.task_id) {
+          var badge = document.getElementById("badge-" + msg.task_id);
+          if (badge) htmx.ajax("GET", "/api/tasks/" + msg.task_id + "/status", {target: badge, swap: "outerHTML"});
+        }
+        break;
       case "login_success": showToast({ severity: "info", message: "登录成功" }); break;
       case "session_status":
         showToast({
@@ -266,6 +274,28 @@
           message: msg.message || "该平台身份已绑定其他账号，Cookie 未生效",
           duration: 6000,
         });
+        break;
+      case "discover_status":
+        var discoverStatusEl = document.getElementById("discover-status");
+        if (discoverStatusEl) discoverStatusEl.textContent = (msg.data && msg.data.message) || msg.message || "";
+        break;
+      case "discover_xhr":
+        if (document.getElementById("api-list") && typeof appendApiCard === "function") {
+          appendApiCard(msg.data ? msg.data.api : (msg.api || {}));
+        }
+        break;
+      case "discover_dom":
+        if (document.getElementById("dom-containers") && typeof renderDomContainers === "function") {
+          renderDomContainers(msg.data ? msg.data.containers : (msg.containers || []));
+        }
+        break;
+      case "discover_ready":
+        if (document.getElementById("discover-actions")) {
+          document.getElementById("discover-actions").classList.remove("hidden");
+          var apiCnt = (msg.data && msg.data.api_count) || 0;
+          var contCnt = (msg.data && msg.data.container_count) || 0;
+          showToast("探测完成：发现 " + apiCnt + " 个 API，" + contCnt + " 个容器", "success");
+        }
         break;
       default: break;
     }

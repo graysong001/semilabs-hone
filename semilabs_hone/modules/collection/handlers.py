@@ -105,6 +105,7 @@ def build_registry() -> dict[str, Callable]:
         "search": handler_search,
         "detail": handler_detail,
         "comments": handler_comments,
+        "discover": handler_discover,
     }
 
 
@@ -956,6 +957,38 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
     # Warmup browse
     await _do_warmup(engine, progress_cb)
 
+    # --- Session pre-check: verify login state before scraping ---
+    # Navigate to platform base and detect login DOM signals. Avoids running
+    # 30+ seconds of XHR timeouts when cookies have expired.
+    try:
+        page = await engine.ensure_page()
+        spec = engine.spec
+        logged_in_sel = getattr(spec.login, "logged_in_selector", None)
+        modal_sel = getattr(spec.login, "login_modal_selector", None)
+        if logged_in_sel or modal_sel:
+            # Quick DOM probe (reuse existing _detect_login_dom with short timeout)
+            dom_state = await _detect_login_dom(page, spec)
+            if dom_state is False:
+                # Login modal visible or logged-in selector absent → session expired
+                logger.warning("Session pre-check failed: login state expired")
+                _set_task_need_human(task_id, progress_cb)
+                progress_cb("session_expired", {
+                    "task_id": task_id,
+                    "error_msg": "登录态失效，请重新登录后重试",
+                })
+                return {
+                    "status": "need_human",
+                    "reason": "session_expired",
+                    "error_msg": "登录态失效，请重新登录后重试",
+                    "posts_scraped": 0,
+                    "comments_count": 0,
+                    "images_count": 0,
+                    "last_note_index": 0,
+                }
+    except Exception as exc:
+        # Pre-check is best-effort; if it fails, proceed with scraping.
+        logger.debug("Session pre-check skipped: %s", exc)
+
     # --- Phase 2-5 per keyword ---
     total_posts = 0
     total_comments = 0
@@ -1218,6 +1251,41 @@ async def handler_scrape_task(payload: dict, progress_cb: Callable) -> dict:
                 })
                 done = True  # ref fully processed → exit retry loop, next item
 
+    # Zero-result early-fail: if the search stage yielded nothing, skip
+    # detail/store and mark task as failed with a specific reason.
+    if total_posts == 0:
+        fail_reason = "搜索阶段未获取到任何笔记，可能因XHR超时或登录态失效"
+        progress_cb("scrape_failed", {
+            "task_id": task_id,
+            "error": fail_reason,
+            "percent": 100,
+        })
+        # Persist failed status in DB
+        if task_id is not None:
+            try:
+                from semilabs_hone.core.models.db import get_session
+                from semilabs_hone.core.models.task import CollectionTask
+                sess = get_session()
+                try:
+                    task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
+                    if task:
+                        task.status = "failed"
+                        task.error_msg = fail_reason
+                        task.actual_count = 0
+                        sess.commit()
+                finally:
+                    sess.close()
+            except Exception as exc:
+                logger.warning(f"Failed to set task failed: {exc}")
+        return {
+            "status": "failed",
+            "reason": fail_reason,
+            "posts_scraped": 0,
+            "comments_count": total_comments,
+            "images_count": total_images,
+            "last_note_index": last_note_index,
+        }
+
     # Final update
     progress_cb("scrape_complete", {
         "task_id": task_id,
@@ -1478,15 +1546,21 @@ async def _handle_need_human(
 
 
 async def _do_warmup(engine: Any, progress_cb: Callable) -> None:
-    """Warmup: random browse 2-5 pages."""
+    """Warmup: random browse 2-5 pages.
+
+    Ensures engine.page is initialized via ensure_page() before warmup —
+    engine.page is lazily initialized and may be None at this point.
+    """
     try:
         from semilabs_hone.modules.collection.scheduler.warmup import random_browse
-        page = getattr(engine, "page", None)
-        if page is not None:
-            await random_browse(page)
-            progress_cb("warmup_done", {})
+        page = await engine.ensure_page()
+        await random_browse(page)
+        progress_cb("warmup_done", {})
     except ImportError:
         progress_cb("warmup_skipped", {"reason": "warmup module not available"})
+    except Exception as exc:
+        logger.warning("warmup failed (continuing): %s", exc)
+        progress_cb("warmup_skipped", {"reason": str(exc)})
 
 
 async def _download_images_for_post(
@@ -1732,7 +1806,7 @@ def _complete_task(
     actual_count: int,
     progress_cb: Callable,
 ) -> None:
-    """Mark task as completed (PRD §6.1 columns only)."""
+    """Mark task as completed — or failed if zero results (PRD §6.1)."""
     if task_id is None:
         return
     try:
@@ -1742,9 +1816,20 @@ def _complete_task(
         try:
             task = sess.query(CollectionTask).filter(CollectionTask.id == task_id).first()
             if task:
-                task.status = "completed"
-                task.actual_count = actual_count  # PRD §6.1 canonical count
-                sess.commit()
+                if actual_count == 0:
+                    # Zero-result guard: mark as failed instead of completed
+                    task.status = "failed"
+                    task.error_msg = "采集完成但未获取到任何数据"
+                    task.actual_count = 0
+                    sess.commit()
+                    progress_cb("scrape_failed", {
+                        "task_id": task_id,
+                        "error": task.error_msg,
+                    })
+                else:
+                    task.status = "completed"
+                    task.actual_count = actual_count  # PRD §6.1 canonical count
+                    sess.commit()
         finally:
             sess.close()
     except Exception as exc:
@@ -1910,3 +1995,323 @@ async def handler_comments(payload: dict, progress_cb: Callable) -> dict:
 
     progress_cb("comments_done", {"item_id": item_id, "count": len(results)})
     return {"status": "ok", "comments": results}
+
+
+# ---------------------------------------------------------------------------
+# handler_discover — platform structure probe (Task #7)
+# ---------------------------------------------------------------------------
+
+#: Extensions to skip during XHR classification (static assets).
+_DISCOVER_SKIP_EXTENSIONS = {
+    '.css', '.js', '.woff', '.woff2', '.ttf', '.svg', '.png',
+    '.jpg', '.jpeg', '.gif', '.ico', '.mp4', '.webp', '.map',
+}
+
+#: URL patterns indicating tracking/analytics (not data APIs).
+_DISCOVER_SKIP_URL_PATTERNS = {
+    'collect', 'analytics', 'track', '/log', 'beacon',
+    'report', 'pixel', 'sentry', 'hotjar', 'gtag',
+    'googletag', 'doubleclick', 'facebook.com/tr',
+}
+
+
+async def handler_discover(payload: dict, progress_cb: Callable) -> dict:
+    """平台结构探测：打开 URL，录制 XHR，分析 DOM，返回结构化结果。
+
+    Args:
+        payload: {target_url, platform_name, flow_type, request_id}
+        progress_cb: (message, data) callback for IPC progress.
+
+    Returns:
+        {ok, apis, containers, html_snapshot_size, page_title}
+    """
+    target_url = payload.get("target_url", "")
+    platform_name = payload.get("platform_name", "unknown")
+
+    if not target_url:
+        return {"status": "error", "error": "target_url is required"}
+
+    # 1. Get a page from the worker context
+    progress_cb("discover_status", {"message": "正在准备浏览器..."})
+
+    if _WORKER_CTX is None:
+        return {"status": "error", "error": "无可用的浏览器上下文，请确保 worker 已启动"}
+
+    try:
+        pages = _WORKER_CTX.pages if hasattr(_WORKER_CTX, "pages") else []
+        page = pages[0] if pages else await _WORKER_CTX.new_page()
+    except Exception as exc:
+        return {"status": "error", "error": f"无法获取页面: {exc}"}
+
+    # 2. Set up XHR capture (use a local buffer to avoid polluting engine state)
+    xhr_buffer: list[dict] = []
+
+    async def _capture_response(response) -> None:
+        try:
+            url = response.url
+            body = await response.text()
+        except Exception:
+            return
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError):
+            data = None  # Skip non-JSON
+        if data is None:
+            return
+        request_obj = getattr(response, "request", None)
+        xhr_buffer.append({
+            "url": url,
+            "method": (getattr(request_obj, "method", "") or "").upper(),
+            "data": data,
+        })
+
+    def _on_response(response) -> None:
+        try:
+            asyncio.get_running_loop().create_task(_capture_response(response))
+        except RuntimeError:
+            pass
+
+    try:
+        page.on("response", _on_response)
+    except Exception:
+        pass
+
+    # 3. Navigate to target URL
+    progress_cb("discover_status", {"message": "正在打开页面..."})
+    try:
+        await page.goto(target_url, wait_until="networkidle", timeout=30000)
+    except Exception as exc:
+        logger.warning(f"Discover navigation warning: {exc}")
+        # Continue even on timeout — partial data is still useful
+
+    # 4. Scroll to trigger pagination XHRs
+    progress_cb("discover_status", {"message": "正在滚动页面捕获 API..."})
+    for i in range(5):
+        try:
+            await page.evaluate("window.scrollBy(0, window.innerHeight)")
+        except Exception:
+            break
+        await asyncio.sleep(2)
+
+    # 5. Capture DOM snapshot
+    try:
+        html_content = await page.content()
+    except Exception:
+        html_content = ""
+
+    # 6. Get page title
+    try:
+        page_title = await page.title()
+    except Exception:
+        page_title = platform_name
+
+    # 7. Remove response listener
+    try:
+        page.remove_listener("response", _on_response)
+    except Exception:
+        pass
+
+    # 8. Filter and classify XHR
+    apis = _discover_filter_and_classify_xhr(xhr_buffer)
+
+    # 9. DOM container identification
+    containers = _discover_identify_dom_containers(html_content)
+
+    # 10. Push progress events
+    for api in apis:
+        progress_cb("discover_xhr", {"api": api})
+    if containers:
+        progress_cb("discover_dom", {"containers": containers})
+    progress_cb("discover_ready", {
+        "api_count": len(apis),
+        "container_count": len(containers),
+    })
+
+    return {
+        "ok": True,
+        "apis": apis,
+        "containers": containers,
+        "html_snapshot_size": len(html_content),
+        "page_title": page_title,
+    }
+
+
+def _discover_filter_and_classify_xhr(xhr_list: list[dict]) -> list[dict]:
+    """过滤静态资源和埋点，分类数据 API。"""
+    results = []
+    for item in xhr_list:
+        url = item.get("url", "")
+        # Skip static resources
+        path = urlparse(url).path.lower()
+        if any(path.endswith(ext) for ext in _DISCOVER_SKIP_EXTENSIONS):
+            continue
+        # Skip tracking/analytics
+        url_lower = url.lower()
+        if any(pat in url_lower for pat in _DISCOVER_SKIP_URL_PATTERNS):
+            continue
+
+        data = item.get("data")
+        category = "other"
+        response_size = 0
+
+        if isinstance(data, dict):
+            body_str = json.dumps(data, ensure_ascii=False)
+            response_size = len(body_str)
+            if response_size > 1024 and _discover_contains_array(data):
+                category = "data_api"
+                if "search" in url_lower:
+                    category = "list_data"
+                elif "detail" in url_lower or "feed" in url_lower:
+                    category = "detail_data"
+            elif response_size > 256:
+                category = "config"
+        elif isinstance(data, list):
+            body_str = json.dumps(data, ensure_ascii=False)
+            response_size = len(body_str)
+            if response_size > 512:
+                category = "data_api"
+
+        results.append({
+            "url": url,
+            "method": item.get("method", "GET"),
+            "category": category,
+            "response_size": response_size,
+            "response_sample": _discover_truncate_response(data, max_depth=3),
+        })
+    return results
+
+
+def _discover_contains_array(obj, depth: int = 0) -> bool:
+    """检查 JSON 对象中是否包含数组（数据 API 的特征）。"""
+    if depth > 3:
+        return False
+    if isinstance(obj, list) and len(obj) > 0:
+        return True
+    if isinstance(obj, dict):
+        for v in obj.values():
+            if _discover_contains_array(v, depth + 1):
+                return True
+    return False
+
+
+def _discover_truncate_response(data, max_depth: int = 3, _depth: int = 0):
+    """截断响应体到前 N 层，数组只保留前 2 个元素。"""
+    if _depth >= max_depth:
+        if isinstance(data, dict):
+            return {"...": f"{len(data)} keys"}
+        elif isinstance(data, list):
+            return [f"... {len(data)} items"]
+        return data
+    if isinstance(data, dict):
+        return {
+            k: _discover_truncate_response(v, max_depth, _depth + 1)
+            for k, v in list(data.items())[:20]
+        }
+    elif isinstance(data, list):
+        truncated = [
+            _discover_truncate_response(item, max_depth, _depth + 1)
+            for item in data[:2]
+        ]
+        if len(data) > 2:
+            truncated.append(f"... +{len(data) - 2} more")
+        return truncated
+    return data
+
+
+def _discover_identify_dom_containers(html: str) -> list[dict]:
+    """从 HTML 中识别列表容器。"""
+    if not html:
+        return []
+
+    try:
+        from selectolax.parser import HTMLParser
+    except ImportError:
+        # selectolax optional — degrade gracefully
+        return _discover_identify_dom_containers_fallback(html)
+
+    tree = HTMLParser(html)
+    containers: list[dict] = []
+
+    # Strategy 1: elements with data-* attributes indicating item IDs
+    for tag in ['section', 'article', 'div', 'li']:
+        for attr_name in ['data-note-id', 'data-item-id', 'data-id']:
+            elements = tree.css(f'{tag}[{attr_name}]')
+            if len(elements) >= 3:
+                selector = f"{tag}[{attr_name}]"
+                if not any(c["selector"] == selector for c in containers):
+                    sample_fields = _discover_extract_sample_fields_selectolax(elements[:3])
+                    containers.append({
+                        "selector": selector,
+                        "item_count": len(elements),
+                        "sample_fields": sample_fields,
+                        "tag": tag,
+                    })
+
+    # Strategy 2: class patterns indicating cards/items
+    for pattern in ['.note-item', '.card-item', '[class*="item"]', '[class*="card"]']:
+        try:
+            elements = tree.css(pattern)
+        except Exception:
+            continue
+        if len(elements) >= 5 and not any(c["selector"] == pattern for c in containers):
+            containers.append({
+                "selector": pattern,
+                "item_count": len(elements),
+                "sample_fields": _discover_extract_sample_fields_selectolax(elements[:3]),
+                "tag": elements[0].tag if elements else "div",
+            })
+
+    return containers
+
+
+def _discover_identify_dom_containers_fallback(html: str) -> list[dict]:
+    """Fallback DOM container identification using stdlib re (no selectolax)."""
+    containers: list[dict] = []
+    # Simple regex: count data-note-id / data-item-id / data-id occurrences
+    import re as _re
+    for attr in ['data-note-id', 'data-item-id', 'data-id']:
+        matches = _re.findall(rf'{attr}="[^"]+"', html)
+        if len(matches) >= 3:
+            containers.append({
+                "selector": f"[{attr}]",
+                "item_count": len(matches),
+                "sample_fields": {},
+                "tag": "div",
+            })
+    return containers
+
+
+def _discover_extract_sample_fields_selectolax(elements) -> dict:
+    """从卡片元素中提取样本字段。"""
+    fields: dict = {}
+    if not elements:
+        return fields
+    el = elements[0]
+    # Try to extract title
+    for sel in ['a.title span', '.title', 'h3', 'h2', 'a[href] span']:
+        try:
+            title_el = el.css_first(sel)
+            if title_el and title_el.text(strip=True):
+                fields["title"] = title_el.text(strip=True)[:50]
+                break
+        except Exception:
+            continue
+    # Try to extract author
+    for sel in ['.author .name', '.user-name', '[class*="author"] .name', '.nickname']:
+        try:
+            author_el = el.css_first(sel)
+            if author_el and author_el.text(strip=True):
+                fields["author"] = author_el.text(strip=True)[:30]
+                break
+        except Exception:
+            continue
+    # Try to extract like count
+    for sel in ['.like-wrapper .count', '[class*="like"] .count', '.likes']:
+        try:
+            like_el = el.css_first(sel)
+            if like_el and like_el.text(strip=True):
+                fields["likes"] = like_el.text(strip=True)
+                break
+        except Exception:
+            continue
+    return fields

@@ -111,10 +111,10 @@ def _make_test_spec(url_pattern: str = "/api/search") -> PlatformSpec:
                         from_="search_resp",
                         group="ItemRef",
                         map={
-                            "item_id": "$.note_id",
-                            "title": "$.display_title",
-                            "author_name": "$.user.nickname",
-                            "likes": "$.interact_info.liked_count",
+                            "item_id": "$.id",
+                            "title": "$.note_card.display_title",
+                            "author_name": "$.note_card.user.nickname",
+                            "likes": "$.note_card.interact_info.liked_count",
                         },
                     ),
                 ]
@@ -305,7 +305,7 @@ def _make_scroll_collect_spec(max_scrolls: int = 20, empty_break: int = 5) -> Pl
                 Step(type="wait_xhr", url_pattern="/api/search", method="POST",
                      save_as="list_resp", timeout_ms=15000),
                 Step(type="scroll_collect", from_="list_resp", group="ItemRef",
-                     map={"item_id": "$.note_id"}, max_scrolls=max_scrolls,
+                     map={"item_id": "$.id"}, max_scrolls=max_scrolls,
                      empty_break=empty_break, wait_ms=10),
             ]),
             "detail": Flow(steps=[
@@ -415,10 +415,12 @@ class TestScrollCollectPagination:
         page2 = {
             "data": {
                 "items": [
-                    {"note_id": "64abc123def456", "display_title": "首页重复帖",
-                     "user": {"nickname": "甲"}, "interact_info": {"liked_count": "1"}},
-                    {"note_id": "64fff000aaa111", "display_title": "第二页新帖",
-                     "user": {"nickname": "乙"}, "interact_info": {"liked_count": "2"}},
+                    {"id": "64abc123def456", "model_type": "note",
+                     "note_card": {"display_title": "首页重复帖",
+                     "user": {"nickname": "甲"}, "interact_info": {"liked_count": "1"}}},
+                    {"id": "64fff000aaa111", "model_type": "note",
+                     "note_card": {"display_title": "第二页新帖",
+                     "user": {"nickname": "乙"}, "interact_info": {"liked_count": "2"}}},
                 ],
                 "has_more": False,
             },
@@ -436,7 +438,7 @@ class TestScrollCollectPagination:
                          save_as="list_resp", timeout_ms=15000),
                     Step(type="scroll_collect", from_="list_resp",
                          url_pattern="/api/search", method="POST",
-                         group="ItemRef", map={"item_id": "$.note_id"},
+                         group="ItemRef", map={"item_id": "$.id"},
                          max_scrolls=20, empty_break=2, wait_ms=10),
                 ]),
             },
@@ -483,3 +485,203 @@ class TestNoScrollByEvaluate:
                             pytest.fail("engine calls page.evaluate with a scrollBy script")
         # sanity: the word never appears in source at all (docstrings included)
         assert "scrollBy" not in src
+
+
+# ---------------------------------------------------------------------------
+# SSR state fallback tests (2026-07-31 Task #6)
+# ---------------------------------------------------------------------------
+
+
+class _SsrMockPage:
+    """Mock page that never emits XHR responses but has SSR state available."""
+
+    def __init__(self, ssr_state: dict | None = None):
+        self._ssr_state = ssr_state
+        self._listeners: dict[str, list] = {}
+
+    async def goto(self, url: str):
+        # No XHR response emitted — simulates XHR timeout scenario
+        pass
+
+    def on(self, event: str, callback):
+        self._listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event: str, callback):
+        try:
+            self._listeners[event].remove(callback)
+        except (KeyError, ValueError):
+            pass
+
+    async def evaluate(self, js: str) -> str:
+        """Simulate reading SSR state from window.__INITIAL_STATE__."""
+        if self._ssr_state is not None and "__INITIAL_STATE__" in js:
+            return json.dumps(self._ssr_state)
+        return "null"
+
+    async def content(self) -> str:
+        return "<html></html>"
+
+    async def fill(self, selector: str, text: str):
+        pass
+
+    async def click(self, selector: str):
+        pass
+
+    async def wait_for_selector(self, selector: str, timeout: int = 5000):
+        pass
+
+    class _Mouse:
+        async def wheel(self, dx, dy):
+            pass
+
+    mouse = _Mouse()
+
+
+class TestSsrStateFallback:
+    """Test _wait_xhr SSR state fallback when XHR interception times out."""
+
+    @pytest.mark.asyncio
+    async def test_wait_xhr_uses_ssr_state_on_timeout(self, monkeypatch):
+        """When XHR times out and ssr_state_key is configured, engine reads
+        SSR data from page global variable and returns it."""
+        import semilabs_hone.modules.collection.scrapers.engine as engine_mod
+        # Reduce timeout for fast test
+        ssr_data = [
+            {"note_id": "ssr001", "display_title": "SSR帖子",
+             "user": {"nickname": "SSR用户"}, "interact_info": {"liked_count": "99"}},
+        ]
+        spec = PlatformSpec(
+            platform="test_platform",
+            display_name="Test Platform",
+            base_url="https://test.example.com",
+            login=LoginSpec(type="qrcode", login_url="/login"),
+            flows={
+                "search": Flow(steps=[
+                    Step(type="navigate", url="/search?q={keyword}"),
+                    Step(
+                        type="wait_xhr",
+                        url_pattern="search/notes",
+                        save_as="search_resp",
+                        timeout_ms=100,  # very short for test speed
+                        ssr_state_key="window.__INITIAL_STATE__",
+                        ssr_state_path="note.noteList",
+                    ),
+                    Step(
+                        type="extract",
+                        from_="search_resp",
+                        group="ItemRef",
+                        map={
+                            "item_id": "$.note_id",
+                            "title": "$.display_title",
+                            "author_name": "$.user.nickname",
+                            "likes": "$.interact_info.liked_count",
+                        },
+                    ),
+                ]),
+            },
+        )
+        engine = GenericEngine(spec=spec)
+        page = _SsrMockPage(ssr_state=ssr_data)
+        engine.page = page
+
+        items = await engine.run_flow("search", keyword="测试")
+
+        assert isinstance(items, list)
+        assert len(items) == 1
+        assert items[0].item_id == "ssr001"
+        assert items[0].title == "SSR帖子"
+
+    @pytest.mark.asyncio
+    async def test_wait_xhr_no_ssr_key_returns_empty(self):
+        """Without ssr_state_key, XHR timeout returns empty dict (old behavior)."""
+        spec = PlatformSpec(
+            platform="test_platform",
+            display_name="Test Platform",
+            base_url="https://test.example.com",
+            login=LoginSpec(type="qrcode", login_url="/login"),
+            flows={
+                "search": Flow(steps=[
+                    Step(type="navigate", url="/search?q={keyword}"),
+                    Step(
+                        type="wait_xhr",
+                        url_pattern="search/notes",
+                        save_as="search_resp",
+                        timeout_ms=100,
+                    ),
+                    Step(
+                        type="extract",
+                        from_="search_resp",
+                        group="ItemRef",
+                        map={"item_id": "$.note_id"},
+                    ),
+                ]),
+            },
+        )
+        engine = GenericEngine(spec=spec)
+        page = _SsrMockPage(ssr_state=[{"note_id": "hidden"}])
+        engine.page = page
+
+        items = await engine.run_flow("search", keyword="x")
+        # No ssr_state_key configured, so SSR data is not read
+        assert items == []
+
+    @pytest.mark.asyncio
+    async def test_wait_xhr_ssr_state_none_falls_through(self):
+        """When SSR state is absent (page has no __INITIAL_STATE__), falls through
+        to empty return."""
+        spec = PlatformSpec(
+            platform="test_platform",
+            display_name="Test Platform",
+            base_url="https://test.example.com",
+            login=LoginSpec(type="qrcode", login_url="/login"),
+            flows={
+                "search": Flow(steps=[
+                    Step(type="navigate", url="/search?q={keyword}"),
+                    Step(
+                        type="wait_xhr",
+                        url_pattern="search/notes",
+                        save_as="search_resp",
+                        timeout_ms=100,
+                        ssr_state_key="window.__INITIAL_STATE__",
+                        ssr_state_path="note.noteList",
+                    ),
+                    Step(
+                        type="extract",
+                        from_="search_resp",
+                        group="ItemRef",
+                        map={"item_id": "$.note_id"},
+                    ),
+                ]),
+            },
+        )
+        engine = GenericEngine(spec=spec)
+        # Page returns null for evaluate (no SSR state)
+        page = _SsrMockPage(ssr_state=None)
+        engine.page = page
+
+        items = await engine.run_flow("search", keyword="x")
+        assert items == []
+
+    @pytest.mark.asyncio
+    async def test_wait_xhr_prefers_xhr_over_ssr(self):
+        """When XHR arrives before timeout, SSR is not consulted even if configured."""
+        spec = _make_test_spec(url_pattern="search/notes")
+        # Override step to include ssr_state_key
+        spec.flows["search"].steps[1] = Step(
+            type="wait_xhr",
+            url_pattern="search/notes",
+            method="POST",
+            save_as="search_resp",
+            timeout_ms=15000,
+            ssr_state_key="window.__INITIAL_STATE__",
+            ssr_state_path="note.noteList",
+        )
+        engine = GenericEngine(spec=spec)
+        # This page emits XHR on goto (normal path)
+        page = _make_mock_page(url_pattern="search/notes")
+        engine.page = page
+
+        items = await engine.run_flow("search", keyword="coffee", sort="general")
+        # XHR should work, returning normal fixture data
+        assert len(items) == 2
+        assert items[0].item_id == "64abc123def456"
