@@ -72,6 +72,15 @@
 </div>
 {% include "partials/_create_task_modal.html" %}
 {% include "partials/_risk_control_modal.html" %}
+{% if toast_message %}
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  if (typeof showToast === "function") {
+    showToast("{{ toast_message }}", "success");
+  }
+});
+</script>
+{% endif %}
 {% if open_create_modal %}
 <script>
 document.addEventListener("DOMContentLoaded", function() {

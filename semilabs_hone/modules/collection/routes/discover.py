@@ -53,6 +53,7 @@ async def page_discover(request: Request) -> HTMLResponse:
             "platforms": list_platforms(),
             "return_to": return_param,
             "prefill_platform": platform_param,
+            "active_page": "discover",
         },
     )
     return html

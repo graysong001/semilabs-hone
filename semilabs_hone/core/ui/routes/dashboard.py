@@ -38,6 +38,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 
     open_create = request.query_params.get("openCreate", "").lower() == "true"
     new_platform = request.query_params.get("platform", "")
+    toast_message = request.query_params.get("toast", "")
 
     sess = get_session()
     try:
@@ -115,6 +116,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             "platforms": list_platforms(),
             "open_create_modal": open_create,
             "new_platform": new_platform,
+            "toast_message": toast_message,
         },
     )
 

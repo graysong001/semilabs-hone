@@ -144,7 +144,7 @@
 (function() {
   "use strict";
 
-  var requestId = null;
+  var requestId = sessionStorage.getItem("discover_request_id") || null;
 
   // 预填平台
   {% if prefill_platform %}
@@ -198,6 +198,7 @@
     .then(function(data) {
       if (data.ok) {
         requestId = data.request_id;
+        sessionStorage.setItem("discover_request_id", requestId);
         document.getElementById("discover-status").textContent = "已提交，等待 Worker 处理…";
       } else {
         showToast(data.error || "启动失败", "error");
@@ -380,12 +381,13 @@
     .then(function(resp) { return resp.json(); })
     .then(function(data) {
       if (data.ok) {
+        sessionStorage.removeItem("discover_request_id");
         showToast("平台 " + data.platform + " 配置已保存并激活", "success");
         var returnTo = "{{ return_to or '' }}";
         if (returnTo === "create") {
           setTimeout(function() { window.location.href = "/?openCreate=true&platform=" + encodeURIComponent(data.platform); }, 800);
         } else if (returnTo === "tasks") {
-          setTimeout(function() { window.location.href = "/"; }, 800);
+          setTimeout(function() { window.location.href = "/?toast=" + encodeURIComponent("平台配置已更新，可点恢复重试失败任务"); }, 800);
         }
       } else {
         showToast(data.error || "保存失败", "error");
