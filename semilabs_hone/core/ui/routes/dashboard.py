@@ -31,9 +31,13 @@ async def dashboard(request: Request) -> HTMLResponse:
     from semilabs_hone.core.models.db import get_session
     from semilabs_hone.core.models.account import Account
     from semilabs_hone.core.models.task import CollectionTask
+    from semilabs_hone.modules.collection.scrapers.registry import list_platforms
     from config import DAILY_LIMIT_PER_ACCOUNT
     from datetime import datetime, timezone
     from sqlalchemy import func
+
+    open_create = request.query_params.get("openCreate", "").lower() == "true"
+    new_platform = request.query_params.get("platform", "")
 
     sess = get_session()
     try:
@@ -108,6 +112,9 @@ async def dashboard(request: Request) -> HTMLResponse:
             "range": range,
             "badge_map": badge_map,
             "actions_map": actions_map,
+            "platforms": list_platforms(),
+            "open_create_modal": open_create,
+            "new_platform": new_platform,
         },
     )
 

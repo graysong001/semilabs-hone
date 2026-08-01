@@ -72,4 +72,25 @@
 </div>
 {% include "partials/_create_task_modal.html" %}
 {% include "partials/_risk_control_modal.html" %}
+{% if open_create_modal %}
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  var modal = document.getElementById("create-modal");
+  if (modal) {
+    {% if new_platform %}
+    var select = document.getElementById("task-platform-select");
+    if (select) {
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === "{{ new_platform }}") {
+          select.selectedIndex = i;
+          break;
+        }
+      }
+    }
+    {% endif %}
+    modal.showModal();
+  }
+});
+</script>
+{% endif %}
 {% endblock %}

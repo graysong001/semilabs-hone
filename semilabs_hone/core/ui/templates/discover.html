@@ -1,18 +1,24 @@
 <!-- 平台探测器 (Task #8) -->
 {% extends "base.html" %}
-{% block title %}平台探测器{% endblock %}
+{% block title %}{% if return_to %}平台接入向导{% else %}平台管理{% endif %}{% endblock %}
 {% block content %}
+{% if return_to %}
+<a href="/" class="inline-flex items-center gap-1.5 text-sm text-brand hover:text-brand-light mb-4">
+  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 19l-7-7 7-7"/></svg>
+  返回任务大厅
+</a>
+{% endif %}
 <div class="flex justify-between items-center mb-6">
   <nav class="flex items-center gap-2 text-sm">
     <span class="text-gray-400">素材抓取</span><span class="text-gray-600">/</span>
-    <span class="text-white font-medium">平台探测器</span>
+    <span class="text-white font-medium">{% if return_to %}平台接入向导{% else %}平台管理{% endif %}</span>
   </nav>
 </div>
 
 <!-- 标题区 -->
 <div class="mb-6">
-  <h1 class="text-xl font-bold text-white">平台探测器</h1>
-  <p class="text-sm text-gray-400 mt-1">输入目标页面 URL，自动分析 API 结构和 DOM 布局</p>
+  <h1 class="text-xl font-bold text-white">{% if return_to %}平台接入向导{% else %}平台管理{% endif %}</h1>
+  <p class="text-sm text-gray-400 mt-1">{% if return_to %}输入目标页面 URL，系统将自动分析结构并生成配置{% else %}输入目标页面 URL，自动分析 API 结构和 DOM 布局{% endif %}</p>
 </div>
 
 <!-- 主体：左右两栏 -->
@@ -114,8 +120,8 @@
         <button onclick="copyYaml()" class="px-3 py-2 bg-app-hover border border-gray-600 text-gray-300 rounded-lg text-sm hover:border-gray-500 transition-colors">
           复制 YAML
         </button>
-        <button disabled class="px-3 py-2 bg-app-hover border border-gray-700 text-gray-500 rounded-lg text-sm cursor-not-allowed" title="V2 功能">
-          保存
+        <button onclick="applyYaml()" class="px-3 py-2 bg-brand hover:bg-brand-dark text-white rounded-lg text-sm font-medium transition-colors">
+          保存并应用
         </button>
       </div>
 
@@ -139,6 +145,20 @@
   "use strict";
 
   var requestId = null;
+
+  // 预填平台
+  {% if prefill_platform %}
+  var prefillPlatform = "{{ prefill_platform }}";
+  var platformSelect = document.getElementById("discover-platform");
+  if (platformSelect) {
+    for (var i = 0; i < platformSelect.options.length; i++) {
+      if (platformSelect.options[i].value === prefillPlatform) {
+        platformSelect.selectedIndex = i;
+        break;
+      }
+    }
+  }
+  {% endif %}
 
   /* ===== 开始探测 ===== */
   window.startDiscover = function() {
@@ -337,6 +357,41 @@
       btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg> 生成 platform.yaml';
       showToast("网络错误", "error");
     });
+  };
+
+  /* ===== 保存并应用 ===== */
+  window.applyYaml = function() {
+    var yamlContent = document.getElementById("yaml-output").value;
+    if (!yamlContent) {
+      showToast("请先生成 YAML", "error");
+      return;
+    }
+    var platform = document.getElementById("discover-platform").value;
+    if (platform === "__new__") {
+      platform = prompt("请输入平台名称（英文，如 weibo）");
+      if (!platform) return;
+    }
+
+    fetch("/api/discover/" + requestId + "/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ platform_name: platform, yaml_content: yamlContent })
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      if (data.ok) {
+        showToast("平台 " + data.platform + " 配置已保存并激活", "success");
+        var returnTo = "{{ return_to or '' }}";
+        if (returnTo === "create") {
+          setTimeout(function() { window.location.href = "/?openCreate=true&platform=" + encodeURIComponent(data.platform); }, 800);
+        } else if (returnTo === "tasks") {
+          setTimeout(function() { window.location.href = "/"; }, 800);
+        }
+      } else {
+        showToast(data.error || "保存失败", "error");
+      }
+    })
+    .catch(function() { showToast("网络错误", "error"); });
   };
 
   /* ===== 复制 YAML ===== */

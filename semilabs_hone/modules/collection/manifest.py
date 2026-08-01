@@ -9,6 +9,7 @@ MODULE_ID = "collection"    # IPC module 字段
 
 # 导航入口 (core/ui 外壳渲染; 模块自己声明自己的页面)
 NAV = [
+    {"label": "平台管理", "url": "/discover"},
     {"label": "账号", "url": "/accounts"},
     {"label": "任务", "url": "/tasks"},
     {"label": "素材", "url": "/posts"},
